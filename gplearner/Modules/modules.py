@@ -214,7 +214,6 @@ class gpTransformerEncoder(nn.Module):
         norm_layer=nn.LayerNorm,
         use_pos_emb=True,
         vocab_size=None,
-        use_gpc_loss=False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -267,17 +266,6 @@ class gpTransformerEncoder(nn.Module):
             self.decoder = nn.Linear(embed_dim, self.vocab_size, bias=False)
 
         self.decoder_bias = nn.Parameter(torch.zeros(n_gp_tokens))
-
-        self.use_gpc_loss = use_gpc_loss
-        if self.use_gpc_loss:
-            if self.vocab_size is None:
-                self.gpc_decoder = nn.Linear(n_gp_tokens, n_gp_tokens, bias=False)
-            else:
-                self.gpc_decoder = nn.Linear(n_gp_tokens, self.vocab_size, bias=False)
-
-            self.gpc_decoder_bias = nn.Parameter(torch.zeros(n_gp_tokens))
-
-            self.gpcW = nn.Linear(embed_dim, embed_dim)
 
         self.apply(self._init_weights)
 
@@ -349,9 +337,6 @@ class gpTransformerEncoder(nn.Module):
 
         token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
 
-        if return_gene_embeddings:
-            return x[:, 1:, :], gene_labels
-
         logits_lm = self.decoder(x)
 
         output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
@@ -359,6 +344,9 @@ class gpTransformerEncoder(nn.Module):
         if attn:
             # TO DO - OPTION TO RETURN INTERMEDIATE ATTENTION LAYERS
             output['attention'] = attn
+
+        if return_gene_embeddings:
+            output['gene_embeddings'] = x[:, 1:, :]
 
         return output
 
@@ -376,7 +364,7 @@ class gpTransformerEncoder(nn.Module):
 if __name__ == '__main__':
     print('Testing the model')
     model = gpTransformerEncoder(
-        n_gp_tokens=5, depth=1, use_gpc_loss=True, mlm_masking_prob=0.4, embed_dim=32
+        n_gp_tokens=5, depth=1, mlm_masking_prob=0.4, embed_dim=32
     )
     x = torch.randn(1, 5, 32)
     gene_labels = torch.randint(0, 10, (1, 5))
