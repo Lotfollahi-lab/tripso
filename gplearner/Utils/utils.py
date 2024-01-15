@@ -1,12 +1,151 @@
-###################################
-# For self-attention
-###################################
-
 import math
+import os
+import pickle
 import warnings
 from typing import List, Optional
 
+import numpy as np
+import pandas as pd
+import scanpy as sc
 import torch
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    adjusted_rand_score,
+    classification_report,
+    davies_bouldin_score,
+    normalized_mutual_info_score,
+    silhouette_score,
+)
+from sklearn.model_selection import train_test_split
+
+###################################
+# Generic
+###################################
+
+
+def average_nz(x):
+    # Replace zero values with NaN to facilitate ignoring them during averaging
+    x[x == 0] = float('nan')
+
+    # Calculate the mean along the last dimension (embedding_dim)
+    # Specify 'nanmean' to ignore NaN values during the mean calculation
+    x = torch.nanmean(x, dim=1)
+
+    return x
+
+
+###################################
+# Padding
+###################################
+
+
+def pad_array(arr, desired_length=2048, padding_value=-100):
+    current_length = len(arr)
+
+    if current_length >= desired_length:
+        return arr
+
+    padding_size = desired_length - current_length
+    padding = np.full(padding_size, padding_value)
+
+    return np.concatenate([arr, padding])
+
+
+###################################
+# GP wrangling
+###################################
+
+# for converting between gene formats
+# load gene token dict
+with open(
+    '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
+    'Geneformer/geneformer/token_dictionary.pkl',
+    'rb',
+) as f:
+    token_dictionary = pickle.load(f)
+
+# load gene name to ensembl dict
+with open(
+    '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
+    'Geneformer/geneformer/gene_name_id_dict.pkl',
+    'rb',
+) as f:
+    name_dictionary = pickle.load(f)
+
+
+def get_gp_tokens(
+    GP, db, do_ensembl_conversion, gene_counts_df, gene_token_path, gene_name_path
+):
+    """
+    Get genes that belong to input GP program
+    and convert them to relevant geneformer token
+
+    Inputs are:
+    GP : str
+        Gene program name
+
+    db : pd.DataFrame
+        Gene program database where GP names are columns
+
+    do_ensembl_conversion : bool
+        Whether to convert gene names to ensembl IDs before converting to tokens
+
+    gene_counts_df : pd.DataFrame
+        DataFrame containing counts of each gene in the dataset
+
+    """
+    with open(gene_token_path, 'rb') as f:
+        token_dictionary = pickle.load(f)
+
+    # load gene name to ensembl dict
+    with open(gene_name_path, 'rb') as f:
+        name_dictionary = pickle.load(f)
+
+    # Check if GP exists in the reactome columns
+    if GP not in db.columns:
+        raise ValueError(f'{GP} not found in {db}.')
+
+    # Extract the column 'GP' from the DataFrame
+    gp_column = db[GP]
+
+    # Remove missing values (NaN) from the column
+    genes = list(gp_column.dropna())
+
+    # Convert gene names to Ensembl IDs
+    if do_ensembl_conversion:
+        ensembl_ids = [name_dictionary.get(gene_name, 'Unknown') for gene_name in genes]
+    else:
+        ensembl_ids = genes
+
+    # Convert ensembl IDs to tokens:
+    gp_tokens = [
+        token_dictionary.get(gene_name, 'Unknown') for gene_name in ensembl_ids
+    ]
+
+    # Unknown values later cause issues for indexing -> remove
+    if 'Unknown' in gp_tokens:
+        print(f"In {GP}, dropped {gp_tokens.count('Unknown')} unknown genes")
+        while 'Unknown' in gp_tokens:
+            gp_tokens.remove('Unknown')
+
+    # Remove rare genes
+    rare_genes = []
+    if gene_counts_df is not None:
+        for t in list(gp_tokens):
+            if t not in gene_counts_df['token'].tolist():
+                rare_genes.append(t)
+                gp_tokens.remove(t)
+
+        print(f'In {GP}, dropped {len(rare_genes)} rare genes')
+
+    gp_tokens_set = set(gp_tokens)
+
+    return gp_tokens_set
+
+
+###################################
+# For self-attention
+###################################
 
 
 def trunc_normal_(
@@ -134,3 +273,165 @@ class mlm_mask_generator:
 
         # Return the masks for processing inside transformer
         return mask
+
+
+def do_logistic_regression(
+    adata,
+    labels_var,
+    output_directory,
+    filename,
+    variable_to_track=None,
+    hparam_to_track=None,
+):
+    """
+    Logistic regression for mutlinormial classification based on embeddings in adata.X
+    """
+    # Split training and testing data
+    train_idx, test_idx = train_test_split(
+        range(len(adata)), test_size=0.2, stratify=adata.obs[labels_var]
+    )
+
+    # Get train and test data -
+    # nb this works because adata.obs indices
+    # are initialised when we get cell embeddings
+    # not cell barcodes
+    train_data = adata.X[train_idx, :]
+    test_data = adata.X[test_idx, :]
+    train_labels = adata.obs[labels_var][train_idx]
+    test_labels = adata.obs[labels_var][test_idx]
+
+    # Train classifier
+    clf = LogisticRegression(max_iter=10_000, multi_class='multinomial').fit(
+        train_data, train_labels
+    )
+
+    # Predict on test set
+    pred_labels = clf.predict(test_data)
+
+    # Get classification report
+    report = classification_report(test_labels, pred_labels, output_dict=True)
+
+    # Prepare dataframe for output
+    # Initialize empty lists for each column
+    output_label = []
+    metrics = []
+    values = []
+
+    # Iterate through the dictionary to extract the data
+    for output_class, metrics_dict in report.items():
+        if output_class != 'accuracy':
+            for metric, value in metrics_dict.items():
+                output_label.append(output_class)
+                metrics.append(metric)
+                values.append(value)
+
+    # Save to disk
+    output_df = pd.DataFrame(
+        {'output_class': output_label, 'metric': metrics, 'value': values}
+    )
+    output_df['accuracy'] = report['accuracy']
+
+    if variable_to_track is not None:
+        for k, v in variable_to_track.items():
+            output_df[k] = v
+
+    # if hparam_to_track is not None:
+    #     # convert to list for iteration
+    #     if type(hparam_to_track) is not list:
+    #         hparam_to_track = [hparam_to_track]
+    #     for h in hparam_to_track:
+    #         output_df[h] = getattr(self, h)
+
+    output_df.to_csv(os.path.join(output_directory, f'{filename}.csv'), index=False)
+
+
+###################################
+# Downstream evaluation
+###################################
+
+
+def evaluate_clustering(
+    adata, gene_name, output_dir, metrics_filename, plot=False, plot_filename=None
+):
+    """
+    Evaluate clustering performance
+    """
+    print('Computing clusters...')
+    sc.pp.neighbors(adata, use_rep='X')
+    sc.tl.umap(adata)
+    sc.tl.leiden(adata, resolution=0.2)
+
+    # Visualize
+    if plot:
+        sc.pl.umap(adata, color='leiden', save=f'{plot_filename}_leiden.pdf')
+        sc.pl.umap(adata, color='GP', save=f'{plot_filename}_GP.pdf')
+
+    # Evaluate clustering performance
+    # Using ARS, NMI, and Silhouette score
+    print('Running cluster evaluation metrics...')
+    ari = adjusted_rand_score(adata.obs['leiden'], adata.obs['GP'])
+    nmi = normalized_mutual_info_score(adata.obs['leiden'], adata.obs['GP'])
+    sil = silhouette_score(adata.obsm['X_umap'], adata.obs['GP'])
+
+    # Save to disk
+    output_df = pd.DataFrame(
+        {
+            'gene': gene_name,
+            'metric': ['ARI', 'NMI', 'Silhouette'],
+            'value': [ari, nmi, sil],
+        }
+    )
+    output_df.to_csv(
+        f'{output_dir}/{metrics_filename}_clustering_metrics.csv', index=False
+    )
+    print('...done!')
+
+    return adata
+
+
+def evaluate_clustering_cells(adata):
+    if 'leiden' not in adata.obs.columns:
+        sc.tl.leiden(adata)
+
+    print('Running cluster evaluation metrics...')
+    ari_ct = adjusted_rand_score(adata.obs['leiden'], adata.obs['cell_type'])
+    ari_cond = adjusted_rand_score(adata.obs['leiden'], adata.obs['condition'])
+    sil = silhouette_score(adata.obsm['X_umap'], adata.obs['leiden'])
+    db = davies_bouldin_score(adata.obsm['X_umap'], adata.obs['leiden'])
+
+    output_df = pd.DataFrame(
+        {
+            'metric': [
+                'ARI_cell',
+                'ARI_env',
+                'Silhouette_leiden',
+                'Davies_Bouldain_leiden',
+            ],
+            'value': [ari_ct, ari_cond, sil, db],
+        }
+    )
+
+    return output_df
+
+
+def remove_single_data_points(adata, obs_column):
+    """
+
+    Given an anndata object,
+    drop the cells which are the only data point
+    for a given value in a given obs column
+
+    """
+    # Count occurrences of obs values
+    value_counts = adata.obs[obs_column].value_counts()
+
+    # Get values with a count of one
+    values_to_remove = value_counts[value_counts == 1].index
+
+    # Filter cells with values that have a count of one
+    cells_to_remove = adata.obs[adata.obs[obs_column].isin(values_to_remove)].index
+
+    # Create a new Anndata object without the cells to remove
+    filtered_anndata = adata[~adata.obs.index.isin(cells_to_remove)]
+
+    return filtered_anndata
