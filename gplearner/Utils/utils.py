@@ -1,3 +1,5 @@
+import argparse
+import glob
 import math
 import os
 import pickle
@@ -6,6 +8,7 @@ from typing import List, Optional
 
 import numpy as np
 import pandas as pd
+import pytorch_lightning as pl
 import scanpy as sc
 import torch
 from sklearn.linear_model import LogisticRegression
@@ -17,10 +20,32 @@ from sklearn.metrics import (
     silhouette_score,
 )
 from sklearn.model_selection import train_test_split
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 ###################################
 # Generic
 ###################################
+
+
+def find_latest_file(output_dir, tissue, supervised_tag):
+    # Define the pattern to match the desired file format
+    pattern = f'*_gp_transformer_{tissue}_{supervised_tag}*.ckpt'
+
+    # Search for files in the directory matching the pattern
+    checkpoint_dir = os.path.join(output_dir, 'checkpoints')
+    matching_files = glob.glob(os.path.join(checkpoint_dir, pattern))
+
+    # Filter for only .ckpt files and sort by modification time
+    latest_file = max(matching_files, key=os.path.getmtime) if matching_files else None
+
+    if latest_file is None:
+        raise FileNotFoundError(
+            f'No .ckpt files matching {tissue} with model type'
+            f'{supervised_tag} found in {checkpoint_dir}.'
+            'Did you train the model?'
+        )
+
+    return latest_file
 
 
 def average_nz(x):
@@ -32,6 +57,20 @@ def average_nz(x):
     x = torch.nanmean(x, dim=1)
 
     return x
+
+
+def bool_flag(s):
+    """
+    Parse boolean arguments from the command line.
+    """
+    FALSY_STRINGS = {'off', 'false', '0'}
+    TRUTHY_STRINGS = {'on', 'true', '1'}
+    if s.lower() in FALSY_STRINGS:
+        return False
+    elif s.lower() in TRUTHY_STRINGS:
+        return True
+    else:
+        raise argparse.ArgumentTypeError('invalid value for a boolean flag')
 
 
 ###################################
@@ -275,6 +314,11 @@ class mlm_mask_generator:
         return mask
 
 
+###################################
+# Downstream evaluation
+###################################
+
+
 def do_logistic_regression(
     adata,
     labels_var,
@@ -343,11 +387,6 @@ def do_logistic_regression(
     #         output_df[h] = getattr(self, h)
 
     output_df.to_csv(os.path.join(output_directory, f'{filename}.csv'), index=False)
-
-
-###################################
-# Downstream evaluation
-###################################
 
 
 def evaluate_clustering(
@@ -435,3 +474,84 @@ def remove_single_data_points(adata, obs_column):
     filtered_anndata = adata[~adata.obs.index.isin(cells_to_remove)]
 
     return filtered_anndata
+
+
+#################
+# Scheduling
+#################
+
+
+def cosine_scheduler(
+    base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0
+):
+    """
+    from https://github.com/facebookresearch/dino/blob/main/utils.py
+    """
+    warmup_schedule = np.array([])
+    warmup_iters = warmup_epochs * niter_per_ep
+    if warmup_epochs > 0:
+        warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+
+    iters = np.arange(epochs * niter_per_ep - warmup_iters)
+    schedule = final_value + 0.5 * (base_value - final_value) * (
+        1 + np.cos(np.pi * iters / len(iters))
+    )
+
+    schedule = np.concatenate((warmup_schedule, schedule))
+    assert len(schedule) == epochs * niter_per_ep
+    return schedule
+
+
+class WDScheduler(pl.Callback):
+    def __init__(self, weight_decay, weight_decay_end, epochs, data_loader):
+        super().__init__()
+        self.wd_schedule = cosine_scheduler(
+            weight_decay, weight_decay_end, epochs, len(data_loader)
+        )
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        """
+        adapted from
+        https://github.com/facebookresearch/dino/blob/main/main_dino.py#L301
+        """
+        global_iteration = trainer.global_step  # Get the global training iteration
+        wd = self.wd_schedule[global_iteration]
+
+        optimizer = trainer.optimizers[0]  # we only use one optimizer
+        for i, param_group in enumerate(optimizer.param_groups):
+            param_group['weight_decay'] = wd
+
+
+class CosineLRwithWarmUp(torch.optim.lr_scheduler._LRScheduler):
+    def __init__(
+        self, optimizer, warmup_epochs, total_epochs, eta_min=0, last_epoch=-1
+    ):
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.eta_min = eta_min
+        super().__init__(optimizer, last_epoch)
+        self.cosine_scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=total_epochs - warmup_epochs,
+            eta_min=eta_min,
+            last_epoch=last_epoch - warmup_epochs,
+        )
+
+    def get_lr(self):
+        if self.last_epoch < self.warmup_epochs:
+            return [
+                base_lr * (self.last_epoch + 1) / self.warmup_epochs
+                for base_lr in self.base_lrs
+            ]
+        else:
+            return self.cosine_scheduler.get_lr()
+
+    def step(self, epoch=None):
+        if epoch is None:
+            epoch = self.last_epoch + 1
+        self.last_epoch = epoch
+        if self.last_epoch >= self.warmup_epochs:
+            self.cosine_scheduler.step(epoch - self.warmup_epochs)
+        else:
+            for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
+                param_group['lr'] = lr
