@@ -4,16 +4,20 @@ import math
 import os
 import pickle
 import random
+import re
 import warnings
 from collections import Counter
 from itertools import combinations
 from typing import List, Optional
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import scanpy as sc
+import seaborn as sns
 import torch
+import tqdm.notebook as tqdm
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -76,6 +80,29 @@ def bool_flag(s):
         return True
     else:
         raise argparse.ArgumentTypeError('invalid value for a boolean flag')
+
+
+def load_gmt(path, rm_col_1=True):
+    """
+    Load a GMT file into a pandas dataframe.
+    """
+    # Load GOBP for gene sets
+    df = pd.read_fwf(path, sep='\t', header=None)
+    gobp = df[0].str.split('\t', expand=True)
+
+    # drop column with GP URL
+    if rm_col_1:
+        gobp = gobp.drop(gobp.columns[1], axis=1)
+
+    # wrangle so column names are gene program names
+    gobp = gobp.set_index(0)
+    gobp = gobp.T
+
+    return gobp
+
+
+def remove_leading_numbers_and_underscore(input_string):
+    return re.sub(r'^[\d_]+', '', input_string)
 
 
 ###################################
@@ -232,7 +259,7 @@ def get_gp_tokens(
     return gp_tokens_set
 
 
-def count_genes(data_module):
+def count_genes_per_cell(data_module):
     # Of all these genes, how many are present in at least min_cells cells?
     # Extract the 'input_ids' column as a list of lists
     input_ids_lists = data_module.dataset['input_ids']
@@ -681,6 +708,83 @@ def remove_single_data_points(adata, obs_column):
     filtered_anndata = adata[~adata.obs.index.isin(cells_to_remove)]
 
     return filtered_anndata
+
+
+#################
+# Scheduling
+#################
+
+
+def make_similarity_matrix(df, save_to=None):
+    # Initialize a matrix to store intersection values
+    intersection_matrix = pd.DataFrame(index=df.columns, columns=df.columns)
+
+    # Calculate intersection over length of non-null elements
+    for i in tqdm(df.columns, desc='Calculating overlap', leave=False):
+        for j in df.columns:
+            intersection = len(set(df[i].dropna()) & set(df[j].dropna()))
+            intersection_ratio = (
+                intersection / len(df[i].dropna()) if len(df[i].dropna()) > 0 else 0
+            )
+            intersection_matrix.loc[i, j] = intersection_ratio
+
+    # Set diagonal values to 0 for visualization
+    np.fill_diagonal(intersection_matrix.values, 0)
+
+    # Normalize each row to ensure they sum up to 1
+    row_sums = intersection_matrix.sum(axis=1)
+
+    n_columns = intersection_matrix.shape[1]  # Number of columns in the matrix
+    row_sums_nonzero = np.where(row_sums != 0, row_sums, 1)  # Replace zero sums with 1
+
+    # Divide each element in the matrix by its corresponding row sum (if not zero)
+    normalized_matrix = intersection_matrix.div(row_sums_nonzero, axis=0)
+
+    # Replace rows where row_sums are zero with 1/n_columns
+    row_sums_zero_mask = row_sums == 0
+    normalized_matrix[row_sums_zero_mask] = 1 / n_columns
+
+    if save_to:
+        np.save(save_to, normalized_matrix)
+
+    return normalized_matrix
+
+
+def intersection_heatmap(df, save_to=None):
+    # Initialize a matrix to store intersection values
+    intersection_matrix = pd.DataFrame(index=df.columns, columns=df.columns)
+
+    # Calculate intersection over length of non-null elements
+    for i in tqdm(df.columns, desc='Calculating overlap', leave=False):
+        for j in df.columns:
+            intersection = len(set(df[i].dropna()) & set(df[j].dropna()))
+            intersection_ratio = (
+                intersection / len(df[i].dropna()) if len(df[i].dropna()) > 0 else 0
+            )
+            intersection_matrix.loc[i, j] = intersection_ratio
+
+    # Set diagonal values to 0 for visualization
+    np.fill_diagonal(intersection_matrix.values, 0)
+
+    # Create the heatmap
+    plt.figure(figsize=(16, 15))
+    ax = sns.heatmap(
+        intersection_matrix.astype(float), annot=False, cmap='coolwarm', fmt='.2f'
+    )
+
+    # Adjust x-axis ticks to display every label
+    ax.set_xticks(np.arange(len(intersection_matrix.columns)) + 0.5)
+    ax.set_xticklabels(intersection_matrix.columns, rotation=90)
+
+    ax.set_yticks(np.arange(len(intersection_matrix.columns)) + 0.5)
+    ax.set_yticklabels(intersection_matrix.columns)  # , rotation=90)
+
+    plt.title('Overlap of selected pathways')
+    plt.tight_layout()
+    plt.show()
+
+    if save_to:
+        plt.savefig(save_to, dpi=300)
 
 
 #################

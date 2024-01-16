@@ -2,7 +2,7 @@ from .geneformer_utils import EmbExtractor  # noqa: F401
 from .utils import (  # noqa: F401
     CosineLRwithWarmUp,
     bool_flag,
-    count_genes,
+    count_genes_per_cell,
     do_balanced_downsampling,
     drop_path,
     encode_labels,
@@ -27,7 +27,7 @@ __all___ = [
     'pad_array',
     'bool_flag',
     'EmbExtractor',
-    'count_genes',
+    'count_genes_per_cell',
     'get_genes_in_multiple_gps',
     'get_genes_in_single_gp',
 ]

@@ -12,6 +12,7 @@ from datasets import concatenate_datasets, load_from_disk
 from geneformer import TranscriptomeTokenizer
 
 from ..Utils.utils import do_balanced_downsampling, encode_labels
+from .gp_curation import make_gpdb
 
 seed = 0
 np.random.seed(seed)
@@ -21,9 +22,16 @@ random.seed(seed)
 def pp_and_tokenize(
     root_dir: str,
     vars_to_keep: Union[Dict, List] = ['cell_type'],
-    subsample_by: Optional[list] = ['cell_type'],
+    subsample_by: Optional[List] = ['cell_type'],
     n_cells_per_class: int = 10_000,
     n_splits: Optional[int] = None,
+    reference_gpdb: Union[List[str], str] = '/path/to/reference/databases',
+    use_ontology: Optional[bool] = False,
+    n_cells_to_count: Optional[int] = 100,
+    threshold_value: Optional[int] = 6,
+    overlap_threshold: Optional[float] = 0.5,
+    max_gp_len: Optional[int] = 100,
+    name_tag: Optional[str] = 'Reactome',
 ):
     """
     Preprocess and tokenize data for scGPL
@@ -45,6 +53,22 @@ def pp_and_tokenize(
     n_splits : int
         If the data is split into multiple h5ad files, how many splits are there?
         This is necessary to avoid memory issues with datasets >50k cells (approx)
+
+
+    reference_gpdb : list
+        List of paths to reference databases
+    use_ontology : bool
+        Whether to use ontology information to curate reference databases
+    n_cells_to_count : int
+        How many cells to use to count genes in reference databases
+    threshold_value : int
+        threshold for number of genes which must be expressed in 50% of cells
+    overlap_threshold : float
+        Threshold for overlap between GP
+    max_gp_len : int
+        Maximum length of GP
+    name_tag : str
+        Name tag for reference databases
 
     """
     # Step 1 : Tokenize data
@@ -132,12 +156,16 @@ def pp_and_tokenize(
         print('Data already exists in', folder_path)
         print('Skipping preprocessing step')
 
-    # Count number of cells expressing each gene
-    # and save to file
-    if not os.path.exists(f'{folder_path}/gene_counts.csv'):
-        from ..Datamodules.datamodule import txDataModule
-        from ..Utils.utils import count_genes
-
-        dm = txDataModule(folder=folder_path)
-        token_df = count_genes(dm)
-        token_df.to_csv(f'{folder_path}/gene_counts.csv', index=False)
+    # Step 3 : Prepare GP databases
+    if not os.path.exists(f'{folder_path}/gpdb.csv'):
+        make_gpdb(
+            dataset_path=folder_path,
+            output_path=root_dir,
+            gp_inputs=reference_gpdb,
+            use_ontology=use_ontology,
+            n_cells_to_count=n_cells_to_count,
+            threshold_value=threshold_value,
+            overlap_threshold=overlap_threshold,
+            max_gp_len=max_gp_len,
+            name_tag=name_tag,
+        )
