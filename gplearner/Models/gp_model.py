@@ -2,8 +2,6 @@
 # Load packages
 ####################################
 
-import time
-
 import numpy as np
 
 # imports
@@ -269,9 +267,6 @@ class gpWrapper(nn.Module):
             # get token GP representation, logits for gene level prediction,
             # and gene_labels where masked genes = -100
 
-            print('emb_pad shape', emb_pad.shape)
-            print('tokens_pad shape', tokens_pad.shape)
-
             encoder_output = self.encoder[i](
                 emb_pad,
                 tokens_pad,
@@ -465,14 +460,8 @@ class gpTransformerBase(nn.Module):
         return_gene_embeddings=False,
         return_attention=False,
     ):
-        # track geneformer time
-        start = time.time()
         # input is tokenized dataset
         emb_out = self.gf_wrapper(input_dataset)
-        end = time.time()
-        print('geneformer time:', end - start)
-
-        print('finished generating geneformer embeddings')
 
         # Extract embeddings for each gene program
         output = self.multi_gp_encoder(
