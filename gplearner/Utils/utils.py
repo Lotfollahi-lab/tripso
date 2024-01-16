@@ -3,7 +3,9 @@ import glob
 import math
 import os
 import pickle
+import random
 import warnings
+from collections import Counter
 from typing import List, Optional
 
 import numpy as np
@@ -21,6 +23,8 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from torch.optim.lr_scheduler import CosineAnnealingLR
+
+random.seed(0)
 
 ###################################
 # Generic
@@ -71,6 +75,48 @@ def bool_flag(s):
         return True
     else:
         raise argparse.ArgumentTypeError('invalid value for a boolean flag')
+
+
+###################################
+# Wrangling hugging face dataset
+###################################
+
+
+def encode_labels(input_data, input_col, new_col):
+    """
+    Encode labels as integers
+    """
+    label_values = list(set(input_data[input_col]))
+    label_dict = {l: i for i, l in enumerate(label_values)}
+
+    def classes_to_ids(example):
+        example[new_col] = label_dict[example[input_col]]
+        return example
+
+    labeled_dataset = input_data.map(classes_to_ids, num_proc=16)
+
+    return labeled_dataset
+
+
+def do_balanced_downsampling(class_values, input_data, n_cells_per_class):
+    """
+    Perform balanced subsampling of input data
+
+    """
+    # Calculate class frequencies
+    class_counts = Counter(class_values)
+
+    # Perform balanced subsampling
+    balanced_samples = []
+    for label, count in class_counts.items():
+        subsample_count = min(count, n_cells_per_class)
+        class_indices = [i for i, l in enumerate(class_values) if l == label]
+        subsample_indices = random.sample(class_indices, subsample_count)
+        balanced_samples.extend(subsample_indices)
+
+    input_data = input_data.select(balanced_samples)
+
+    return input_data
 
 
 ###################################

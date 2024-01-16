@@ -117,7 +117,7 @@ def get_gp_embeddings(model, data_module, cell_mode):
                         model.available_device
                     )  # does this slow things down?
 
-            output = batch
+            output = model(batch)
             z = output['z']
 
             # Make 2D for anndata input

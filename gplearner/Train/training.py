@@ -16,11 +16,11 @@ from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
-from scgpl.dataloaders.data_module import txDataModule
 
-from gplearner.Models.gp_model import gpTransformerBase
-from gplearner.Trainers.trainer import scGPL
-from gplearner.Utils.utils import bool_flag, find_latest_file
+from ..Datamodules.datamodule import txDataModule
+from ..Models.gp_model import gpTransformerBase
+from ..Trainers.trainer import scGPL
+from ..Utils.utils import bool_flag, find_latest_file
 
 ############################################
 # Arg Parser Function
@@ -219,7 +219,7 @@ def build_parser():
 ############################################
 
 
-def main(
+def run_training(
     dataset_path,
     gpdb_path,
     gp_similarity_file,
@@ -493,4 +493,4 @@ if __name__ == '__main__':
     args_dict = vars(args)
 
     # Then run our main function with those arguments
-    sys.exit(main(**args_dict))
+    sys.exit(run_training(**args_dict))
