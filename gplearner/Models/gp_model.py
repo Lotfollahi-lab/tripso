@@ -228,7 +228,12 @@ class gpWrapper(nn.Module):
         return {gene: idx for idx, gene in enumerate(gp_tokens)}
 
     def forward(
-        self, gf_emb, input_dataset, return_attention, return_gene_embeddings=False
+        self,
+        gf_emb,
+        input_dataset,
+        return_attention,
+        return_gene_embeddings=False,
+        tokens_to_keep_list=None,
     ):
         # randomly mask genes only during training :
         if self.training:
@@ -296,8 +301,47 @@ class gpWrapper(nn.Module):
         }
 
         if return_gene_embeddings:
-            output['gene_emb_list'] = gene_emb_list
-            output['gp_labels_list'] = gp_labels_list
+            output = self.filter_gene_embeddings(output, tokens_to_keep_list)
+
+        return output
+
+    def filter_gene_embeddings(self, emb_dict, tokens_to_keep):
+        gene_emb_list = emb_dict['gene_emb_list']
+        gp_labels_list = emb_dict['gp_labels_list']
+        tokens_list = emb_dict['gene_labels_list']
+
+        x_scgpl = []
+        tokens_scgpl = []
+        gp_labels = []
+
+        # Filter to only keep genes in multiple GP
+        # loop through emb list = embeddings are grouped by GP
+        for i in range(len(gene_emb_list)):
+            x_out, tokens, _ = self.build_input_matrix(
+                gene_emb_list[i], tokens_list[i], tokens_to_keep, mode='extract_genes'
+            )
+            gp_label = gp_labels_list[i]
+
+            # remove missing values
+            x_out = x_out.reshape(x_out.shape[0] * x_out.shape[1], -1)
+            non_missing = (x_out != 0).all(dim=1)
+            x_out = x_out[non_missing]
+
+            tokens = tokens.reshape(tokens.shape[0] * tokens.shape[1])
+            tokens = tokens[tokens != -100]
+
+            gp_label = [gp_label[0] for _ in range(tokens.shape[0])]
+
+            # Add to list
+            x_scgpl.append(x_out)
+            tokens_scgpl.append(tokens)
+            gp_labels += gp_label
+
+        output = {
+            'gene_embeddings': x_scgpl,
+            'gene_labels': tokens_scgpl,
+            'gp_labels': gp_labels,
+        }
 
         return output
 

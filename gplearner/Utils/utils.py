@@ -6,6 +6,7 @@ import pickle
 import random
 import warnings
 from collections import Counter
+from itertools import combinations
 from typing import List, Optional
 
 import numpy as np
@@ -157,6 +158,9 @@ with open(
 ) as f:
     name_dictionary = pickle.load(f)
 
+ensembl_to_name = {v: k for k, v in name_dictionary.items()}
+token_to_gene = {v: k for k, v in token_dictionary.items()}
+
 
 def get_gp_tokens(
     GP, db, do_ensembl_conversion, gene_counts_df, gene_token_path, gene_name_path
@@ -226,6 +230,163 @@ def get_gp_tokens(
     gp_tokens_set = set(gp_tokens)
 
     return gp_tokens_set
+
+
+def count_genes(data_module):
+    # Of all these genes, how many are present in at least min_cells cells?
+    # Extract the 'input_ids' column as a list of lists
+    input_ids_lists = data_module.dataset['input_ids']
+
+    # Flatten the list of lists into a single list
+    flat_input_ids = [item for sublist in input_ids_lists for item in sublist]
+    # Count the occurrences of each unique value
+    value_counts = Counter(flat_input_ids)
+
+    # Create a DataFrame from the counts
+    token_df = pd.DataFrame(
+        {'token': list(value_counts.keys()), 'counts': list(value_counts.values())}
+    )
+
+    # map tokens back to ENSEMBL IDs and gene names
+    token_to_gene = {v: k for k, v in token_dictionary.items()}
+    ensembl_to_name = {v: k for k, v in name_dictionary.items()}
+
+    token_df['ensembl'] = token_df['token'].map(token_to_gene)
+    token_df['gene'] = token_df['ensembl'].map(ensembl_to_name)
+
+    token_df['total'] = len(data_module.dataset)
+    token_df['prop'] = token_df['counts'] / token_df['total']
+
+    token_df = token_df[['gene', 'ensembl', 'token', 'counts', 'prop', 'total']]
+
+    return token_df
+
+
+def find_gene_intersection(df, column_combination):
+    genes = set(df[column_combination[0]])
+    for col in column_combination[1:]:
+        genes = genes.intersection(df[col])
+    return genes
+
+
+def find_genes_in_single_gp(df):
+    all_genes = set()
+    genes_in_single_column = set()
+
+    for col in df.columns:
+        col_genes = set(df[col])
+        genes_in_single_column.update(col_genes - all_genes)
+        all_genes.update(col_genes)
+
+    return list(genes_in_single_column)
+
+
+def find_genes_in_multiple_gp(
+    gp_inputs, gpdb, token_df, do_ensembl_conversion, min_cells, downsample_to_n_genes
+):
+    """
+    Get genes that belong to more than one GP program
+    and convert them to relevant geneformer token
+    """
+
+    # Create a set to store genes present in more than one column
+    common_genes_set = set()
+
+    # Loop through different pairs of columns (2 to 5)
+    for num_columns in range(2, len(gp_inputs)):
+        column_combinations = combinations(gpdb.columns, num_columns)
+        for combination in column_combinations:
+            common_genes = find_gene_intersection(gpdb, combination)
+            common_genes_set.update(common_genes)
+
+    if np.nan in common_genes_set:
+        common_genes_set.remove(np.nan)
+
+    print(f'Union of genes present in more than one GP: {len(common_genes_set)}')
+
+    if do_ensembl_conversion:
+        # then common_genes_set is storing gene names
+        token_multi = token_df[token_df['gene'].isin(common_genes_set)]
+    else:
+        # then common_genes_set is storing ensembl IDs
+        token_multi = token_df[token_df['ensembl'].isin(common_genes_set)]
+
+    print(
+        f'Range of counts: {token_multi["counts"].min()}'
+        f'- {token_multi["counts"].max()}'
+    )
+
+    token_multi = token_multi[token_multi['counts'] > min_cells]
+    tokens_to_keep = token_multi['token'].tolist()
+
+    print(
+        'Number of genes present in more than one GP'
+        f'and at least {min_cells} cells: {len(token_multi)}'
+    )
+
+    if len(token_multi) == 0:
+        raise ValueError(
+            'No genes present in more than one GP '
+            f'are present in at least {min_cells} cells.'
+            'Please relax the threshold.'
+        )
+
+    if downsample_to_n_genes:
+        print(f'Downsampling to {downsample_to_n_genes} genes')
+        print('')
+        tokens_to_keep = random.sample(tokens_to_keep, downsample_to_n_genes)
+
+    return tokens_to_keep
+
+
+def get_genes_in_single_gp(gpdb, do_ensembl_conversion, downsample_to_n_genes):
+    genes_in_single_gp = find_genes_in_single_gp(gpdb)
+
+    if np.nan in genes_in_single_gp:
+        genes_in_single_gp.remove(np.nan)
+
+    if do_ensembl_conversion:
+        genes_in_single_gp = [
+            name_dictionary[g]
+            for g in genes_in_single_gp
+            if g in name_dictionary.keys()
+        ]
+
+    tokens_to_keep = [
+        token_dictionary[g] for g in genes_in_single_gp if g in token_dictionary.keys()
+    ]
+
+    print(len(genes_in_single_gp), 'genes present in exactly one GP')
+
+    if downsample_to_n_genes:
+        print(f'Downsampling to {downsample_to_n_genes} genes')
+        print('')
+        tokens_to_keep = random.sample(tokens_to_keep, downsample_to_n_genes)
+
+    return tokens_to_keep
+
+
+def viz_gp(GP, adata, color_by='cell_type', save_to=False):
+    """
+    Run UMAP on GP embeddings and visualize
+    """
+    gdata = adata[:, adata.var['gp_idx'].str.startswith(GP)]
+    sc.pp.neighbors(gdata, use_rep='X')
+    sc.tl.umap(gdata, min_dist=0.4)
+
+    if isinstance(color_by, str):
+        color_by = [color_by]
+
+    for c in color_by:
+        gp1 = GP.replace('/', '')
+        c1 = c.replace('/', '')
+        save_path = f'_{save_to}_{gp1}_{c1}.pdf'
+
+        if save_to:
+            sc.pl.umap(gdata, color=c, title=f'{GP}', save=save_path)
+
+        else:
+            sc.pl.umap(gdata, color=c, title=f'{GP}')
 
 
 ###################################

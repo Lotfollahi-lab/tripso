@@ -14,7 +14,11 @@ import torch.nn.functional as F
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from torch import optim
 
-from ..Utils.utils import CosineLRwithWarmUp
+from gplearner.Utils.utils import (
+    CosineLRwithWarmUp,
+    ensembl_to_name,
+    token_to_gene,
+)
 
 
 class scGPL(pl.LightningModule):
@@ -95,13 +99,18 @@ class scGPL(pl.LightningModule):
 
             setattr(self, f'{stage}_loss', [])
 
+        # For output - cells
         self.gp_cls: List[float] = []
         self.cell_metadata: Dict[str, Union[str, float]] = {}
+        # For output - genes
+        self.x_scgpl: List[float] = []
+        self.tokens_scgpl: List[float] = []
+        self.gp_labels: List[str] = []
 
         self.output_dir = output_dir
 
-    def forward(self, x):
-        out = self.model(x)
+    def forward(self, x, return_gene_embeddings=False):
+        out = self.model(x, return_gene_embeddings=return_gene_embeddings)
         return out
 
     def training_step(self, batch, batch_idx):
@@ -184,21 +193,59 @@ class scGPL(pl.LightningModule):
 
         setattr(self, f'{stage}_loss', [])
 
-    def test_step(self, batch, batch_idx):
+    def _test_step_cell(self, batch, batch_idx):
         output = self.forward(batch)
         self.gp_cls.append(output['z'])
 
-        for k, v in batch:
+        for k, v in batch.items():
             if k != 'input_ids':
                 if k in self.cell_metadata:
                     self.cell_metadata[k].append(v)
                 else:
                     self.cell_metadata[k] = [v]
 
-    def on_test_epoch_end(self):
+    def _test_step_genes(self, batch, batch_idx, tokens_to_keep):
+        output = self.forward(
+            batch, return_gene_embeddings=True, tokens_to_keep=tokens_to_keep
+        )
+
+        self.x_scgpl.append(output['x_scgpl'])
+        self.tokens_scgpl.append(output['tokens_scgpl'])
+        self.gp_labels.append(output['gp_labels'])
+
+    def test_step(
+        self,
+        batch,
+        batch_idx,
+        return_gene_embeddings=False,
+        tokens_to_keep=None,
+        gene_file_tag=None,
+    ):
+        if return_gene_embeddings:
+            self._test_step_genes(batch, batch_idx, tokens_to_keep=tokens_to_keep)
+        else:
+            self._test_step_cell(batch, batch_idx)
+
+        self.gene_file_tag = gene_file_tag
+
+    def _end_test_epoch_cell(self):
         gp_emb = torch.concat(self.gp_cls, dim=0).cpu().numpy()
 
-        meta = pd.DataFrame(self.cell_metadata)
+        # make 2D for annData input
+        gp_emb = gp_emb.reshape(
+            (-1, len(self.model.gp_inputs) * self.model.gp_latent_size)
+        )
+
+        # convert to dataframe, first sending tensors back to cpu as numpy arrays
+        meta_dict = self.cell_metadata
+        for k, v in meta_dict.items():
+            if isinstance(v[0], torch.Tensor):
+                meta_dict[k] = torch.cat(v).cpu().numpy().tolist()
+            else:
+                # flatten list of lists
+                meta_dict[k] = [item for sublist in v for item in sublist]
+
+        meta = pd.DataFrame(meta_dict)
 
         adata = sc.AnnData(X=gp_emb, obs=meta)
 
@@ -208,10 +255,13 @@ class scGPL(pl.LightningModule):
             f'{string}_{i}'
             for string in self.model.gp_inputs
             for i in range(1, self.model.gp_latent_size + 1)
-        ]  # + [f"remaining_var_{i}" for i in range(1, unexp_rep_size + 1)]
+        ]
 
         adata.var_names = gp_labels
         adata.var['gp_idx'] = adata.var_names
+
+        sc.pp.neighbors(adata, use_rep='X')
+        sc.tl.umap(adata, min_dist=0.4)
 
         adata.write_h5ad(os.path.join(self.output_dir, 'adata_gp_embedding.h5ad'))
 
@@ -219,13 +269,43 @@ class scGPL(pl.LightningModule):
         self.gp_cls = []
         self.cell_metadata = {}
 
+    def _end_test_epoch_genes(self):
+        # Concatenate tensors
+        x_scgpl = torch.cat(self.x_scgpl, dim=0).cpu().numpy()
+        tokens_scgpl = torch.cat(self.tokens_scgpl, dim=0).cpu().numpy()
+        gp_labels = torch.cat(self.gp_labels, dim=0).cpu().numpy()
+
+        # Create anndata object for clustering and visualisation
+        adata = sc.AnnData(X=x_scgpl)
+        adata.obs['token'] = list(tokens_scgpl)
+        adata.obs['GP'] = list(gp_labels)
+
+        # Map gene names for interpretability
+        adata.obs['ensembl'] = adata.obs['token'].map(token_to_gene)
+        adata.obs['gene'] = adata.obs['ensembl'].map(ensembl_to_name)
+
+        adata.write_h5ad(
+            os.path.join(
+                self.output_dir, f'adata_gene_embedding_{self.gene_file_tag}.h5ad'
+            )
+        )
+
+        # Reset
+        self.x_scgpl = []
+        self.tokens_scgpl = []
+        self.gp_labels = []
+
+    def on_test_epoch_end(self, return_gene_embeddings=False):
+        if return_gene_embeddings:
+            self._end_test_epoch_genes()
+        else:
+            self._end_test_epoch_cell()
+
     def compute_loss(self, batch):
         output = self.forward(batch)
 
         # calculate MLM loss for each GP
         gp_loss_dict = {}
-        mgm_gene_pred = {}
-        mgm_gene_true = {}
 
         for i in range(len(self.model.gp_inputs)):
             # Loss
@@ -253,17 +333,6 @@ class scGPL(pl.LightningModule):
 
             gp_loss_dict[self.model.gp_inputs[i]] = loss_i
 
-            # True/predicted tokens
-            pred_i = output['logits_lm_list'][i].argmax(-1)
-
-            # Ignore -100 masked tokens
-            mask = (
-                output['gene_labels_list'][i] != -100
-            )  # Create a mask to ignore -100 values
-
-            mgm_gene_pred[self.model.gp_inputs[i]] = pred_i[mask]
-            mgm_gene_true[self.model.gp_inputs[i]] = output['gene_labels_list'][i][mask]
-
         # compute total loss
         tensor_list = list(gp_loss_dict.values())
 
@@ -273,65 +342,7 @@ class scGPL(pl.LightningModule):
         holder = {
             'loss_per_gp': gp_loss_dict,
             'total_loss': loss,
-            # "mgm_gene_pred" : mgm_gene_pred,
-            # "mgm_gene_true" : mgm_gene_true
         }
-
-        if self.model_type == 'Unsupervised':
-            # calculate loss on GP tokens self-attention
-            batch_size = output['z'].shape[0]
-            gp_labels = (
-                torch.tensor([i for i in range(len(self.model.gp_inputs))])
-                .unsqueeze(0)
-                .expand(batch_size, len(self.model.gp_inputs))
-                .to(output['z'].device)
-            )
-            loss_cell = F.cross_entropy(
-                output['logits_gp'], gp_labels
-            )  # masked GPs are set to -100 and ignored by cross entropy loss
-            holder['loss_cell'] = loss_cell
-
-            # # accuracy for GP tokens self-attention
-            # pred_gp = output["logits_gp"].argmax(-1)
-
-            # # Ignore masked values
-            # mask = (gp_labels != -100)
-
-            # # output for accuracy calculation on epoch end
-            # holder["mgm_gp_pred"] = pred_gp[mask]
-            # holder["mgm_gp_true"] = gp_labels[mask]
-
-            # finally calculate similarity betweeen final self attention block
-            # and ground truth similarity matrix
-            # expand true similarity matrix along batch dimension:
-            if self.use_gp_similarity_loss:
-                attention_matrix = output['attention_matrix'].float()
-                true_similarity = (
-                    torch.tensor(self.model.gp_similarity_matrix)
-                    .unsqueeze(0)
-                    .expand(batch_size, -1, -1)
-                    .to(output['z'].device)
-                    .float()
-                )
-                gp_similarity_loss = F.mse_loss(attention_matrix, true_similarity)
-
-                holder['gp_similarity_loss'] = gp_similarity_loss
-                holder['gp_attn_matrix'] = attention_matrix
-
-            # calculate full loss term
-            # individual_gp_loss = loss / len(self.model.gp_inputs)
-            individual_gp_loss = loss
-
-            if self.use_gp_similarity_loss:
-                loss = (
-                    individual_gp_loss
-                    + loss_cell
-                    + self.lambda_gp_similarity * gp_similarity_loss
-                )
-            else:
-                loss = individual_gp_loss + loss_cell
-
-            holder['total_loss'] = loss
 
         return holder
 
@@ -393,3 +404,38 @@ class scGPL(pl.LightningModule):
                 'name': None,
             },
         }
+
+
+if __name__ == '__main__':
+    from gplearner.Datamodules.datamodule import txDataModule
+    from gplearner.Models.gp_model import gpTransformerBase
+
+    os.chdir(
+        '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
+        '/scgpl_reproducibility/other/debugging'
+    )
+    dataset_path = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
+    'scgpl_reproducibility/examples/dummy/data/input_dataset'
+    gpdb_path = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
+    '/scgpl_reproducibility/examples/dummy/gpdb.csv'
+
+    gpdb = pd.read_csv(gpdb_path)
+    txdata = txDataModule(folder=dataset_path, batch_size=128)
+
+    model = gpTransformerBase(
+        database=gpdb,
+        gp_latent_size=256,
+    )
+
+    gp_transformer = scGPL(
+        model,
+        model_type='Base',
+        lr=1e-3,
+        total_epochs=1,
+        output_dir='TEST',
+    )
+
+    trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+
+    print('Running test dataloader')
+    trainer.test(gp_transformer, txdata)

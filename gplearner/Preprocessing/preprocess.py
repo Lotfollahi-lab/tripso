@@ -1,7 +1,11 @@
-import argparse
 import os
 import random
-import sys
+from typing import (
+    Dict,
+    List,
+    Optional,
+    Union,
+)
 
 import numpy as np
 from datasets import concatenate_datasets, load_from_disk
@@ -14,85 +18,35 @@ np.random.seed(seed)
 random.seed(seed)
 
 
-############################################
-# Arg Parser Function
-############################################
-
-
-def build_parser():
-    """
-    Helper function to build our program's argument parser.
-
-    :returns ArgumentParser: The parser for our program's configuration.
-    """
-    parser = argparse.ArgumentParser(
-        description=('Input arguments for data preprocessing.'),
-    )
-    parser.add_argument(
-        '--root_dir',
-        '-d',
-        default=None,
-        help=('Root directory where h5ad / tokenized data is stored',),
-    )
-
-    parser.add_argument(
-        '--vars_to_keep',
-        '-v',
-        nargs='+',
-        default='cell_type',
-        help=(
-            'obs column names to keep from anndata object'
-            'these will be kept as columns in the input_dataset'
-        ),
-    )
-
-    parser.add_argument(
-        '--subsample_by',
-        '-s',
-        nargs='+',
-        default=None,
-        help=('Whether to subsample the dataset to balance across specific classes'),
-    )
-
-    parser.add_argument(
-        '--n_cells_per_class',
-        '-k',
-        default=10_000,
-        type=int,
-        help=(
-            'When doing balanced subsampling,'
-            'what is the minimum number of cells to keep in each class'
-            'If the number of cells in a category is less than this number,'
-            'keep all cells in that category'
-        ),
-    )
-
-    parser.add_argument(
-        '--n_splits',
-        '-n',
-        default=None,
-        type=int,
-        help=(
-            'If the data is split into multiple h5ad files, how many splits are there?'
-            'This is necessary to avoid memory issues with datasets >50k cells (approx)'
-        ),
-    )
-
-    return parser
-
-
-############################################
-# Main Function
-############################################
-
-
 def pp_and_tokenize(
-    root_dir,
-    vars_to_keep,
-    subsample_by,
-    n_cells_per_class,
-    n_splits,
+    root_dir: str,
+    vars_to_keep: Union[Dict, List] = ['cell_type'],
+    subsample_by: Optional[list] = ['cell_type'],
+    n_cells_per_class: int = 10_000,
+    n_splits: Optional[int] = None,
 ):
+    """
+    Preprocess and tokenize data for scGPL
+
+    Parameters:
+    -----------
+    root_dir : str
+        Root directory where h5ad / tokenized data is stored
+    vars_to_keep : list
+        obs column names to keep from anndata object
+        these will be kept as columns in the input_dataset
+    subsample_by : list
+        Whether to subsample the dataset to balance across specific classes
+    n_cells_per_class : int
+        When doing balanced subsampling,
+        what is the minimum number of cells to keep in each class
+        If the number of cells in a category is less than this number,
+        keep all cells in that category
+    n_splits : int
+        If the data is split into multiple h5ad files, how many splits are there?
+        This is necessary to avoid memory issues with datasets >50k cells (approx)
+
+    """
     # Step 1 : Tokenize data
 
     tissue = root_dir.split('/')[-1]
@@ -178,17 +132,12 @@ def pp_and_tokenize(
         print('Data already exists in', folder_path)
         print('Skipping preprocessing step')
 
+    # Count number of cells expressing each gene
+    # and save to file
+    if not os.path.exists(f'{folder_path}/gene_counts.csv'):
+        from ..Datamodules.datamodule import txDataModule
+        from ..Utils.utils import count_genes
 
-################################################################################
-# ENTRY POINT
-################################################################################
-
-if __name__ == '__main__':
-    # First generate our argument parser
-    parser = build_parser()
-    args = parser.parse_args()
-    args_dict = vars(args)
-
-    # Then run our main function with those arguments
-
-    sys.exit(pp_and_tokenize(**args_dict))
+        dm = txDataModule(folder=folder_path)
+        token_df = count_genes(dm)
+        token_df.to_csv(f'{folder_path}/gene_counts.csv', index=False)
