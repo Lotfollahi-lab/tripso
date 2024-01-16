@@ -8,7 +8,7 @@ import scanpy as sc
 import torch
 from tqdm import tqdm
 
-from .utils import do_logistic_regression
+from .Utils.utils import do_logistic_regression
 
 
 def calc_gp_stats(model, dm):
@@ -17,7 +17,6 @@ def calc_gp_stats(model, dm):
     (only using validation set to save time)
 
     """
-
     dm.setup()
 
     def count_genes_per_cell(batch, gp_tokens_list):

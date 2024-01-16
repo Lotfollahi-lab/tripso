@@ -1,9 +1,8 @@
-import argparse
 import datetime
 import os
 import random
-import sys
 import uuid
+from typing import Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -20,228 +19,90 @@ from pytorch_lightning.utilities import rank_zero_only
 from ..Datamodules.datamodule import txDataModule
 from ..Models.gp_model import gpTransformerBase
 from ..Trainers.trainer import scGPL
-from ..Utils.utils import bool_flag, find_latest_file
-
-############################################
-# Arg Parser Function
-############################################
-
-
-def build_parser():
-    """
-    Helper function to build our program's argument parser.
-
-    :returns ArgumentParser: The parser for our program's configuration.
-    """
-    parser = argparse.ArgumentParser(
-        description=('Runs experiments for our tabular architecture.'),
-    )
-    parser.add_argument(
-        '--dataset_path', '-p', default=None, help=('path to input tokenized dataset')
-    )
-
-    parser.add_argument(
-        '--gpdb_path',
-        '-g',
-        default=None,
-        help=(
-            'path to input gp database, a pandas csv where '
-            ' each column is a GP, with GP names as column names'
-            '(eventually will be output of some processing pipeline)'
-        ),
-    )
-
-    parser.add_argument(
-        '--gp_similarity_file',
-        default=None,
-        help=(
-            'path to input gp similarity file, a numpy array'
-            'where x[i,j] is the similarity between GP i and GP j'
-        ),
-    )
-
-    parser.add_argument(
-        '--output_dir',
-        '-o',
-        default=None,
-        help=(
-            "directory where we will dump our experiment's results. If not "
-            "given, then we will use the directory given as the 'results_dir' in "
-            'the config file.'
-        ),
-        metavar='path',
-    )
-
-    parser.add_argument(
-        '--mgm',
-        '-m',
-        default=0.5,
-        type=float,
-        help=('masking ratio for masked gene modeling ablation experiments'),
-    )
-
-    parser.add_argument(
-        '--n_epochs',
-        '-n',
-        default=3,
-        type=int,
-        help=('number of epochs to train for'),
-    )
-
-    parser.add_argument(
-        '--gene_format',
-        default='symbol',
-        help=('format in which gene names are stored in GPDB'),
-    )
-
-    parser.add_argument(
-        '--batch_size',
-        '-b',
-        default=32,
-        type=int,
-        help=('batch size'),
-    )
-
-    parser.add_argument(
-        '--model_type',
-        '-u',
-        default='Base',
-        help=(
-            'One of Base, Supervised or Unsupervised'
-            'Where unsupervised has an extra self-attention head'
-            'to learn a cell token based on GP tokens'
-        ),
-    )
-
-    parser.add_argument(
-        '--tissue',
-        '-t',
-        default=None,
-        type=str,
-        help=(
-            'tissue name for logging experiment in wandb'
-            'equivalent to directory name in examples subfolder'
-        ),
-    )
-
-    parser.add_argument(
-        '--n_heads',
-        default=1,
-        type=int,
-        help=('number of heads for multi-head attention'),
-    )
-
-    parser.add_argument(
-        '--n_blocks',
-        default=1,
-        type=int,
-        help=('number of transformer blocks'),
-    )
-
-    parser.add_argument(
-        '--lr_scheduler',
-        default='ReduceLROnPlateau',
-        help=(
-            'learning rate scheduler for optimizer'
-            'nb this is a string which will be converted to a class'
-        ),
-    )
-
-    parser.add_argument(
-        '--strategy',
-        default='ddp_find_unused_parameters_true',
-        help=('strategy for multi-GPU lightning trainer'),
-    )
-
-    parser.add_argument(
-        '--gp_latent_size',
-        default=64,
-        type=int,
-        help=(
-            'size of latent space for GP tokens'
-            'if <256, will use MLP to reduce dimensions of Geneformer gene embeddings'
-            'else take embeddings directly'
-        ),
-    )
-
-    parser.add_argument(
-        '--attn_dropout',
-        default=0,
-        type=float,
-        help=(
-            'Dropout for attention layers'
-            'NB only for final self attention block for now'
-        ),
-    )
-
-    parser.add_argument(
-        '--transformer_block',
-        default='PreLN',
-        help=(
-            'transformer encoder architecture'
-            'default is PreLN as in DiNO'
-            'option for ResiDual, sigma_reparam'
-        ),
-    )
-
-    parser.add_argument(
-        '--lr',
-        default=1e-3,
-        type=float,
-        help=('Model trainer learning rate'),
-    )
-
-    parser.add_argument(
-        '--resume_training',
-        default=False,
-        type=bool_flag,
-        help=("Set to 'from_checkpoint' to resume training from checkpoint"),
-    )
-
-    parser.add_argument(
-        '--gene_counts_df',
-        default=None,
-        help=('Dataframe with the counts of each gene in the dataset'),
-    )
-
-    parser.add_argument(
-        '--gp_inputs',
-        default=None,
-        nargs='+',
-        help=('Which GP from GPDB to include in model' 'if None, defaults to all GP'),
-    )
-
-    return parser
-
-
-############################################
-# Main Function
-############################################
+from ..Utils.utils import find_latest_file
 
 
 def run_training(
-    dataset_path,
-    gpdb_path,
-    gp_similarity_file,
-    output_dir,
-    batch_size,
-    mgm,
-    tissue,
-    n_heads,
-    n_blocks,
-    lr_scheduler,
-    n_epochs,
-    gene_format,
-    model_type,
-    strategy,
-    gp_latent_size,
-    attn_dropout,
-    transformer_block,
-    lr,
-    resume_training,
-    gene_counts_df,
-    gp_inputs,
+    dataset_path: str,
+    gpdb_path: str,
+    output_dir: str,
+    gp_similarity_file: Optional[str] = None,
+    batch_size: int = 32,
+    mgm: float = 0.15,
+    tissue: Optional[str] = None,
+    n_heads: int = 8,
+    n_blocks: int = 1,
+    lr_scheduler: Literal[
+        'CosineLRwithWarmUp', 'ReduceLROnPlateau'
+    ] = 'ReduceLROnPlateau',
+    n_epochs: int = 20,
+    gene_format: Literal['symbol', 'ensembl'] = 'symbol',
+    model_type: str = 'Base',
+    strategy: str = 'ddp_find_unused_parameters_true',
+    gp_latent_size: int = 256,
+    attn_dropout: float = 0.0,
+    lr: float = 1e-3,
+    resume_training: Optional[bool] = False,
+    gene_counts_df: Optional[str] = None,
+    gp_inputs: Optional[list] = None,
 ):
+    """
+    Wrapper function for training gpLearner model
+
+    Parameters
+    ----------
+    dataset_path : str
+        path to input tokenized dataset
+    gpdb_path : str
+        path to input gp database, a pandas csv where each column is a GP,
+        with GP names as column names
+    gp_similarity_file : str
+        path to input gp similarity file, a numpy array
+        where x[i,j] is the similarity between GP i and GP j
+    output_dir : str
+        directory where we will dump our experiment's results.
+        If not given, then we will use the directory given as
+        the 'results_dir' in the config file.
+    batch_size : int
+        batch size
+    mgm : float
+        masking ratio for masked gene modeling ablation experiments
+    tissue : str
+        tissue name for logging experiment in wandb equivalent to
+        directory name in examples subfolder
+    n_heads : int
+        number of heads for multi-head attention
+    n_blocks : int
+        number of transformer blocks
+    lr_scheduler : str
+        learning rate scheduler for optimizer
+        nb this is a string which will be converted to a class
+    n_epochs : int
+        number of epochs to train for
+    gene_format : str
+        format in which gene names are stored in GPDB
+    model_type : str
+        One of Base, Supervised or Unsupervised Where unsupervised has an
+        extra self-attention head to learn a cell token based on GP tokens
+    strategy : str
+        strategy for multi-GPU lightning trainer
+    gp_latent_size : int
+        size of latent space for GP tokens if <256,
+        will use MLP to reduce dimensions of Geneformer gene embeddings
+        else take embeddings directly
+    attn_dropout : float
+        Dropout for attention layers
+        NB only for final self attention block for now
+    lr : float
+        Model trainer learning rate
+    resume_training : bool
+        Set to True to resume training from checkpoint
+    gene_counts_df : str
+        Dataframe with the counts of each gene in the dataset
+    gp_inputs : list
+        Which GP from GPDB to include in model if None, defaults to all GP
+
+    """
     ##########################################
     # Setup
     ##########################################
@@ -329,7 +190,7 @@ def run_training(
                 'strategy': strategy,
                 'gp_latent_size': gp_latent_size,
                 'attn_dropout': attn_dropout,
-                'transformer_block': transformer_block,
+                'transformer_block': 'preLN',
                 'learning_rate': lr,
             }
         )
@@ -413,7 +274,7 @@ def run_training(
         )
 
     # For continuing training from checkpoint
-    if resume_training == 'from_checkpoint':
+    if resume_training:
         latest_ckpt = find_latest_file(output_dir, tissue, model_type)
         checkpoint_path = os.path.join(output_dir, latest_ckpt)
         checkpoint = torch.load(checkpoint_path)
@@ -478,19 +339,3 @@ def run_training(
     print('DONE')
     print('***')
     print(' ')
-
-    return 0
-
-
-################################################################################
-# ENTRY POINT
-################################################################################
-
-if __name__ == '__main__':
-    # First generate our argument parser
-    parser = build_parser()
-    args = parser.parse_args()
-    args_dict = vars(args)
-
-    # Then run our main function with those arguments
-    sys.exit(run_training(**args_dict))

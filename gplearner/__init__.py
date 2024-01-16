@@ -7,17 +7,19 @@ from . import (
     Metrics,
     Models,
     Modules,
-    Preprocessing,
     Trainers,
     Utils,
 )
+from .Preprocessing.preprocess import pp_and_tokenize
+from .Train.training import run_training as train
 
 __all__ = [
     'Datamodules',
     'Metrics',
     'Models',
     'Modules',
-    'Preprocessing',
+    'pp_and_tokenize',
     'Utils',
     'Trainers',
+    'train',
 ]
