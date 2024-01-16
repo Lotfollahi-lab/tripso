@@ -1,2 +1,14 @@
--e .
-
+datasets==2.14.2
+deepspeed==0.12.4
+geneformer==0.0.1
+numpy==1.23.5
+pandas==1.5.3
+pytorch_lightning==2.0.6
+scanpy==1.9.6
+scgpl.egg==info
+scikit_learn==1.3.0
+setuptools==59.6.0
+torch==2.1.1+cu118
+tqdm==4.65.0
+transformers==4.31.0
+wandb==0.16.0
