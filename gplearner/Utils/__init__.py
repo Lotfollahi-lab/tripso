@@ -1,4 +1,9 @@
 from .geneformer_utils import EmbExtractor  # noqa: F401
+from .gp_curation_utils import (  # noqa: F401
+    Ontology,
+    filter_by_size,
+    rm_overlapping_gp,
+)
 from .utils import (  # noqa: F401
     CosineLRwithWarmUp,
     bool_flag,
@@ -30,4 +35,7 @@ __all___ = [
     'count_genes_per_cell',
     'get_genes_in_multiple_gps',
     'get_genes_in_single_gp',
+    'Ontology',
+    'filter_by_size',
+    'rm_overlapping_gp',
 ]

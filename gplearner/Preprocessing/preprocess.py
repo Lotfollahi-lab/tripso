@@ -157,7 +157,7 @@ def pp_and_tokenize(
         print('Skipping preprocessing step')
 
     # Step 3 : Prepare GP databases
-    if not os.path.exists(f'{folder_path}/gpdb.csv'):
+    if not os.path.exists(f'{root_dir}/gpdb_{name_tag}.csv'):
         make_gpdb(
             dataset_path=folder_path,
             output_path=root_dir,

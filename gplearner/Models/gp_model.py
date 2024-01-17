@@ -233,7 +233,7 @@ class gpWrapper(nn.Module):
         input_dataset,
         return_attention,
         return_gene_embeddings=False,
-        tokens_to_keep_list=None,
+        tokens_to_keep=None,
     ):
         # randomly mask genes only during training :
         if self.training:
@@ -301,7 +301,7 @@ class gpWrapper(nn.Module):
         }
 
         if return_gene_embeddings:
-            output = self.filter_gene_embeddings(output, tokens_to_keep_list)
+            output = self.filter_gene_embeddings(output, tokens_to_keep)
 
         return output
 

@@ -10,6 +10,7 @@ from . import (
     Trainers,
     Utils,
 )
+from .Evaluate.downstream import gpEval
 from .Preprocessing.preprocess import pp_and_tokenize
 from .Train.training import run_training as train
 
@@ -22,4 +23,5 @@ __all__ = [
     'Utils',
     'Trainers',
     'train',
+    'gpEval',
 ]

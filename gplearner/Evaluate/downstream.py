@@ -48,8 +48,6 @@ class gpEval:
         Path to gene program similarity matrix
     output_dir : str
         Path to directory where we will save outputs
-    mgm : float
-        Masking ratio for masked gene modeling ablation experiments
     batch_size : int
         Batch size
     n_blocks : int
@@ -65,13 +63,6 @@ class gpEval:
         to learn a cell token based on GP tokens
     n_heads : int
         Number of heads for multi-head attention
-    label_to_plot : list
-        Labels to plot in UMAP
-    save_adata : bool
-        Whether to save anndata object with GP embeddings
-    calc_metrics : list
-        Evaluation metrics to calculate
-        One or multilpe of cell, gene
     gp_latent_size : int
         Size of latent space for GP tokens
         If <256, will use MLP to reduce dimensions of Geneformer gene embeddings
@@ -93,8 +84,7 @@ class gpEval:
         output_dir: str = '/path/to/output/',
         dataset_path: Optional[str] = None,
         gene_counts_df: Optional[str] = None,
-        mgm: Optional[float] = 0.15,
-        n_blocks: Optional[int] = 6,
+        n_blocks: Optional[int] = 1,
         gene_format: Optional[str] = 'symbol',
         tissue: Optional[str] = 'test',
         model_type: Optional[str] = 'Base',
@@ -126,19 +116,16 @@ class gpEval:
             do_ensembl_conversion = False
         self.do_ensembl_conversion = do_ensembl_conversion
 
-        if (
-            gene_counts_df is not None
-        ):  # TO DO : CHECK WHEN THIS IS CREATED (SEE FUN IN UTILS)
+        if gene_counts_df is not None:
             self.gene_counts_df = pd.read_csv(gene_counts_df)
 
         if model_type == 'Base':
-            model = gpTransformerBase(
+            self.model = gpTransformerBase(
                 gp_inputs=gp_inputs,
                 gene_counts_df=gene_counts_df,
                 database=gpdb,
                 do_ensembl_conversion=do_ensembl_conversion,
                 n_blocks=n_blocks,
-                mgm_mask_ratio=mgm,
                 num_heads=n_heads,
                 gp_latent_size=gp_latent_size,
             )
@@ -159,19 +146,11 @@ class gpEval:
             raise ValueError('model_type must be one of Base, or Mean')
 
         # Set up gpTransformer main module
+        self.checkpoint_path = os.path.join(output_dir, latest_ckpt)
 
-        if (
-            model_type != 'Mean'
-        ):  # no training required if just averaging geneformer embeddings
-            checkpoint_path = os.path.join(
-                output_dir, latest_ckpt
-            )  # how to get BEST / deal if multiple runs? NAME BEFORE ID SHOULD MATCH
-            self.gp_transformer = scGPL(model, model_type).load_from_checkpoint(
-                checkpoint_path
-            )
+        self.model_type = model_type
 
-        else:
-            self.gp_transformer = scGPL(model, model_type)
+        self.gp_transformer = self._init_trainer()
 
         if gp_inputs is None:
             gp_inputs = gpdb.columns
@@ -186,6 +165,33 @@ class gpEval:
         self.batch_size = batch_size
         self.gpdb = gpdb
 
+    def _init_trainer(
+        self,
+        return_gene_embeddings=False,
+        tokens_to_keep=None,
+        gene_file_tag=None,
+    ):
+        if (
+            self.model_type != 'Mean'
+        ):  # no training required if just averaging geneformer embeddings
+            gp_transformer = scGPL(
+                self.model,
+                self.model_type,
+                return_gene_embeddings=return_gene_embeddings,
+                tokens_to_keep=tokens_to_keep,
+                gene_file_tag=gene_file_tag,
+            ).load_from_checkpoint(self.checkpoint_path)
+        else:
+            gp_transformer = scGPL(
+                self.model,
+                self.model_type,
+                tokens_to_keep=tokens_to_keep,
+                gene_file_tag=gene_file_tag,
+                return_gene_embeddings=return_gene_embeddings,
+            )
+
+        return gp_transformer
+
     def generate_embeddings(self):
         """
         Generate embeddings for each cell
@@ -193,18 +199,21 @@ class gpEval:
         os.chdir(self.output_dir)
         txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
 
-        if os.path.exists('adata_gp_tokens.h5ad'):
-            print(f'{self.output_dir}/adata_gp_tokens.h5ad already exists')
+        if os.path.exists('adata_gp_embedding.h5ad'):
+            print(f'{self.output_dir}/adata_gp_embedding.h5ad already exists')
         else:
-            self.gp_transformer.test(txdata)
+            trainer = pl.Trainer(
+                max_epochs=1, devices=-1, accelerator='auto', precision=16
+            )
+            trainer.test(self.gp_transformer, txdata)
 
     def load_anndata(self):
         """
         Check that adata object exists
         """
-        if os.path.exists('adata_gp_tokens.h5ad'):
-            print(f'Loading adata from {self.output_dir}/adata_gp_tokens.h5ad')
-            adata = sc.read_h5ad('adata_gp_tokens.h5ad')
+        if os.path.exists('adata_gp_embedding.h5ad'):
+            print(f'Loading adata from {self.output_dir}/adata_gp_embedding.h5ad')
+            adata = sc.read_h5ad('adata_gp_embedding.h5ad')
         else:
             raise ValueError('No adata found. Please run generate_embeddings() first')
 
@@ -268,6 +277,10 @@ class gpEval:
                 )
 
         if cluster_latent:
+            # make cluster metrics directory
+            if not os.path.exists('cluster_metrics'):
+                os.makedirs('cluster_metrics')
+
             df = self._evaluate_clustering_cells(adata)
             df.to_csv(
                 os.path.join('cluster_metrics', 'latent_space_clustering_metrics.csv'),
@@ -331,21 +344,28 @@ class gpEval:
             if gp_features == 'concat':
                 for c in labels:
                     do_logistic_regression(
-                        adata, c, self.output_dir, f'{c}_prediction_from_concat_gp'
-                    )
-
-            elif gp_features == 'all':
-                gp_features = self.gp_inputs
-
-            for gp in gp_features:
-                for c in labels:
-                    do_logistic_regression(
-                        adata[:, adata.var['gp_idx'].str.startswith(gp)],
+                        adata,
                         c,
-                        self.output_dir,
-                        filename=f"{c}_prediction_{gp.replace('/', '_')}",
-                        variable_to_track={'GP': gp},
+                        os.path.join(self.output_dir, 'cell_metrics'),
+                        f'{c}_prediction_from_concat_gp',
                     )
+
+            else:
+                if gp_features == 'all':
+                    gp_features = self.gp_inputs
+                    gp_features = list(gp_features)
+
+                for gp in gp_features:
+                    for c in labels:
+                        do_logistic_regression(
+                            adata=adata[:, adata.var['gp_idx'].str.startswith(gp)],
+                            labels_var=c,
+                            output_directory=os.path.join(
+                                self.output_dir, 'cell_metrics'
+                            ),
+                            filename=f"{c}_prediction_{gp.replace('/', '_')}",
+                            variable_to_track={'GP': gp},
+                        )
 
         elif data_to_model == 'gene_mutliGP':
             txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
@@ -362,12 +382,15 @@ class gpEval:
                 downsample_to_n_genes=downsample_to_n_genes,
             )
 
-            self.gp_transformer.test(
-                txdata,
-                return_gp_embeddings=True,
+            gp_transformer = self._init_trainer(
+                return_gene_embeddings=False,
                 tokens_to_keep=genes_in_multiple_gp,
                 gene_file_tag='multipleGP',
             )
+            trainer = pl.Trainer(
+                max_epochs=1, devices=-1, accelerator='auto', precision=16
+            )
+            trainer.test(gp_transformer, txdata)
 
             adata = sc.read_h5ad('adata_gene_embedding_multipleGP.h5ad')
 
@@ -378,13 +401,15 @@ class gpEval:
                 do_logistic_regression(
                     tdata,
                     'GP',
-                    self.output_dir,
+                    os.path.join(self.output_dir, 'gene_metrics'),
                     filename=f'gp_prediction_from_scgpl_{g}',
                     variable_to_track={'ensembl': g, 'gene': tdata.obs['gene'].iloc[0]},
                 )
 
         elif data_to_model == 'gene_singleGP':
-            txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
+            txdata = txDataModule(
+                folder=self.dataset_path, batch_size=self.batch_size, num_workers=4
+            )
 
             if not os.path.exists('gene_metrics'):
                 os.makedirs('gene_metrics')
@@ -395,19 +420,22 @@ class gpEval:
                 downsample_to_n_genes=downsample_to_n_genes,
             )
 
-            self.gp_transformer.test(
-                txdata,
-                return_gp_embeddings=True,
+            gp_transformer = self._init_trainer(
+                return_gene_embeddings=False,
                 tokens_to_keep=genes_in_single_gp,
                 gene_file_tag='singleGP',
             )
+            trainer = pl.Trainer(
+                max_epochs=1, devices=-1, accelerator='auto', precision=16
+            )
+            trainer.test(gp_transformer, txdata)
 
             adata_scgpl = sc.read_h5ad('adata_gene_embedding_singleGP.h5ad')
 
             do_logistic_regression(
                 adata_scgpl,
                 'GP',
-                self.output_dir,
+                os.path.join(self.output_dir, 'gene_metrics'),
                 filename='gp_prediction_from_scgpl',
                 variable_to_track={'embedding_type': 'scGPL'},
             )

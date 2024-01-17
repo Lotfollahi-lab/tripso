@@ -50,7 +50,7 @@ def find_latest_file(output_dir, tissue, supervised_tag):
     if latest_file is None:
         raise FileNotFoundError(
             f'No .ckpt files matching {tissue} with model type'
-            f'{supervised_tag} found in {checkpoint_dir}.'
+            f' {supervised_tag} found in {checkpoint_dir}. '
             'Did you train the model?'
         )
 
@@ -259,10 +259,10 @@ def get_gp_tokens(
     return gp_tokens_set
 
 
-def count_genes_per_cell(data_module):
+def count_genes_per_cell(dataset):
     # Of all these genes, how many are present in at least min_cells cells?
     # Extract the 'input_ids' column as a list of lists
-    input_ids_lists = data_module.dataset['input_ids']
+    input_ids_lists = dataset['input_ids']
 
     # Flatten the list of lists into a single list
     flat_input_ids = [item for sublist in input_ids_lists for item in sublist]
@@ -281,7 +281,7 @@ def count_genes_per_cell(data_module):
     token_df['ensembl'] = token_df['token'].map(token_to_gene)
     token_df['gene'] = token_df['ensembl'].map(ensembl_to_name)
 
-    token_df['total'] = len(data_module.dataset)
+    token_df['total'] = len(dataset)
     token_df['prop'] = token_df['counts'] / token_df['total']
 
     token_df = token_df[['gene', 'ensembl', 'token', 'counts', 'prop', 'total']]

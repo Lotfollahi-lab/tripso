@@ -2,6 +2,7 @@ import os
 from typing import (
     Dict,
     List,
+    Optional,
     Union,
 )
 
@@ -61,6 +62,9 @@ class scGPL(pl.LightningModule):
         ] = optim.AdamW,
         lr_scheduler='ReduceLROnPlateau',
         total_epochs: int = 100,
+        return_gene_embeddings: bool = False,
+        tokens_to_keep: Optional[List] = None,
+        gene_file_tag: Optional[str] = None,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -109,8 +113,17 @@ class scGPL(pl.LightningModule):
 
         self.output_dir = output_dir
 
-    def forward(self, x, return_gene_embeddings=False):
-        out = self.model(x, return_gene_embeddings=return_gene_embeddings)
+        # for test step
+        self.return_gene_embeddings = (return_gene_embeddings,)
+        self.tokens_to_keep = (tokens_to_keep,)
+        self.gene_file_tag = (gene_file_tag,)
+
+    def forward(self, x, return_gene_embeddings=False, tokens_to_keep=None):
+        out = self.model(
+            x,
+            return_gene_embeddings=return_gene_embeddings,
+            tokens_to_keep=tokens_to_keep,
+        )
         return out
 
     def training_step(self, batch, batch_idx):
@@ -206,7 +219,7 @@ class scGPL(pl.LightningModule):
 
     def _test_step_genes(self, batch, batch_idx, tokens_to_keep):
         output = self.forward(
-            batch, return_gene_embeddings=True, tokens_to_keep=tokens_to_keep
+            batch, return_gene_embeddings=True, tokens_to_keep=self.tokens_to_keep
         )
 
         self.x_scgpl.append(output['x_scgpl'])
@@ -217,16 +230,11 @@ class scGPL(pl.LightningModule):
         self,
         batch,
         batch_idx,
-        return_gene_embeddings=False,
-        tokens_to_keep=None,
-        gene_file_tag=None,
     ):
-        if return_gene_embeddings:
-            self._test_step_genes(batch, batch_idx, tokens_to_keep=tokens_to_keep)
+        if self.return_gene_embeddings:
+            self._test_step_genes(batch, batch_idx, tokens_to_keep=self.tokens_to_keep)
         else:
             self._test_step_cell(batch, batch_idx)
-
-        self.gene_file_tag = gene_file_tag
 
     def _end_test_epoch_cell(self):
         gp_emb = torch.concat(self.gp_cls, dim=0).cpu().numpy()
