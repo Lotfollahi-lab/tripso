@@ -5,27 +5,19 @@
 <img src=assets/  alt="Mo's Lab logo"/>
 </p>
 
-# Mo's Lab projects: This repo contains projects for the Mo Lab at Sanger institute
+# gpleaner: learning representations of single cell gene program activity 
 
 ## 0. Introduction & Scope
 
-Introducing **lotfollibrary** 
-
-[comment]: <> (&#40;**B**ERD's **E**ducational **A**rchive for **R**esearch on)
-
-[comment]: <> (o**M**achine Learning&#41;:)
-
-As more and more biology and single cell researchers rely on digital tools and methods,
-the need for accessible and effective training in these areas becomes increasingly
-pressing. **lotfollibrary** seeks .
+Introducing **gpLearner** 
 
 
 ### Projects
 
 Currently available:
 
-- [Modules](lotfollibrary/Modules/)
-- 
+- [Modules](gplearner/Models/) : base model for learning individual GP representations
+-  
 
 ### Discussion Board
 
@@ -84,6 +76,93 @@ jupytext --to ipynb --execute <your_file>_nb.py
 
 The `--execute` flag triggers executing every cell during conversion.
 Alternatively, you can run the `_nb.py` files like every other python script.
+
+Example usage:
+```
+import gplearner
+import os
+
+# Directory paths for loading/saving 
+root_dir="/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/scgpl_reproducibility/examples/synthetic"
+data_dir=os.path.join(root_dir, "data/input_dataset")
+output_dir=os.path.join(root_dir, "output_TEST")
+
+# define model training arguments
+tissue = "synth"
+model_type = "Base"
+n_heads = 8
+mgm = 0.15
+n_epochs = 20
+batch_size = 128
+gene_format = "ensembl"
+gp_latent_size = 256
+
+# load data and preprocess
+gplearner.pp_and_tokenize(root_dir = root_dir,
+                          vars_to_keep = ["cell_type", "condition", "n_counts"],
+                          subsample_by = ["cell_type", "condition"],
+                          n_cells_per_class = 20_000,
+                          n_splits = 2,
+                          name_tag = "synth",
+                          )
+
+# train model
+gplearner.train(
+    dataset_path = data_dir,
+    gpdb_path = os.path.join(root_dir, 'gpdb_synth.csv'),
+    output_dir = output_dir,
+    batch_size = batch_size,
+    mgm = mgm,
+    tissue = tissue,
+    model_type = model_type, 
+    n_heads = n_heads,
+    n_epochs = n_epochs,
+    gene_format = gene_format,
+    gp_latent_size = gp_latent_size
+)
+
+# downstream evaluation
+gp_downstream = gplearner.gpEval(
+    dataset_path = data_dir,
+    gpdb_path = os.path.join(root_dir, 'gpdb_synth.csv'),
+    output_dir = output_dir,
+    tissue = tissue,
+    model_type = model_type,
+    n_heads = n_heads,
+    gene_format = gene_format
+)
+
+gp_downstream.generate_embeddings() 
+
+# Generate UMAP for visualization
+gp_downstream.visualize(label_to_plot = ["cell_type", "condition"]) # ouput = UMAP
+
+# Quantative metrics:
+# scanpy ranked genes and clusterability
+# (could add scIB style metrics here)
+gp_downstream.feature_analysis(label_to_plot = ["cell_type", "condition"],
+                               rank_genes=True, 
+                               cluster_latent=True
+                               )
+
+# Using <GP> cls to classify output labels
+gp_downstream.logistic_regression(data_to_model = 'cell', labels = ['cell_type', 'condition'])
+gp_downstream.logistic_regression(data_to_model = 'cell', 
+                                  labels = ['cell_type', 'condition'],
+                                  gp_features = "concat"
+                                  )
+
+# classifying gene embeddings to GP
+gp_downstream.logistic_regression(data_to_model = 'gene_singleGP')
+gp_downstream.logistic_regression(data_to_model = 'gene_mutliGP')
+
+
+# Not yet implemented:
+# gplearner.evaluate.visualize_attention()
+# gplearner.evaluate.analyze_attention()
+
+
+```
 
 ## 2. Contributing
 
