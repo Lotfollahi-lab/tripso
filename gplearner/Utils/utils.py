@@ -4,15 +4,20 @@ import math
 import os
 import pickle
 import random
+import re
 import warnings
 from collections import Counter
+from itertools import combinations
 from typing import List, Optional
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import scanpy as sc
+import seaborn as sns
 import torch
+import tqdm.notebook as tqdm
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -45,7 +50,7 @@ def find_latest_file(output_dir, tissue, supervised_tag):
     if latest_file is None:
         raise FileNotFoundError(
             f'No .ckpt files matching {tissue} with model type'
-            f'{supervised_tag} found in {checkpoint_dir}.'
+            f' {supervised_tag} found in {checkpoint_dir}. '
             'Did you train the model?'
         )
 
@@ -75,6 +80,29 @@ def bool_flag(s):
         return True
     else:
         raise argparse.ArgumentTypeError('invalid value for a boolean flag')
+
+
+def load_gmt(path, rm_col_1=True):
+    """
+    Load a GMT file into a pandas dataframe.
+    """
+    # Load GOBP for gene sets
+    df = pd.read_fwf(path, sep='\t', header=None)
+    gobp = df[0].str.split('\t', expand=True)
+
+    # drop column with GP URL
+    if rm_col_1:
+        gobp = gobp.drop(gobp.columns[1], axis=1)
+
+    # wrangle so column names are gene program names
+    gobp = gobp.set_index(0)
+    gobp = gobp.T
+
+    return gobp
+
+
+def remove_leading_numbers_and_underscore(input_string):
+    return re.sub(r'^[\d_]+', '', input_string)
 
 
 ###################################
@@ -157,6 +185,9 @@ with open(
 ) as f:
     name_dictionary = pickle.load(f)
 
+ensembl_to_name = {v: k for k, v in name_dictionary.items()}
+token_to_gene = {v: k for k, v in token_dictionary.items()}
+
 
 def get_gp_tokens(
     GP, db, do_ensembl_conversion, gene_counts_df, gene_token_path, gene_name_path
@@ -214,18 +245,176 @@ def get_gp_tokens(
             gp_tokens.remove('Unknown')
 
     # Remove rare genes
-    rare_genes = []
-    if gene_counts_df is not None:
-        for t in list(gp_tokens):
-            if t not in gene_counts_df['token'].tolist():
-                rare_genes.append(t)
-                gp_tokens.remove(t)
+    # rare_genes = []
+    # if gene_counts_df is not None:
+    #     for t in list(gp_tokens):
+    #         if t not in gene_counts_df['token'].tolist():
+    #             rare_genes.append(t)
+    #             gp_tokens.remove(t)
 
-        print(f'In {GP}, dropped {len(rare_genes)} rare genes')
+    #     print(f'In {GP}, dropped {len(rare_genes)} rare genes')
 
     gp_tokens_set = set(gp_tokens)
 
     return gp_tokens_set
+
+
+def count_genes_per_cell(dataset):
+    # Of all these genes, how many are present in at least min_cells cells?
+    # Extract the 'input_ids' column as a list of lists
+    input_ids_lists = dataset['input_ids']
+
+    # Flatten the list of lists into a single list
+    flat_input_ids = [item for sublist in input_ids_lists for item in sublist]
+    # Count the occurrences of each unique value
+    value_counts = Counter(flat_input_ids)
+
+    # Create a DataFrame from the counts
+    token_df = pd.DataFrame(
+        {'token': list(value_counts.keys()), 'counts': list(value_counts.values())}
+    )
+
+    # map tokens back to ENSEMBL IDs and gene names
+    token_to_gene = {v: k for k, v in token_dictionary.items()}
+    ensembl_to_name = {v: k for k, v in name_dictionary.items()}
+
+    token_df['ensembl'] = token_df['token'].map(token_to_gene)
+    token_df['gene'] = token_df['ensembl'].map(ensembl_to_name)
+
+    token_df['total'] = len(dataset)
+    token_df['prop'] = token_df['counts'] / token_df['total']
+
+    token_df = token_df[['gene', 'ensembl', 'token', 'counts', 'prop', 'total']]
+
+    return token_df
+
+
+def find_gene_intersection(df, column_combination):
+    genes = set(df[column_combination[0]])
+    for col in column_combination[1:]:
+        genes = genes.intersection(df[col])
+    return genes
+
+
+def find_genes_in_single_gp(df):
+    all_genes = set()
+    genes_in_single_column = set()
+
+    for col in df.columns:
+        col_genes = set(df[col])
+        genes_in_single_column.update(col_genes - all_genes)
+        all_genes.update(col_genes)
+
+    return list(genes_in_single_column)
+
+
+def find_genes_in_multiple_gp(
+    gp_inputs, gpdb, token_df, do_ensembl_conversion, min_cells, downsample_to_n_genes
+):
+    """
+    Get genes that belong to more than one GP program
+    and convert them to relevant geneformer token
+    """
+
+    # Create a set to store genes present in more than one column
+    common_genes_set = set()
+
+    # Loop through different pairs of columns (2 to 5)
+    for num_columns in range(2, len(gp_inputs)):
+        column_combinations = combinations(gpdb.columns, num_columns)
+        for combination in column_combinations:
+            common_genes = find_gene_intersection(gpdb, combination)
+            common_genes_set.update(common_genes)
+
+    if np.nan in common_genes_set:
+        common_genes_set.remove(np.nan)
+
+    print(f'Union of genes present in more than one GP: {len(common_genes_set)}')
+
+    if do_ensembl_conversion:
+        # then common_genes_set is storing gene names
+        token_multi = token_df[token_df['gene'].isin(common_genes_set)]
+    else:
+        # then common_genes_set is storing ensembl IDs
+        token_multi = token_df[token_df['ensembl'].isin(common_genes_set)]
+
+    print(
+        f'Range of counts: {token_multi["counts"].min()}'
+        f'- {token_multi["counts"].max()}'
+    )
+
+    token_multi = token_multi[token_multi['counts'] > min_cells]
+    tokens_to_keep = token_multi['token'].tolist()
+
+    print(
+        'Number of genes present in more than one GP'
+        f'and at least {min_cells} cells: {len(token_multi)}'
+    )
+
+    if len(token_multi) == 0:
+        raise ValueError(
+            'No genes present in more than one GP '
+            f'are present in at least {min_cells} cells.'
+            'Please relax the threshold.'
+        )
+
+    if downsample_to_n_genes:
+        if downsample_to_n_genes < len(tokens_to_keep):
+            print(f'Downsampling to {downsample_to_n_genes} genes')
+            print('')
+            tokens_to_keep = random.sample(tokens_to_keep, downsample_to_n_genes)
+
+    return tokens_to_keep
+
+
+def get_genes_in_single_gp(gpdb, do_ensembl_conversion, downsample_to_n_genes):
+    genes_in_single_gp = find_genes_in_single_gp(gpdb)
+
+    if np.nan in genes_in_single_gp:
+        genes_in_single_gp.remove(np.nan)
+
+    if do_ensembl_conversion:
+        genes_in_single_gp = [
+            name_dictionary[g]
+            for g in genes_in_single_gp
+            if g in name_dictionary.keys()
+        ]
+
+    tokens_to_keep = [
+        token_dictionary[g] for g in genes_in_single_gp if g in token_dictionary.keys()
+    ]
+
+    print(len(genes_in_single_gp), 'genes present in exactly one GP')
+
+    if downsample_to_n_genes:
+        print(f'Downsampling to {downsample_to_n_genes} genes')
+        print('')
+        tokens_to_keep = random.sample(tokens_to_keep, downsample_to_n_genes)
+
+    return tokens_to_keep
+
+
+def viz_gp(GP, adata, color_by='cell_type', save_to=False):
+    """
+    Run UMAP on GP embeddings and visualize
+    """
+    gdata = adata[:, adata.var['gp_idx'].str.startswith(GP)]
+    sc.pp.neighbors(gdata, use_rep='X')
+    sc.tl.umap(gdata, min_dist=0.4)
+
+    if isinstance(color_by, str):
+        color_by = [color_by]
+
+    for c in color_by:
+        gp1 = GP.replace('/', '')
+        c1 = c.replace('/', '')
+        save_path = f'_{save_to}_{gp1}_{c1}.pdf'
+
+        if save_to:
+            sc.pl.umap(gdata, color=c, title=f'{GP}', save=save_path)
+
+        else:
+            sc.pl.umap(gdata, color=c, title=f'{GP}')
 
 
 ###################################
@@ -520,6 +709,83 @@ def remove_single_data_points(adata, obs_column):
     filtered_anndata = adata[~adata.obs.index.isin(cells_to_remove)]
 
     return filtered_anndata
+
+
+#################
+# Scheduling
+#################
+
+
+def make_similarity_matrix(df, save_to=None):
+    # Initialize a matrix to store intersection values
+    intersection_matrix = pd.DataFrame(index=df.columns, columns=df.columns)
+
+    # Calculate intersection over length of non-null elements
+    for i in tqdm(df.columns, desc='Calculating overlap', leave=False):
+        for j in df.columns:
+            intersection = len(set(df[i].dropna()) & set(df[j].dropna()))
+            intersection_ratio = (
+                intersection / len(df[i].dropna()) if len(df[i].dropna()) > 0 else 0
+            )
+            intersection_matrix.loc[i, j] = intersection_ratio
+
+    # Set diagonal values to 0 for visualization
+    np.fill_diagonal(intersection_matrix.values, 0)
+
+    # Normalize each row to ensure they sum up to 1
+    row_sums = intersection_matrix.sum(axis=1)
+
+    n_columns = intersection_matrix.shape[1]  # Number of columns in the matrix
+    row_sums_nonzero = np.where(row_sums != 0, row_sums, 1)  # Replace zero sums with 1
+
+    # Divide each element in the matrix by its corresponding row sum (if not zero)
+    normalized_matrix = intersection_matrix.div(row_sums_nonzero, axis=0)
+
+    # Replace rows where row_sums are zero with 1/n_columns
+    row_sums_zero_mask = row_sums == 0
+    normalized_matrix[row_sums_zero_mask] = 1 / n_columns
+
+    if save_to:
+        np.save(save_to, normalized_matrix)
+
+    return normalized_matrix
+
+
+def intersection_heatmap(df, save_to=None):
+    # Initialize a matrix to store intersection values
+    intersection_matrix = pd.DataFrame(index=df.columns, columns=df.columns)
+
+    # Calculate intersection over length of non-null elements
+    for i in tqdm(df.columns, desc='Calculating overlap', leave=False):
+        for j in df.columns:
+            intersection = len(set(df[i].dropna()) & set(df[j].dropna()))
+            intersection_ratio = (
+                intersection / len(df[i].dropna()) if len(df[i].dropna()) > 0 else 0
+            )
+            intersection_matrix.loc[i, j] = intersection_ratio
+
+    # Set diagonal values to 0 for visualization
+    np.fill_diagonal(intersection_matrix.values, 0)
+
+    # Create the heatmap
+    plt.figure(figsize=(16, 15))
+    ax = sns.heatmap(
+        intersection_matrix.astype(float), annot=False, cmap='coolwarm', fmt='.2f'
+    )
+
+    # Adjust x-axis ticks to display every label
+    ax.set_xticks(np.arange(len(intersection_matrix.columns)) + 0.5)
+    ax.set_xticklabels(intersection_matrix.columns, rotation=90)
+
+    ax.set_yticks(np.arange(len(intersection_matrix.columns)) + 0.5)
+    ax.set_yticklabels(intersection_matrix.columns)  # , rotation=90)
+
+    plt.title('Overlap of selected pathways')
+    plt.tight_layout()
+    plt.show()
+
+    if save_to:
+        plt.savefig(save_to, dpi=300)
 
 
 #################
