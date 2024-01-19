@@ -1,3 +1,17 @@
-from .gp_model import gpTransformerBase
+from .gp_model import (
+    AverageNonZero,
+    gfBaseline,
+    gfWrapper,
+    gpAverager,
+    gpTransformerBase,
+    gpWrapper,
+)
 
-__all__ = ['gpTransformerBase']
+__all__ = [
+    'gpTransformerBase',
+    'AverageNonZero',
+    'gfBaseline',
+    'gpAverager',
+    'gpWrapper',
+    'gfWrapper',
+]

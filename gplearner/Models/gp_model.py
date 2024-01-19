@@ -276,7 +276,7 @@ class gpWrapper(nn.Module):
 
             encoder_output = self.encoder[i](
                 emb_pad,
-                tokens_pad,
+                gene_labels=tokens_pad,
                 inference=inference,
                 return_attention=return_attention,
                 return_gene_embeddings=return_gene_embeddings,
@@ -372,7 +372,7 @@ class gpTransformerBase(nn.Module):
         gene_counts_df=None,
         # add_remaining_var = False,
         do_ensembl_conversion=True,
-        gp_latent_size=64,
+        gp_latent_size=256,
         num_heads=1,
         n_blocks=1,
         mgm_mask_ratio=0.5,
@@ -517,6 +517,68 @@ class gpTransformerBase(nn.Module):
         return output
 
 
+####################################
+# Baseline : averaging GP embeddings
+####################################
+
+
+class AverageNonZero(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, **kwargs):
+        # extra argument only for compatibility with gpTransformerEncoder
+        # Replace zero values with NaN to facilitate ignoring them during averaging
+        x[x == 0] = float('nan')
+
+        # Calculate the mean along the last dimension (embedding_dim)
+        # Specify 'nanmean' to ignore NaN values during the mean calculation
+        x = torch.nanmean(x, dim=1)
+
+        # Replace NaN values with 0
+        x[torch.isnan(x)] = 0
+
+        # print count of nan values to check
+        output = {'cls': x, 'logits_lm': [], 'gene_labels': []}
+
+        return output
+
+
+class gpAverager(gpWrapper):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.encoder = nn.ModuleList(
+            [AverageNonZero() for i in range(len(self.gp_inputs))]
+        )
+
+
+class gfBaseline(gpTransformerBase):
+    def __init__(
+        self,
+        gene_counts_df,
+        num_heads,
+        gene_token_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
+        '/Geneformer/geneformer/token_dictionary.pkl',
+        gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
+        '/Geneformer/geneformer/gene_name_id_dict.pkl',
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.multi_gp_encoder = gpAverager(
+            database=self.gpdb,
+            do_ensembl_conversion=self.do_ensembl_conversion,
+            gene_counts_df=gene_counts_df,
+            gp_latent_size=self.gp_latent_size,
+            n_blocks=self.n_blocks,
+            num_heads=num_heads,
+            mgm_mask_ratio=self.mgm_mask_ratio,
+            gene_token_path=gene_token_path,
+            gene_name_path=gene_name_path,
+            gp_inputs=self.gp_inputs,
+        )
+
+
 if __name__ == '__main__':
     from scgpl.dataloaders.data_module import txDataModule
 
@@ -538,7 +600,7 @@ if __name__ == '__main__':
         'scgpl_reproducibility/examples/pbmc_ifn/ifn_db_3gp.csv'
     )
 
-    model = gpTransformerBase(
+    model = gfBaseline(
         database=gpdb,
         attn_dropout=0,
         gene_counts_df=None,
