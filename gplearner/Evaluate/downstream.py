@@ -190,6 +190,11 @@ class gpEval:
                 return_gene_embeddings=return_gene_embeddings,
             )
 
+        # reset attributes overwritten by loading from checkpoint
+        gp_transformer.return_gene_embeddings = return_gene_embeddings
+        gp_transformer.tokens_to_keep = tokens_to_keep
+        gp_transformer.gene_file_tag = gene_file_tag
+
         return gp_transformer
 
     def generate_embeddings(self):
@@ -383,7 +388,7 @@ class gpEval:
             )
 
             gp_transformer = self._init_trainer(
-                return_gene_embeddings=False,
+                return_gene_embeddings=True,
                 tokens_to_keep=genes_in_multiple_gp,
                 gene_file_tag='multipleGP',
             )
@@ -421,16 +426,20 @@ class gpEval:
             )
 
             gp_transformer = self._init_trainer(
-                return_gene_embeddings=False,
+                return_gene_embeddings=True,
                 tokens_to_keep=genes_in_single_gp,
                 gene_file_tag='singleGP',
             )
+
             trainer = pl.Trainer(
                 max_epochs=1, devices=-1, accelerator='auto', precision=16
             )
+
             trainer.test(gp_transformer, txdata)
 
-            adata_scgpl = sc.read_h5ad('adata_gene_embedding_singleGP.h5ad')
+            adata_scgpl = sc.read_h5ad(
+                os.path.join(self.output_dir, 'adata_gene_embedding_singleGP.h5ad')
+            )
 
             do_logistic_regression(
                 adata_scgpl,

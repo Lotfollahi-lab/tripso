@@ -1,6 +1,6 @@
 from tqdm.notebook import tqdm
 
-from .Utils.utils import remove_leading_numbers_and_underscore
+from .utils import remove_leading_numbers_and_underscore
 
 ####################################
 # Building ontology DAG

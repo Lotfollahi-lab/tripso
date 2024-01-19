@@ -245,14 +245,14 @@ def get_gp_tokens(
             gp_tokens.remove('Unknown')
 
     # Remove rare genes
-    rare_genes = []
-    if gene_counts_df is not None:
-        for t in list(gp_tokens):
-            if t not in gene_counts_df['token'].tolist():
-                rare_genes.append(t)
-                gp_tokens.remove(t)
+    # rare_genes = []
+    # if gene_counts_df is not None:
+    #     for t in list(gp_tokens):
+    #         if t not in gene_counts_df['token'].tolist():
+    #             rare_genes.append(t)
+    #             gp_tokens.remove(t)
 
-        print(f'In {GP}, dropped {len(rare_genes)} rare genes')
+    #     print(f'In {GP}, dropped {len(rare_genes)} rare genes')
 
     gp_tokens_set = set(gp_tokens)
 
@@ -359,9 +359,10 @@ def find_genes_in_multiple_gp(
         )
 
     if downsample_to_n_genes:
-        print(f'Downsampling to {downsample_to_n_genes} genes')
-        print('')
-        tokens_to_keep = random.sample(tokens_to_keep, downsample_to_n_genes)
+        if downsample_to_n_genes < len(tokens_to_keep):
+            print(f'Downsampling to {downsample_to_n_genes} genes')
+            print('')
+            tokens_to_keep = random.sample(tokens_to_keep, downsample_to_n_genes)
 
     return tokens_to_keep
 

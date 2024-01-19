@@ -6,6 +6,7 @@ from typing import (
     Union,
 )
 
+import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import scanpy as sc
@@ -114,15 +115,15 @@ class scGPL(pl.LightningModule):
         self.output_dir = output_dir
 
         # for test step
-        self.return_gene_embeddings = (return_gene_embeddings,)
-        self.tokens_to_keep = (tokens_to_keep,)
-        self.gene_file_tag = (gene_file_tag,)
+        self.return_gene_embeddings = return_gene_embeddings
+        self.tokens_to_keep = tokens_to_keep
+        self.gene_file_tag = gene_file_tag
 
-    def forward(self, x, return_gene_embeddings=False, tokens_to_keep=None):
+    def forward(self, x):
         out = self.model(
             x,
-            return_gene_embeddings=return_gene_embeddings,
-            tokens_to_keep=tokens_to_keep,
+            return_gene_embeddings=self.return_gene_embeddings,
+            tokens_to_keep=self.tokens_to_keep,
         )
         return out
 
@@ -217,14 +218,12 @@ class scGPL(pl.LightningModule):
                 else:
                     self.cell_metadata[k] = [v]
 
-    def _test_step_genes(self, batch, batch_idx, tokens_to_keep):
-        output = self.forward(
-            batch, return_gene_embeddings=True, tokens_to_keep=self.tokens_to_keep
-        )
+    def _test_step_genes(self, batch, batch_idx):
+        output = self.forward(batch)
 
-        self.x_scgpl.append(output['x_scgpl'])
-        self.tokens_scgpl.append(output['tokens_scgpl'])
-        self.gp_labels.append(output['gp_labels'])
+        self.x_scgpl += output['x_scgpl']
+        self.tokens_scgpl += output['tokens_scgpl']
+        self.gp_labels += output['gp_labels']
 
     def test_step(
         self,
@@ -232,7 +231,7 @@ class scGPL(pl.LightningModule):
         batch_idx,
     ):
         if self.return_gene_embeddings:
-            self._test_step_genes(batch, batch_idx, tokens_to_keep=self.tokens_to_keep)
+            self._test_step_genes(batch, batch_idx)
         else:
             self._test_step_cell(batch, batch_idx)
 
@@ -280,8 +279,16 @@ class scGPL(pl.LightningModule):
     def _end_test_epoch_genes(self):
         # Concatenate tensors
         x_scgpl = torch.cat(self.x_scgpl, dim=0).cpu().numpy()
+        print('x_shape', x_scgpl.shape)
         tokens_scgpl = torch.cat(self.tokens_scgpl, dim=0).cpu().numpy()
-        gp_labels = torch.cat(self.gp_labels, dim=0).cpu().numpy()
+        print('tokens_shape', tokens_scgpl.shape)
+
+        # flatten list
+        gp_labels = np.array(
+            [item for sublist in self.gp_labels for item in sublist]
+        ).flatten()
+        # gp_labels = [item for sublist in self.gp_labels for item in sublist]
+        # gp_labels = torch.cat(self.gp_labels, dim=0).cpu().numpy()
 
         # Create anndata object for clustering and visualisation
         adata = sc.AnnData(X=x_scgpl)
@@ -291,6 +298,9 @@ class scGPL(pl.LightningModule):
         # Map gene names for interpretability
         adata.obs['ensembl'] = adata.obs['token'].map(token_to_gene)
         adata.obs['gene'] = adata.obs['ensembl'].map(ensembl_to_name)
+
+        print('Writing anndata file to disk at')
+        print(f'{self.output_dir}/adata_gene_embedding_{self.gene_file_tag}.h5ad')
 
         adata.write_h5ad(
             os.path.join(
@@ -303,8 +313,8 @@ class scGPL(pl.LightningModule):
         self.tokens_scgpl = []
         self.gp_labels = []
 
-    def on_test_epoch_end(self, return_gene_embeddings=False):
-        if return_gene_embeddings:
+    def on_test_epoch_end(self):
+        if self.return_gene_embeddings:
             self._end_test_epoch_genes()
         else:
             self._end_test_epoch_cell()

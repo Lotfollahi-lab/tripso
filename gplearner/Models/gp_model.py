@@ -115,9 +115,7 @@ class gpWrapper(nn.Module):
             ]
         )
 
-    def build_input_matrix(
-        self, gf, input_ids, gpi_tokens_list, gp_index, mode='full_model'
-    ):
+    def build_input_matrix(self, gf, input_ids, gpi_tokens_list, mode='full_model'):
         """
         Build a matrix of shape (n_cells, n_gp_tokens, 256)
         where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
@@ -149,20 +147,22 @@ class gpWrapper(nn.Module):
         # Find max value for padding
         if mode == 'full_model':
             max_value = 2048
-        else:
-            max_value = 0
+
             for i in range(len(input_ids)):
-                if len(input_ids[i]) > max_value:
-                    max_value = len(input_ids[i])
+                if len(input_ids[i]) == max_value:
+                    holder.append(input_ids[i].cpu().numpy())
+                else:
+                    padded = pad_array(
+                        input_ids[i].cpu().numpy(), desired_length=max_value
+                    )
+                    holder.append(padded)
 
-        for i in range(len(input_ids)):
-            if len(input_ids[i]) == max_value:
-                holder.append(input_ids[i].cpu().numpy())
-            else:
-                padded = pad_array(input_ids[i].cpu().numpy(), desired_length=max_value)
-                holder.append(padded)
+        else:
+            # when we are filtering gene embeddings,
+            # outputs are already padded to same length
+            holder = input_ids.cpu().numpy()
 
-        # Build an array (n_cells, 2048) with token IDs at each position
+        # Build an array (n_cells, n_genes) with token IDs at each position
         tokens_arr = np.array(holder)
 
         # binary mask (h, i, k)
@@ -245,6 +245,7 @@ class gpWrapper(nn.Module):
         gp_token_list = []
         logits_lm_list = []
         gene_labels_list = []
+        gene_original_labels_list = []
 
         gene_emb_list = []
         gp_labels_list = []
@@ -255,10 +256,11 @@ class gpWrapper(nn.Module):
                 gf_emb,  # geneformer embeddings
                 input_dataset['input_ids'],
                 getattr(self, f'gp{i}_tokens'),
-                gp_index=i,
             )
 
             # Encode tokens for encoding
+            tokens_pad_unencoded = tokens_pad
+
             tokens_pad = (
                 tokens_pad.cpu()
                 .apply_(
@@ -286,6 +288,7 @@ class gpWrapper(nn.Module):
 
             if return_gene_embeddings:
                 gene_emb_list.append(encoder_output['gene_embeddings'])
+                gene_original_labels_list.append(tokens_pad_unencoded)
                 gp_labels_list.append(
                     [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
                 )
@@ -298,6 +301,9 @@ class gpWrapper(nn.Module):
             'z': z,
             'logits_lm_list': logits_lm_list,
             'gene_labels_list': gene_labels_list,
+            'gene_emb_list': gene_emb_list,
+            'gp_labels_list': gp_labels_list,
+            'gene_original_labels_list': gene_original_labels_list,
         }
 
         if return_gene_embeddings:
@@ -308,7 +314,7 @@ class gpWrapper(nn.Module):
     def filter_gene_embeddings(self, emb_dict, tokens_to_keep):
         gene_emb_list = emb_dict['gene_emb_list']
         gp_labels_list = emb_dict['gp_labels_list']
-        tokens_list = emb_dict['gene_labels_list']
+        tokens_list = emb_dict['gene_original_labels_list']
 
         x_scgpl = []
         tokens_scgpl = []
@@ -320,7 +326,8 @@ class gpWrapper(nn.Module):
             x_out, tokens, _ = self.build_input_matrix(
                 gene_emb_list[i], tokens_list[i], tokens_to_keep, mode='extract_genes'
             )
-            gp_label = gp_labels_list[i]
+
+            gp_label_i = gp_labels_list[i]
 
             # remove missing values
             x_out = x_out.reshape(x_out.shape[0] * x_out.shape[1], -1)
@@ -330,16 +337,16 @@ class gpWrapper(nn.Module):
             tokens = tokens.reshape(tokens.shape[0] * tokens.shape[1])
             tokens = tokens[tokens != -100]
 
-            gp_label = [gp_label[0] for _ in range(tokens.shape[0])]
+            gp_label_out = [gp_label_i[0] for _ in range(tokens.shape[0])]
 
             # Add to list
             x_scgpl.append(x_out)
             tokens_scgpl.append(tokens)
-            gp_labels += gp_label
+            gp_labels.append(gp_label_out)
 
         output = {
-            'gene_embeddings': x_scgpl,
-            'gene_labels': tokens_scgpl,
+            'x_scgpl': x_scgpl,
+            'tokens_scgpl': tokens_scgpl,
             'gp_labels': gp_labels,
         }
 
@@ -427,16 +434,6 @@ class gpTransformerBase(nn.Module):
         """
         super().__init__()
 
-        # Not best practice but training doesn't depend on it
-        # and only use multiGPU for training?
-        # Check if CUDA (GPU) is available
-        if torch.cuda.is_available():
-            # Create a CUDA device object
-            self.available_device = torch.device('cuda')
-        else:
-            # If CUDA is not available, use CPU
-            self.available_device = torch.device('cpu')
-
         # Initialize geneformer model for getting geneformer embeddings
         self.gf_wrapper = gfWrapper(
             geneformer_model=geneformer_model, gf_layer_to_quant=gf_layer_to_quant
@@ -503,6 +500,7 @@ class gpTransformerBase(nn.Module):
         input_dataset,
         return_gene_embeddings=False,
         return_attention=False,
+        tokens_to_keep=None,
     ):
         # input is tokenized dataset
         emb_out = self.gf_wrapper(input_dataset)
@@ -513,6 +511,7 @@ class gpTransformerBase(nn.Module):
             input_dataset,
             return_gene_embeddings=return_gene_embeddings,
             return_attention=return_attention,
+            tokens_to_keep=tokens_to_keep,
         )
 
         return output
