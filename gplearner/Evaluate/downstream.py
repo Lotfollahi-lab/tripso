@@ -18,7 +18,7 @@ from sklearn.metrics import (
 )
 
 from ..Datamodules.datamodule import txDataModule
-from ..Models.gp_model import gpTransformerBase  # , gfBaseline
+from ..Models.gp_model import gfBaseline, gpTransformerBase
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import (
     do_logistic_regression,
@@ -107,6 +107,7 @@ class gpEval:
         if model_type != 'Mean':
             latest_ckpt = find_latest_file(output_dir, tissue, model_type)
             print('Latest .ckpt file:', latest_ckpt)
+            self.checkpoint_path = os.path.join(output_dir, latest_ckpt)
 
         gpdb = pd.read_csv(gpdb_path)
 
@@ -130,27 +131,21 @@ class gpEval:
                 gp_latent_size=gp_latent_size,
             )
 
-        # elif model_type == 'Mean':
-        #     model = gfBaseline(
-        #         gp_inputs=gpdb.columns,
-        #         database=gpdb,
-        #         do_ensembl_conversion=do_ensembl_conversion,
-        #         # dummy variables to avoid errors if no defaults
-        #         # but we won't use transformer blocks
-        #         n_blocks=1,
-        #         mgm_mask_ratio=1,
-        #         num_heads=1,
-        #     )
+        elif model_type == 'Mean':
+            self.model = gfBaseline(
+                gp_inputs=gpdb.columns,
+                database=gpdb,
+                do_ensembl_conversion=do_ensembl_conversion,
+                gene_counts_df=gene_counts_df,
+                # dummy variables to avoid errors if no defaults
+                # but we won't use transformer blocks
+                n_blocks=1,
+                mgm_mask_ratio=1,
+                num_heads=1,
+            )
 
         else:
             raise ValueError('model_type must be one of Base, or Mean')
-
-        # Set up gpTransformer main module
-        self.checkpoint_path = os.path.join(output_dir, latest_ckpt)
-
-        self.model_type = model_type
-
-        self.gp_transformer = self._init_trainer()
 
         if gp_inputs is None:
             gp_inputs = gpdb.columns
@@ -164,6 +159,10 @@ class gpEval:
         self.dataset_path = dataset_path
         self.batch_size = batch_size
         self.gpdb = gpdb
+
+        # Set up gpTransformer lightning module
+        self.model_type = model_type
+        self.gp_transformer = self._init_trainer()
 
     def _init_trainer(
         self,
@@ -188,6 +187,7 @@ class gpEval:
                 tokens_to_keep=tokens_to_keep,
                 gene_file_tag=gene_file_tag,
                 return_gene_embeddings=return_gene_embeddings,
+                output_dir=self.output_dir,
             )
 
         # reset attributes overwritten by loading from checkpoint
@@ -202,6 +202,7 @@ class gpEval:
         Generate embeddings for each cell
         """
         os.chdir(self.output_dir)
+        print('in generate_embeddings() self.output_dir', self.output_dir)
         txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
 
         if os.path.exists('adata_gp_embedding.h5ad'):
