@@ -72,6 +72,8 @@ class gpEval:
         if None, defaults to all GP
     gene_counts_df : str
         Dataframe with the counts of each gene in the dataset
+    add_remaining_var : bool
+        Whether to initalize new transformer block covering non GP genes
 
     Returns
     -------
@@ -92,6 +94,7 @@ class gpEval:
         gp_latent_size: Optional[int] = 256,
         gp_inputs: Optional[list] = None,
         batch_size: Optional[int] = 128,
+        add_remaining_var: Optional[bool] = False,
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -129,6 +132,7 @@ class gpEval:
                 n_blocks=n_blocks,
                 num_heads=n_heads,
                 gp_latent_size=gp_latent_size,
+                add_remaining_var=add_remaining_var,
             )
 
         elif model_type == 'Mean':
@@ -142,6 +146,7 @@ class gpEval:
                 n_blocks=1,
                 mgm_mask_ratio=1,
                 num_heads=1,
+                add_remaining_var=add_remaining_var,
             )
 
         else:

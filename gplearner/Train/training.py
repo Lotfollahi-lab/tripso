@@ -45,6 +45,7 @@ def run_training(
     resume_training: Optional[bool] = False,
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
+    add_remaining_var: Optional[bool] = False,
 ):
     """
     Wrapper function for training gpLearner model
@@ -101,6 +102,8 @@ def run_training(
         Dataframe with the counts of each gene in the dataset
     gp_inputs : list
         Which GP from GPDB to include in model if None, defaults to all GP
+    add_remaining_var : bool
+        whether to intialize a new transformer block covering non GP genes
 
     """
     ##########################################
@@ -241,6 +244,7 @@ def run_training(
             gp_latent_size=gp_latent_size,
             attn_dropout=attn_dropout,
             gp_inputs=gp_inputs,
+            add_remaining_var=add_remaining_var,
         )
 
     else:

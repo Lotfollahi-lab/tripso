@@ -65,6 +65,7 @@ class gpWrapper(nn.Module):
         n_blocks,
         num_heads,
         mgm_mask_ratio,
+        add_remaining_var,
     ):
         super().__init__()
 
@@ -91,6 +92,7 @@ class gpWrapper(nn.Module):
                     gene_name_path,
                 ),
             )
+
             print('Number of genes in GP', gpi, len(getattr(self, f'gp{i}_tokens')))
             self.all_gp_tokens.update(getattr(self, f'gp{i}_tokens'))
 
@@ -115,7 +117,47 @@ class gpWrapper(nn.Module):
             ]
         )
 
-    def build_input_matrix(self, gf, input_ids, gpi_tokens_list, mode='full_model'):
+        self.add_remaining_var = add_remaining_var
+        if self.add_remaining_var:
+            n_gp = len(self.gp_inputs)
+            gp_inputs.append('remaining_var')
+            self.gp_inputs = gp_inputs
+
+            # find non GP genes
+            if gene_counts_df is None:
+                raise ValueError(
+                    'Please provide a dataframe'
+                    'with counts of gene occurrences in dataset'
+                )
+
+            non_gp_tokens = set(gene_counts_df['token'].tolist()) - self.all_gp_tokens
+
+            setattr(self, f'gp{n_gp}_tokens', non_gp_tokens)
+            setattr(
+                self, f'gp{n_gp}_tokens_encoded', self.encode_gp_tokens(non_gp_tokens)
+            )
+
+            self.encoder.append(
+                gpTransformerEncoder(
+                    n_gp_tokens=100,  # we only keep top 100 genes
+                    vocab_size=len(non_gp_tokens),
+                    embed_dim=self.gp_latent_size,
+                    depth=self.n_blocks,
+                    num_heads=num_heads,
+                    mlm_masking_prob=self.mgm_mask_ratio,
+                )
+            )
+
+        for i in range(len(self.gp_inputs)):
+            print(
+                'Number of genes in GP',
+                self.gp_inputs[i],
+                len(getattr(self, f'gp{i}_tokens')),
+            )
+
+    def build_input_matrix(
+        self, gf, input_ids, gpi_tokens_list, gp_idx, mode='full_model'
+    ):
         """
         Build a matrix of shape (n_cells, n_gp_tokens, 256)
         where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
@@ -214,7 +256,10 @@ class gpWrapper(nn.Module):
         # We know that at most, the non zero genes is the number of genes in the GP
         # for known GP we keep all genes
         # for remaining var we only keep top 100
-        n_genes_to_keep = len(gpi_tokens_list)
+        if self.add_remaining_var and gp_idx == len(self.gp_inputs) - 1:
+            n_genes_to_keep = 100
+        else:
+            n_genes_to_keep = len(gpi_tokens_list)
         result_matrix = result_matrix[:, :n_genes_to_keep, :]
         masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
 
@@ -256,6 +301,7 @@ class gpWrapper(nn.Module):
                 gf_emb,  # geneformer embeddings
                 input_dataset['input_ids'],
                 getattr(self, f'gp{i}_tokens'),
+                gp_idx=i,
             )
 
             # Encode tokens for encoding
@@ -324,7 +370,11 @@ class gpWrapper(nn.Module):
         # loop through emb list = embeddings are grouped by GP
         for i in range(len(gene_emb_list)):
             x_out, tokens, _ = self.build_input_matrix(
-                gene_emb_list[i], tokens_list[i], tokens_to_keep, mode='extract_genes'
+                gene_emb_list[i],
+                tokens_list[i],
+                tokens_to_keep,
+                mode='extract_genes',
+                gp_idx=i,
             )
 
             gp_label_i = gp_labels_list[i]
@@ -370,7 +420,7 @@ class gpTransformerBase(nn.Module):
         attn_dropout=0,
         gp_inputs=None,
         gene_counts_df=None,
-        # add_remaining_var = False,
+        add_remaining_var=False,
         do_ensembl_conversion=True,
         gp_latent_size=256,
         num_heads=1,
@@ -445,6 +495,10 @@ class gpTransformerBase(nn.Module):
         elif isinstance(gp_inputs, str):
             gp_inputs = [gp_inputs]
 
+        # / cause issues with saving
+        gp_inputs = [x.replace('/', '_') for x in gp_inputs]
+        database.columns = [x.replace('/', '_') for x in database.columns]
+
         self.gpdb = database[gp_inputs]
         self.gp_inputs = gp_inputs
         self.gp_latent_size = gp_latent_size
@@ -464,36 +518,8 @@ class gpTransformerBase(nn.Module):
             num_heads=num_heads,
             mgm_mask_ratio=self.mgm_mask_ratio,
             gp_inputs=gp_inputs,
+            add_remaining_var=add_remaining_var,
         )
-
-        # TO DO : MAKE ITS OWN FUNCTION GP FINDER
-        # self.add_remaining_var = add_remaining_var
-        # if self.add_remaining_var:
-        #     n_gp = len(self.gp_inputs)
-        #     gp_inputs.append("remaining_var")
-        #     self.gp_inputs = gp_inputs
-
-        #     # find non GP genes
-        #     if gene_counts_df is not None:
-        #         non_gp_tokens =
-        # set(gene_counts_df["token"].tolist()) - self.all_gp_tokens
-        #     else:
-        #         non_gp_tokens = set(self.token_dict.values())
-        # - self.all_gp_tokens - set([0, 1])
-        # # 0 and 1 are padding and unknown tokens
-
-        #     setattr(self, f'gp{n_gp}_tokens_encoded',
-        # self.encode_gp_tokens(non_gp_tokens))
-        # # only implement basic transformer block for now
-        # setattr(self, f'gp_proj{n_gp}', gp_self_attention(
-        #     n_gp_tokens = 100, # we only keep top 100 genes
-        #     vocab_size=len(non_gp_tokens),
-        #     embed_dim = self.gp_latent_size,
-        #     depth = self.n_blocks,
-        #     num_heads=num_heads,
-        #     mlm_masking_prob = self.mgm_mask_ratio
-        #     )
-        # )
 
     def forward(
         self,
@@ -561,6 +587,7 @@ class gfBaseline(gpTransformerBase):
         '/Geneformer/geneformer/token_dictionary.pkl',
         gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
         '/Geneformer/geneformer/gene_name_id_dict.pkl',
+        add_remaining_var=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -576,6 +603,7 @@ class gfBaseline(gpTransformerBase):
             gene_token_path=gene_token_path,
             gene_name_path=gene_name_path,
             gp_inputs=self.gp_inputs,
+            add_remaining_var=add_remaining_var,
         )
 
 
