@@ -279,9 +279,7 @@ class scGPL(pl.LightningModule):
     def _end_test_epoch_genes(self):
         # Concatenate tensors
         x_scgpl = torch.cat(self.x_scgpl, dim=0).cpu().numpy()
-        print('x_shape', x_scgpl.shape)
         tokens_scgpl = torch.cat(self.tokens_scgpl, dim=0).cpu().numpy()
-        print('tokens_shape', tokens_scgpl.shape)
 
         # flatten list
         gp_labels = np.array(
@@ -336,6 +334,7 @@ class scGPL(pl.LightningModule):
             )
 
             if torch.isnan(loss_i):
+                # usually happens if all labels are masked
                 print(f'Loss is NaN in {self.model.gp_inputs[i]}')
                 print('Predictions:')
                 print(output['logits_lm_list'][i])
@@ -348,8 +347,12 @@ class scGPL(pl.LightningModule):
                 print('')
                 print('Number of NaNs in true labels:')
                 print(torch.isnan(output['gene_labels_list'][i]).sum())
+                gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(
+                    loss_i.device
+                )
 
-            gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+            else:
+                gp_loss_dict[self.model.gp_inputs[i]] = loss_i
 
         # compute total loss
         tensor_list = list(gp_loss_dict.values())

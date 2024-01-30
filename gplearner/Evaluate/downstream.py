@@ -126,7 +126,7 @@ class gpEval:
         if model_type == 'Base':
             self.model = gpTransformerBase(
                 gp_inputs=gp_inputs,
-                gene_counts_df=gene_counts_df,
+                gene_counts_df=self.gene_counts_df,
                 database=gpdb,
                 do_ensembl_conversion=do_ensembl_conversion,
                 n_blocks=n_blocks,
@@ -140,7 +140,7 @@ class gpEval:
                 gp_inputs=gpdb.columns,
                 database=gpdb,
                 do_ensembl_conversion=do_ensembl_conversion,
-                gene_counts_df=gene_counts_df,
+                gene_counts_df=self.gene_counts_df,
                 # dummy variables to avoid errors if no defaults
                 # but we won't use transformer blocks
                 n_blocks=1,
@@ -153,7 +153,11 @@ class gpEval:
             raise ValueError('model_type must be one of Base, or Mean')
 
         if gp_inputs is None:
-            gp_inputs = gpdb.columns
+            gp_inputs = gpdb.columns.tolist()
+        if isinstance(gp_inputs, str):
+            gp_inputs = [gp_inputs]
+        if add_remaining_var:
+            gp_inputs.append('remaining_var')
         self.gp_inputs = gp_inputs
 
         # change directory for saving outputs
