@@ -104,6 +104,8 @@ def run_training(
         Which GP from GPDB to include in model if None, defaults to all GP
     add_remaining_var : bool
         whether to intialize a new transformer block covering non GP genes
+    n_blocks : int
+        number of transformer blocks
 
     """
     ##########################################
