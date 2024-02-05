@@ -8,11 +8,12 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from scipy.sparse import csr_matrix
 from transformers import BertForMaskedLM
 
-from gplearner.Modules.modules import gpTransformerEncoder
-from gplearner.Utils.geneformer_utils import EmbExtractor
-from gplearner.Utils.utils import get_gp_tokens, pad_array
+from ..Modules.modules import gpTransformerEncoder
+from ..Utils.geneformer_utils import EmbExtractor
+from ..Utils.utils import get_gp_tokens, pad_array
 
 ####################################
 # Geneformer
@@ -402,6 +403,87 @@ class gpWrapper(nn.Module):
 
         return output
 
+    def get_last_self_attn(self, gf_emb, input_dataset, gp_idx):
+        # randomly mask genes only during training :
+        inference = False
+
+        # Extract embeddings for the gene program of interest
+        emb_pad, tokens_pad, _ = self.build_input_matrix(
+            gf_emb,  # geneformer embeddings
+            input_dataset['input_ids'],
+            getattr(self, f'gp{gp_idx}_tokens'),
+            gp_idx=gp_idx,
+        )
+
+        # Encode tokens
+        tokens_pad = (
+            tokens_pad.cpu()
+            .apply_(
+                lambda x: getattr(self, f'gp{gp_idx}_tokens_encoded')[x]
+                if x in getattr(self, f'gp{gp_idx}_tokens_encoded').keys()
+                else -100
+            )
+            .to(emb_pad.device)
+        )
+
+        # get token GP representation, logits for gene level prediction,
+        # and gene_labels where masked genes = -100
+
+        encoder_output = self.encoder[gp_idx](
+            emb_pad, gene_labels=tokens_pad, inference=inference, return_attention=True
+        )
+
+        # Reorder attention matrix so genes are in the same order in each cell
+        attn = encoder_output['attention']
+
+        # Average attention across heads
+        attn = attn.mean(dim=1)
+
+        # For the padding tokens, attention will be 0
+        # so we can randomly reassign gene tokens to help with ranking
+        all_gp_tokens = set(getattr(self, f'gp{gp_idx}_tokens_encoded').values())
+        # add one for cls
+        all_gp_tokens.add(max(all_gp_tokens) + 1)
+
+        holder = []
+
+        for i in range(tokens_pad.shape[0]):
+            # because we've not done any masking,
+            # all the -100 tokens will be at the end
+            x = tokens_pad[i, :]
+            labeled_genes_idx = x != -100
+
+            values_to_fill_in = all_gp_tokens - set(
+                x[labeled_genes_idx].cpu().numpy().tolist()
+            )
+            new_labels = torch.tensor(list(values_to_fill_in)).to(x.device)
+
+            new_padded = torch.concat([x[labeled_genes_idx], new_labels], dim=0)
+            # bring back cls to first position
+            new_padded = torch.cat([new_padded[-1].unsqueeze(0), new_padded[:-1]])
+
+            holder.append(new_padded)
+
+        tokens_pad = torch.stack(holder).long().to(attn.device)
+
+        # Reorder attention matrix so genes are in the same order in each cell
+        # Create an index tensor to sort tokens_pad
+        _, indices = torch.sort(tokens_pad, dim=1)
+
+        # Apply sorting to the corresponding rows in x
+        attn = torch.gather(attn, 1, indices)
+        tokens_pad = torch.gather(tokens_pad, 1, indices)
+
+        # For efficient storing as csr matrix
+        # set very small attention values to 0
+        attn[attn < 1e-5] = 0
+
+        output = {
+            'attn': csr_matrix(attn.cpu().numpy()),
+        }
+
+        return output
+
 
 ####################################
 # Define model
@@ -538,6 +620,18 @@ class gpTransformerBase(nn.Module):
             return_gene_embeddings=return_gene_embeddings,
             return_attention=return_attention,
             tokens_to_keep=tokens_to_keep,
+        )
+
+        return output
+
+    def get_last_self_attn(self, input_dataset, gp):
+        gp_idx = self.gp_inputs.index(gp)
+        # input is tokenized dataset
+        emb_out = self.gf_wrapper(input_dataset)
+
+        # Extract attention matrix for our GP of interest
+        output = self.multi_gp_encoder.get_last_self_attn(
+            emb_out, input_dataset, gp_idx=gp_idx
         )
 
         return output

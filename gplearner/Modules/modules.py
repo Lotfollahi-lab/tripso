@@ -341,17 +341,21 @@ class gpTransformerEncoder(nn.Module):
 
         output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
 
-        if attn:
+        if attn is not None:
             # TO DO - OPTION TO RETURN INTERMEDIATE ATTENTION LAYERS
-            output['attention'] = attn
+            # TO DO - OPTION TO RETURN FULL ATTENTION MATRIX NOT JUST CLS
+            # print('Attention shape', attn.shape)
+            # (batch, heads, 1 + tokens, 1 + tokens)
+            # print('<cls>', attn[:, :, 0, :].shape)
+            output['attention'] = attn[:, :, 0, :]
 
         if return_gene_embeddings:
             output['gene_embeddings'] = x[:, 1:, :]
 
         return output
 
-    def get_intermediate_layers(self, x, n=1):
-        x = self.prepare_tokens(x)
+    def get_intermediate_layers(self, x, gene_labels, n=1):
+        x, gene_labels = self.prepare_tokens(x, gene_labels)
         # we return the output tokens from the `n` last blocks
         output = []
         for i, blk in enumerate(self.blocks):
@@ -368,8 +372,3 @@ if __name__ == '__main__':
     )
     x = torch.randn(1, 5, 32)
     gene_labels = torch.randint(0, 10, (1, 5))
-    print('Input shape:', x.shape)
-    print('Gene labels shape:', gene_labels.shape)
-    output = model(x, gene_labels, inference=False, return_attention=False)
-    for m in output:
-        print(output[m].shape)

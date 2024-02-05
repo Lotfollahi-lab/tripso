@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from deepspeed.ops.adam import DeepSpeedCPUAdam
+from scipy.sparse import vstack
 from torch import optim
 
 from gplearner.Utils.utils import (
@@ -66,6 +67,8 @@ class scGPL(pl.LightningModule):
         return_gene_embeddings: bool = False,
         tokens_to_keep: Optional[List] = None,
         gene_file_tag: Optional[str] = None,
+        return_attention: bool = False,
+        gp: Optional[str] = None,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -111,6 +114,8 @@ class scGPL(pl.LightningModule):
         self.x_scgpl: List[float] = []
         self.tokens_scgpl: List[float] = []
         self.gp_labels: List[str] = []
+        # For output - attention
+        self.attn_scores: List[float] = []
 
         self.output_dir = output_dir
 
@@ -118,6 +123,8 @@ class scGPL(pl.LightningModule):
         self.return_gene_embeddings = return_gene_embeddings
         self.tokens_to_keep = tokens_to_keep
         self.gene_file_tag = gene_file_tag
+        self.return_attention = return_attention
+        self.gp = gp
 
     def forward(self, x):
         out = self.model(
@@ -225,6 +232,20 @@ class scGPL(pl.LightningModule):
         self.tokens_scgpl += output['tokens_scgpl']
         self.gp_labels += output['gp_labels']
 
+    def _test_step_attn(self, batch, batch_idx):
+        output = self.model.get_last_self_attn(batch, gp=self.gp)
+
+        # store attention scores here
+        self.attn_scores += output['attn']
+
+        # and metadata for obs
+        for k, v in batch.items():
+            if k != 'input_ids':
+                if k in self.cell_metadata:
+                    self.cell_metadata[k].append(v)
+                else:
+                    self.cell_metadata[k] = [v]
+
     def test_step(
         self,
         batch,
@@ -232,6 +253,8 @@ class scGPL(pl.LightningModule):
     ):
         if self.return_gene_embeddings:
             self._test_step_genes(batch, batch_idx)
+        elif self.return_attention:
+            self._test_step_attn(batch, batch_idx)
         else:
             self._test_step_cell(batch, batch_idx)
 
@@ -311,9 +334,45 @@ class scGPL(pl.LightningModule):
         self.tokens_scgpl = []
         self.gp_labels = []
 
+    def _end_test_epoch_attn(self):
+        attn = vstack(self.attn_scores)
+
+        # convert to dataframe, first sending tensors back to cpu as numpy arrays
+        meta_dict = self.cell_metadata
+        for k, v in meta_dict.items():
+            if isinstance(v[0], torch.Tensor):
+                meta_dict[k] = torch.cat(v).cpu().numpy().tolist()
+            else:
+                # flatten list of lists
+                meta_dict[k] = [item for sublist in v for item in sublist]
+
+        meta = pd.DataFrame(meta_dict)
+        adata = sc.AnnData(X=attn, obs=meta)
+
+        # Set the var_names attribute of the AnnData object to the gp tokens
+        gp_idx = self.model.gp_inputs.index(self.gp)
+        tokens = pd.Series(
+            getattr(self.model.multi_gp_encoder, f'gp{gp_idx}_tokens_encoded').keys()
+        )
+        ensembl_ids = tokens.map(token_to_gene)
+        gene_names = ensembl_ids.map(ensembl_to_name)
+        adata.var_names = ['cls'] + list(ensembl_ids)
+        adata.var['token'] = ['cls'] + pd.Series(list(tokens), dtype=str).tolist()
+        adata.var['ensembl'] = ['cls'] + list(ensembl_ids)
+        adata.var['gene'] = ['cls'] + list(gene_names)
+
+        adata.write_h5ad(
+            os.path.join(self.output_dir, f'adata_{self.gp}_attn_scores.h5ad')
+        )
+
+        # reset
+        self.attn_scores = []
+
     def on_test_epoch_end(self):
         if self.return_gene_embeddings:
             self._end_test_epoch_genes()
+        elif self.return_attention:
+            self._end_test_epoch_attn()
         else:
             self._end_test_epoch_cell()
 

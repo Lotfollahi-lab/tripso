@@ -178,6 +178,8 @@ class gpEval:
         return_gene_embeddings=False,
         tokens_to_keep=None,
         gene_file_tag=None,
+        return_attention=False,
+        gp=None,
     ):
         if (
             self.model_type != 'Mean'
@@ -188,6 +190,8 @@ class gpEval:
                 return_gene_embeddings=return_gene_embeddings,
                 tokens_to_keep=tokens_to_keep,
                 gene_file_tag=gene_file_tag,
+                return_attention=return_attention,
+                gp=gp,
             ).load_from_checkpoint(self.checkpoint_path)
         else:
             gp_transformer = scGPL(
@@ -203,6 +207,8 @@ class gpEval:
         gp_transformer.return_gene_embeddings = return_gene_embeddings
         gp_transformer.tokens_to_keep = tokens_to_keep
         gp_transformer.gene_file_tag = gene_file_tag
+        gp_transformer.return_attention = return_attention
+        gp_transformer.gp = gp
 
         return gp_transformer
 
@@ -211,7 +217,6 @@ class gpEval:
         Generate embeddings for each cell
         """
         os.chdir(self.output_dir)
-        print('in generate_embeddings() self.output_dir', self.output_dir)
         txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
 
         if os.path.exists('adata_gp_embedding.h5ad'):
@@ -254,7 +259,13 @@ class gpEval:
         for gp in gp_to_plot:
             viz_gp(gp, color_by=label_to_plot, adata=adata, save_to=self.tissue)
 
-    def _evaluate_clustering_cells(self, adata):
+    def _evaluate_clustering_cells(self, odata, recompute_umap=False):
+        adata = odata.copy()
+
+        if recompute_umap:
+            sc.pp.neighbors(adata, use_rep='X')
+            sc.tl.umap(adata)
+
         if 'leiden' not in adata.obs.columns:
             sc.tl.leiden(adata)
 
@@ -305,7 +316,8 @@ class gpEval:
             # now for each gp:
             for gp in self.gp_inputs:
                 df = self._evaluate_clustering_cells(
-                    adata[:, adata.var['gp_idx'].str.startswith(gp)]
+                    adata[:, adata.var['gp_idx'].str.startswith(gp)],
+                    recompute_umap=True,
                 )
                 df.to_csv(
                     os.path.join(
@@ -458,3 +470,21 @@ class gpEval:
                 filename='gp_prediction_from_scgpl',
                 variable_to_track={'embedding_type': 'scGPL'},
             )
+
+    def generate_attention_matrix(self, gp):
+        """
+        Get attention weights from gpTransformer
+        """
+        os.chdir(self.output_dir)
+
+        if gp not in self.gp_inputs:
+            raise ValueError(f'{gp} not in GP inputs')
+
+        # Initialize trainer
+        txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
+
+        gp_transformer = self._init_trainer(return_attention=True, gp=gp)
+
+        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+
+        trainer.test(gp_transformer, txdata)

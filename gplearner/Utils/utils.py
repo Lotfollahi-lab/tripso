@@ -17,7 +17,6 @@ import pytorch_lightning as pl
 import scanpy as sc
 import seaborn as sns
 import torch
-import tqdm.notebook as tqdm
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -28,6 +27,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from tqdm.notebook import tqdm
 
 random.seed(0)
 
