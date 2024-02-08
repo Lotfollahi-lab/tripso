@@ -13,8 +13,8 @@ import scanpy as sc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deepspeed.ops.adam import DeepSpeedCPUAdam
-from scipy.sparse import vstack
+
+# from deepspeed.ops.adam import DeepSpeedCPUAdam
 from torch import optim
 
 from gplearner.Utils.utils import (
@@ -60,7 +60,9 @@ class scGPL(pl.LightningModule):
         lr: float = 1e-3,
         weight_decay: float = 0,
         optimizer: Union[
-            optim.Adam, optim.SGD, optim.AdamW, DeepSpeedCPUAdam
+            optim.Adam,
+            optim.SGD,
+            optim.AdamW,  # DeepSpeedCPUAdam
         ] = optim.AdamW,
         lr_scheduler='ReduceLROnPlateau',
         total_epochs: int = 100,
@@ -233,6 +235,7 @@ class scGPL(pl.LightningModule):
         self.gp_labels += output['gp_labels']
 
     def _test_step_attn(self, batch, batch_idx):
+        print('Getting attention scores')
         output = self.model.get_last_self_attn(batch, gp=self.gp)
 
         # store attention scores here
@@ -289,6 +292,7 @@ class scGPL(pl.LightningModule):
 
         adata.var_names = gp_labels
         adata.var['gp_idx'] = adata.var_names
+        adata.write_h5ad(os.path.join(self.output_dir, 'adata_gp_embedding.h5ad'))
 
         sc.pp.neighbors(adata, use_rep='X')
         sc.tl.umap(adata, min_dist=0.4)
@@ -335,7 +339,8 @@ class scGPL(pl.LightningModule):
         self.gp_labels = []
 
     def _end_test_epoch_attn(self):
-        attn = vstack(self.attn_scores)
+        print('Concatenating attention scores')
+        attn = np.vstack(self.attn_scores)
 
         # convert to dataframe, first sending tensors back to cpu as numpy arrays
         meta_dict = self.cell_metadata

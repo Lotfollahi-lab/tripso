@@ -11,7 +11,8 @@ import torch
 
 # set up wandb
 import wandb
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+# from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
@@ -46,6 +47,7 @@ def run_training(
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
     add_remaining_var: Optional[bool] = False,
+    frac_for_training: Optional[float] = 1.0,
 ):
     """
     Wrapper function for training gpLearner model
@@ -104,6 +106,9 @@ def run_training(
         Which GP from GPDB to include in model if None, defaults to all GP
     add_remaining_var : bool
         whether to intialize a new transformer block covering non GP genes
+    frac_for_training : float
+        fraction of the dataset to use for training - default is 1.0
+        (development only)
 
     """
     ##########################################
@@ -195,6 +200,7 @@ def run_training(
                 'attn_dropout': attn_dropout,
                 'transformer_block': 'preLN',
                 'learning_rate': lr,
+                'frac_for_training': frac_for_training,
             }
         )
 
@@ -205,7 +211,9 @@ def run_training(
     # Instantiate dataset
     # (tokenized dataset should be created already)
     # txdata = DummyDataModule(folder = dataset_path, batch_size=batch_size)
-    txdata = txDataModule(folder=dataset_path, batch_size=batch_size)
+    txdata = txDataModule(
+        folder=dataset_path, batch_size=batch_size, frac_for_training=frac_for_training
+    )
 
     # dataset for getting number of classes
     # full_dataset = txDataset(folder = dataset_path)
@@ -261,7 +269,7 @@ def run_training(
             total_epochs=n_epochs,
             lr=lr,
             lr_scheduler=lr_scheduler,
-            optimizer=DeepSpeedCPUAdam,
+            # optimizer=DeepSpeedCPUAdam,
             use_gp_similarity_loss=use_gp_similarity_loss,
             output_dir=output_dir,
         )

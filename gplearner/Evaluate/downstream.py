@@ -21,6 +21,7 @@ from ..Datamodules.datamodule import txDataModule
 from ..Models.gp_model import gfBaseline, gpTransformerBase
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import (
+    do_linear_regression,
     do_logistic_regression,
     find_genes_in_multiple_gp,
     find_latest_file,
@@ -122,6 +123,8 @@ class gpEval:
 
         if gene_counts_df is not None:
             self.gene_counts_df = pd.read_csv(gene_counts_df)
+        else:
+            self.gene_counts_df = None
 
         if model_type == 'Base':
             self.model = gpTransformerBase(
@@ -158,6 +161,10 @@ class gpEval:
             gp_inputs = [gp_inputs]
         if add_remaining_var:
             gp_inputs.append('remaining_var')
+
+        # Remove /
+        gp_inputs = [g.replace('/', '_') for g in gp_inputs]
+
         self.gp_inputs = gp_inputs
 
         # change directory for saving outputs
@@ -271,7 +278,10 @@ class gpEval:
 
         print('Running cluster evaluation metrics...')
         ari_ct = adjusted_rand_score(adata.obs['leiden'], adata.obs['cell_type'])
-        ari_cond = adjusted_rand_score(adata.obs['leiden'], adata.obs['condition'])
+        if 'condition' in adata.obs.columns:
+            ari_cond = adjusted_rand_score(adata.obs['leiden'], adata.obs['condition'])
+        else:
+            ari_cond = None
         sil = silhouette_score(adata.obsm['X_umap'], adata.obs['leiden'])
         db = davies_bouldin_score(adata.obsm['X_umap'], adata.obs['leiden'])
 
@@ -470,6 +480,58 @@ class gpEval:
                 filename='gp_prediction_from_scgpl',
                 variable_to_track={'embedding_type': 'scGPL'},
             )
+
+    def linear_regression(
+        self,
+        gp_features: Union[List, str] = 'all',
+        labels=['cell_type', 'condition'],
+    ):
+        """
+        Run logistic regression to predict labels from features
+
+        Parameters
+        ----------
+        gp_features : list
+            List of GP to use as features
+            If "all", will use all GP
+            If "concat", will concatenate all GP
+        labels : list
+            List of labels to predict
+        """
+        os.chdir(self.output_dir)
+
+        # prepare output directories
+        if isinstance(labels, str):
+            labels = [labels]
+
+        adata = self.load_anndata()
+
+        if not os.path.exists('cell_metrics'):
+            os.makedirs('cell_metrics')
+
+        if gp_features == 'concat':
+            for c in labels:
+                do_linear_regression(
+                    adata,
+                    c,
+                    os.path.join(self.output_dir, 'cell_metrics'),
+                    f'{c}_prediction_from_concat_gp',
+                )
+
+        else:
+            if gp_features == 'all':
+                gp_features = self.gp_inputs
+                gp_features = list(gp_features)
+
+            for gp in gp_features:
+                for c in labels:
+                    do_linear_regression(
+                        adata=adata[:, adata.var['gp_idx'].str.startswith(gp)],
+                        labels_var=c,
+                        output_directory=os.path.join(self.output_dir, 'cell_metrics'),
+                        filename=f"{c}_prediction_{gp.replace('/', '_')}",
+                        variable_to_track={'GP': gp},
+                    )
 
     def generate_attention_matrix(self, gp):
         """

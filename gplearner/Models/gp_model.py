@@ -2,13 +2,14 @@
 # Load packages
 ####################################
 
-import numpy as np
+import warnings
 
 # imports
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from scipy.sparse import csr_matrix
+import torch.nn.functional as F
 from transformers import BertForMaskedLM
 
 from ..Modules.modules import gpTransformerEncoder
@@ -442,6 +443,7 @@ class gpWrapper(nn.Module):
         # For the padding tokens, attention will be 0
         # so we can randomly reassign gene tokens to help with ranking
         all_gp_tokens = set(getattr(self, f'gp{gp_idx}_tokens_encoded').values())
+        print('Succesfully got all gp tokens')
         # add one for cls
         all_gp_tokens.add(max(all_gp_tokens) + 1)
 
@@ -474,12 +476,8 @@ class gpWrapper(nn.Module):
         attn = torch.gather(attn, 1, indices)
         tokens_pad = torch.gather(tokens_pad, 1, indices)
 
-        # For efficient storing as csr matrix
-        # set very small attention values to 0
-        attn[attn < 1e-5] = 0
-
         output = {
-            'attn': csr_matrix(attn.cpu().numpy()),
+            'attn': attn.detach().cpu().numpy(),
         }
 
         return output
@@ -671,6 +669,75 @@ class gpAverager(gpWrapper):
             [AverageNonZero() for i in range(len(self.gp_inputs))]
         )
 
+    def get_last_self_attn(self, gf_emb, input_dataset, gp_idx):
+        # Extract embeddings for the gene program of interest
+        emb_pad, tokens_pad, _ = self.build_input_matrix(
+            gf_emb,  # geneformer embeddings
+            input_dataset['input_ids'],
+            getattr(self, f'gp{gp_idx}_tokens'),
+            gp_idx=gp_idx,
+        )
+
+        # Encode tokens
+        tokens_pad = (
+            tokens_pad.cpu()
+            .apply_(
+                lambda x: getattr(self, f'gp{gp_idx}_tokens_encoded')[x]
+                if x in getattr(self, f'gp{gp_idx}_tokens_encoded').keys()
+                else -100
+            )
+            .to(emb_pad.device)
+        )
+
+        # Get cell embedding: average non zero genes
+        o = self.encoder[gp_idx](emb_pad)
+        cell = o['cls']
+        # Reshape to dimensions of gene tensor
+        cell = cell.unsqueeze(1).expand_as(emb_pad)
+
+        # get cosine similarity between gene and cell embedding
+        # for each gene in the GP
+        cosim = F.cosine_similarity(emb_pad, cell, dim=-1)
+
+        # For the padding tokens, attention will be 0
+        # so we can randomly reassign gene tokens to help with ranking
+        all_gp_tokens = set(getattr(self, f'gp{gp_idx}_tokens_encoded').values())
+
+        holder = []
+
+        for i in range(tokens_pad.shape[0]):
+            # because we've not done any masking,
+            # all the -100 tokens will be at the end
+            x = tokens_pad[i, :]
+            labeled_genes_idx = x != -100
+
+            values_to_fill_in = all_gp_tokens - set(
+                x[labeled_genes_idx].cpu().numpy().tolist()
+            )
+            new_labels = torch.tensor(list(values_to_fill_in)).to(x.device)
+
+            new_padded = torch.concat([x[labeled_genes_idx], new_labels], dim=0)
+            # bring back cls to first position
+            new_padded = torch.cat([new_padded[-1].unsqueeze(0), new_padded[:-1]])
+
+            holder.append(new_padded)
+
+        tokens_pad = torch.stack(holder).long().to(cosim.device)
+
+        # Reorder attention matrix so genes are in the same order in each cell
+        # Create an index tensor to sort tokens_pad
+        _, indices = torch.sort(tokens_pad, dim=1)
+
+        # Apply sorting to the corresponding rows in x
+        cosim = torch.gather(cosim, 1, indices)
+        tokens_pad = torch.gather(tokens_pad, 1, indices)
+
+        output = {
+            'attn': cosim.detach().cpu().numpy(),
+        }
+
+        return output
+
 
 class gfBaseline(gpTransformerBase):
     def __init__(
@@ -699,6 +766,25 @@ class gfBaseline(gpTransformerBase):
             gp_inputs=self.gp_inputs,
             add_remaining_var=add_remaining_var,
         )
+
+    def get_last_self_attn(self, input_dataset, gp):
+        warnings.warn(
+            'Using model type : Mean'
+            'Attention matrices are not available for this model type.'
+            'Instead, we return the cosine similarity between GP embeddings'
+            'and the mean GP embedding for that GP.'
+            'but note that this is not a true attention matrix.'
+        )
+        gp_idx = self.gp_inputs.index(gp)
+        # input is tokenized dataset
+        emb_out = self.gf_wrapper(input_dataset)
+
+        # Extract attention matrix for our GP of interest
+        output = self.multi_gp_encoder.get_last_self_attn(
+            emb_out, input_dataset, gp_idx=gp_idx
+        )
+
+        return output
 
 
 if __name__ == '__main__':
