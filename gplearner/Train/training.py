@@ -225,6 +225,13 @@ def run_training(
     if gp_similarity_file is not None:
         gp_similarity = np.load(gp_similarity_file, allow_pickle=True)
         gp_similarity = gp_similarity.astype('float32')
+
+        # filter to match gp_inputs
+        if gp_inputs is not None:
+            # get indices for gp_inputs
+            gp_idx = [gpdb.columns.get_loc(gp) for gp in gp_inputs]
+            gp_similarity = gp_similarity[gp_idx, :][:, gp_idx]
+
     else:
         gp_similarity = None
 
@@ -265,6 +272,7 @@ def run_training(
             lr_scheduler=lr_scheduler,
             optimizer=DeepSpeedCPUAdam,
             use_gp_similarity_loss=use_gp_similarity_loss,
+            gp_similarity=gp_similarity,
             output_dir=output_dir,
         )
     else:
@@ -276,6 +284,7 @@ def run_training(
             total_epochs=n_epochs,
             lr_scheduler=lr_scheduler,
             use_gp_similarity_loss=use_gp_similarity_loss,
+            gp_similarity=gp_similarity,
             output_dir=output_dir,
         )
 
