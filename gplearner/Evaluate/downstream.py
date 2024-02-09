@@ -122,6 +122,8 @@ class gpEval:
 
         if gene_counts_df is not None:
             self.gene_counts_df = pd.read_csv(gene_counts_df)
+        else:
+            self.gene_counts_df = None
 
         if model_type == 'Base':
             self.model = gpTransformerBase(

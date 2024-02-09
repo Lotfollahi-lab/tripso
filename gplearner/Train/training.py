@@ -46,6 +46,7 @@ def run_training(
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
     add_remaining_var: Optional[bool] = False,
+    lambda_gp_similarity: Optional[float] = 1e-2,
 ):
     """
     Wrapper function for training gpLearner model
@@ -106,6 +107,8 @@ def run_training(
         whether to intialize a new transformer block covering non GP genes
     n_blocks : int
         number of transformer blocks
+    lambda_gp_similarity : float
+        weight for gp similarity loss
 
     """
     ##########################################
@@ -197,6 +200,8 @@ def run_training(
                 'attn_dropout': attn_dropout,
                 'transformer_block': 'preLN',
                 'learning_rate': lr,
+                'use_gp_similarity_loss': gp_similarity_file is not None,
+                'lambda_gp_similarity': lambda_gp_similarity,
             }
         )
 
@@ -274,6 +279,7 @@ def run_training(
             use_gp_similarity_loss=use_gp_similarity_loss,
             gp_similarity=gp_similarity,
             output_dir=output_dir,
+            lambda_gp_similarity=lambda_gp_similarity,
         )
     else:
         # otherwise defaults to pytorch AdamW
@@ -286,6 +292,7 @@ def run_training(
             use_gp_similarity_loss=use_gp_similarity_loss,
             gp_similarity=gp_similarity,
             output_dir=output_dir,
+            lambda_gp_similarity=lambda_gp_similarity,
         )
 
     # For continuing training from checkpoint

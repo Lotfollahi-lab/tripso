@@ -110,7 +110,6 @@ class scGPL(pl.LightningModule):
             setattr(self, f'{stage}_mgm_gp_pred', [])
 
             setattr(self, f'{stage}_gp_similarity_loss', [])
-            setattr(self, f'{stage}_gp_attn_matrix', [])
 
             setattr(self, f'{stage}_loss', [])
 
@@ -194,9 +193,18 @@ class scGPL(pl.LightningModule):
                 sync_dist=True,
             )
 
-            if self.use_gp_similarity_loss:
-                gp_similarity_loss = loss_output['gp_similarity_loss']
-                self.train_gp_similarity_loss.append(gp_similarity_loss)
+        if self.use_gp_similarity_loss:
+            gp_similarity_loss = loss_output['gp_similarity_loss']
+            self.train_gp_similarity_loss.append(gp_similarity_loss)
+            self.log(
+                'train/gp_similarity_loss',
+                gp_similarity_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
 
         return loss
 
@@ -212,7 +220,6 @@ class scGPL(pl.LightningModule):
         setattr(self, f'{stage}_mgm_gp_pred', [])
 
         setattr(self, f'{stage}_gp_similarity_loss', [])
-        setattr(self, f'{stage}_gp_attn_matrix', [])
 
         setattr(self, f'{stage}_loss', [])
 
@@ -378,20 +385,18 @@ class scGPL(pl.LightningModule):
             'total_loss': loss,
         }
 
+        if self.use_gp_similarity_loss:
+            holder['gp_similarity_loss'] = gp_similarity_loss
+
         return holder
 
     def compute_gp_similarity_loss(self, z):
-        print('z', z.shape)
-
         # calculate pairwise cosine similarity
         cs = []
         for i in range(z.shape[0]):
             c = pairwise_cosine_similarity(z[i, :])
             cs.append(c)
         gp_cosine_similarity = torch.stack(cs)
-
-        print('gp_cosine_similarity', gp_cosine_similarity.shape)
-        print('gp_similarity', self.gp_similarity.shape)
 
         gp_similarity = torch.tensor(self.gp_similarity).to(gp_cosine_similarity.device)
 
