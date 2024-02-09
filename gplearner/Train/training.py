@@ -46,6 +46,7 @@ def run_training(
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
     add_remaining_var: Optional[bool] = False,
+    lambda_gp_similarity: Optional[float] = 1e-2,
 ):
     """
     Wrapper function for training gpLearner model
@@ -106,6 +107,8 @@ def run_training(
         whether to intialize a new transformer block covering non GP genes
     n_blocks : int
         number of transformer blocks
+    lambda_gp_similarity : float
+        weight for gp similarity loss
 
     """
     ##########################################
@@ -197,6 +200,8 @@ def run_training(
                 'attn_dropout': attn_dropout,
                 'transformer_block': 'preLN',
                 'learning_rate': lr,
+                'use_gp_similarity_loss': gp_similarity_file is not None,
+                'lambda_gp_similarity': lambda_gp_similarity,
             }
         )
 
@@ -225,6 +230,13 @@ def run_training(
     if gp_similarity_file is not None:
         gp_similarity = np.load(gp_similarity_file, allow_pickle=True)
         gp_similarity = gp_similarity.astype('float32')
+
+        # filter to match gp_inputs
+        if gp_inputs is not None:
+            # get indices for gp_inputs
+            gp_idx = [gpdb.columns.get_loc(gp) for gp in gp_inputs]
+            gp_similarity = gp_similarity[gp_idx, :][:, gp_idx]
+
     else:
         gp_similarity = None
 
@@ -265,7 +277,9 @@ def run_training(
             lr_scheduler=lr_scheduler,
             optimizer=DeepSpeedCPUAdam,
             use_gp_similarity_loss=use_gp_similarity_loss,
+            gp_similarity=gp_similarity,
             output_dir=output_dir,
+            lambda_gp_similarity=lambda_gp_similarity,
         )
     else:
         # otherwise defaults to pytorch AdamW
@@ -276,7 +290,9 @@ def run_training(
             total_epochs=n_epochs,
             lr_scheduler=lr_scheduler,
             use_gp_similarity_loss=use_gp_similarity_loss,
+            gp_similarity=gp_similarity,
             output_dir=output_dir,
+            lambda_gp_similarity=lambda_gp_similarity,
         )
 
     # For continuing training from checkpoint
