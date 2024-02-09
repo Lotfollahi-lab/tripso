@@ -413,10 +413,21 @@ def viz_gp(GP, adata, color_by='cell_type', save_to=False):
         save_path = f'_{save_to}_{gp1}_{c1}.pdf'
 
         if save_to:
-            sc.pl.umap(gdata, color=c, title=f'{GP}', save=save_path)
+            sc.pl.umap(
+                gdata,
+                color=c,
+                title=f'{GP}',
+                save=save_path,
+                frameon=False,
+            )
 
         else:
-            sc.pl.umap(gdata, color=c, title=f'{GP}')
+            sc.pl.umap(
+                gdata,
+                color=c,
+                title=f'{GP}',
+                frameon=False,
+            )
 
 
 ###################################
@@ -763,8 +774,27 @@ def remove_single_data_points(adata, obs_column):
 
 
 #################
-# Scheduling
+# GP wrangling
 #################
+
+
+def make_overlap_matrix(df, save_to=None):
+    # Initialize a matrix to store intersection values
+    intersection_matrix = pd.DataFrame(index=df.columns, columns=df.columns)
+
+    # Calculate intersection over length of non-null elements
+    for i in tqdm(df.columns, desc='Calculating overlap', leave=False):
+        for j in df.columns:
+            intersection = len(set(df[i].dropna()) & set(df[j].dropna()))
+            intersection_ratio = (
+                intersection / len(df[i].dropna()) if len(df[i].dropna()) > 0 else 0
+            )
+            intersection_matrix.loc[i, j] = intersection_ratio
+
+    if save_to:
+        np.save(save_to, intersection_matrix)
+
+    return intersection_matrix
 
 
 def make_similarity_matrix(df, save_to=None):

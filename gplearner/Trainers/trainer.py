@@ -16,6 +16,7 @@ import torch.nn.functional as F
 
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
 from torch import optim
+from torchmetrics.functional import pairwise_cosine_similarity
 
 from gplearner.Utils.utils import (
     CosineLRwithWarmUp,
@@ -57,6 +58,7 @@ class scGPL(pl.LightningModule):
         output_dir: str = '/path/to/output',
         use_gp_similarity_loss: bool = False,
         lambda_gp_similarity=1e-2,
+        gp_similarity: Optional[str] = None,
         lr: float = 1e-3,
         weight_decay: float = 0,
         optimizer: Union[
@@ -79,7 +81,15 @@ class scGPL(pl.LightningModule):
         # setup model
         self.model = model
         self.model_type = model_type
+
+        if use_gp_similarity_loss and gp_similarity is None:
+            raise ValueError(
+                'If use_gp_similarity_loss is True, gp_similarity_file must be provided'
+            )
+
         self.use_gp_similarity_loss = use_gp_similarity_loss
+        self.gp_similarity = gp_similarity
+
         self.lambda_gp_similarity = lambda_gp_similarity
 
         if model_type == 'Supervised':
@@ -105,7 +115,6 @@ class scGPL(pl.LightningModule):
             setattr(self, f'{stage}_mgm_gp_pred', [])
 
             setattr(self, f'{stage}_gp_similarity_loss', [])
-            setattr(self, f'{stage}_gp_attn_matrix', [])
 
             setattr(self, f'{stage}_loss', [])
 
@@ -193,10 +202,18 @@ class scGPL(pl.LightningModule):
                 sync_dist=True,
             )
 
-            if self.use_gp_similarity_loss:
-                gp_similarity_loss = loss_output['gp_similarity_loss']
-                self.train_gp_similarity_loss.append(gp_similarity_loss)
-                self.train_gp_attn_matrix.append(loss_output['gp_attn_matrix'])
+        if self.use_gp_similarity_loss:
+            gp_similarity_loss = loss_output['gp_similarity_loss']
+            self.train_gp_similarity_loss.append(gp_similarity_loss)
+            self.log(
+                'train/gp_similarity_loss',
+                gp_similarity_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
 
         return loss
 
@@ -212,7 +229,6 @@ class scGPL(pl.LightningModule):
         setattr(self, f'{stage}_mgm_gp_pred', [])
 
         setattr(self, f'{stage}_gp_similarity_loss', [])
-        setattr(self, f'{stage}_gp_attn_matrix', [])
 
         setattr(self, f'{stage}_loss', [])
 
@@ -423,13 +439,35 @@ class scGPL(pl.LightningModule):
 
         loss = torch.sum(torch.stack(tensor_list))
 
+        if self.use_gp_similarity_loss:
+            gp_similarity_loss = self.compute_gp_similarity_loss(output['z'])
+            loss += self.lambda_gp_similarity * gp_similarity_loss
+
         # package outputs to return flexible number of objects
         holder = {
             'loss_per_gp': gp_loss_dict,
             'total_loss': loss,
         }
 
+        if self.use_gp_similarity_loss:
+            holder['gp_similarity_loss'] = gp_similarity_loss
+
         return holder
+
+    def compute_gp_similarity_loss(self, z):
+        # calculate pairwise cosine similarity
+        cs = []
+        for i in range(z.shape[0]):
+            c = pairwise_cosine_similarity(z[i, :])
+            cs.append(c)
+        gp_cosine_similarity = torch.stack(cs)
+
+        gp_similarity = torch.tensor(self.gp_similarity).to(gp_cosine_similarity.device)
+
+        # compute loss
+        gp_similarity_loss = F.mse_loss(gp_cosine_similarity, gp_similarity)
+
+        return gp_similarity_loss
 
     def configure_optimizers(self):
         # Define optimizer and may be consider weight decay

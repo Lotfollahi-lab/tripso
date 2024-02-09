@@ -51,7 +51,7 @@ class txDataModule(LightningDataModule):
         self,
         folder='./data/tokenized.dataset',
         batch_size=3,
-        num_workers=0,
+        num_workers=1,
         shuffle=False,
         # development only:
         frac_for_training=1,
