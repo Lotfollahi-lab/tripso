@@ -251,11 +251,10 @@ class scGPL(pl.LightningModule):
         self.gp_labels += output['gp_labels']
 
     def _test_step_attn(self, batch, batch_idx):
-        print('Getting attention scores')
         output = self.model.get_last_self_attn(batch, gp=self.gp)
 
         # store attention scores here
-        self.attn_scores += output['attn']
+        self.attn_scores.append(output['attn'])
 
         # and metadata for obs
         for k, v in batch.items():
@@ -377,10 +376,17 @@ class scGPL(pl.LightningModule):
         )
         ensembl_ids = tokens.map(token_to_gene)
         gene_names = ensembl_ids.map(ensembl_to_name)
-        adata.var_names = ['cls'] + list(ensembl_ids)
-        adata.var['token'] = ['cls'] + pd.Series(list(tokens), dtype=str).tolist()
-        adata.var['ensembl'] = ['cls'] + list(ensembl_ids)
-        adata.var['gene'] = ['cls'] + list(gene_names)
+
+        if self.model_type == 'Mean':
+            adata.var_names = list(ensembl_ids)
+            adata.var['token'] = pd.Series(list(tokens), dtype=str).tolist()
+            adata.var['ensembl'] = list(ensembl_ids)
+            adata.var['gene'] = list(gene_names)
+        else:
+            adata.var_names = ['cls'] + list(ensembl_ids)
+            adata.var['token'] = ['cls'] + pd.Series(list(tokens), dtype=str).tolist()
+            adata.var['ensembl'] = ['cls'] + list(ensembl_ids)
+            adata.var['gene'] = ['cls'] + list(gene_names)
 
         adata.write_h5ad(
             os.path.join(self.output_dir, f'adata_{self.gp}_attn_scores.h5ad')
