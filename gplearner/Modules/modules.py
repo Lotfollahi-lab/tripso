@@ -91,7 +91,8 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, return_attention):
+    def forward(self, x, attn_mask, return_attention):
+        # Attention mask is 0 for padding tokens (no attention)
         B, N, C = x.shape
 
         qkv = (
@@ -104,6 +105,15 @@ class Attention(nn.Module):
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
+
+        # apply attention mask for padding tokens
+        # Mask rows:
+        attn = attn * attn_mask.unsqueeze(1).unsqueeze(
+            -1
+        )  # unsqueeze to add head dimension
+        # Mask columns:
+        attn = attn * attn_mask.unsqueeze(1).unsqueeze(1)
+
         # nn.functional.scaled_dot_product_attention returns attn_weight @ value
 
         # with torch.backends.cuda.sdp_kernel(
@@ -163,8 +173,10 @@ class Block(nn.Module):
             drop=drop,
         )
 
-    def forward(self, x, return_attention):
-        y, attn = self.attn(self.norm1(x), return_attention)
+    def forward(self, x, attn_mask, return_attention):
+        y, attn = self.attn(
+            self.norm1(x), attn_mask=attn_mask, return_attention=return_attention
+        )
         # y = self.attn(self.norm1(x))
 
         x = x + self.drop_path(y)
@@ -321,7 +333,13 @@ class gpTransformerEncoder(nn.Module):
         return self.pos_drop(x), gene_labels
 
     def forward(
-        self, x, gene_labels, inference, return_attention, return_gene_embeddings=False
+        self,
+        x,
+        gene_labels,
+        inference,
+        attn_mask,
+        return_attention,
+        return_gene_embeddings=False,
     ):
         # Random masking:
         if inference is False:
@@ -331,7 +349,7 @@ class gpTransformerEncoder(nn.Module):
         x, gene_labels = self.prepare_tokens(x, gene_labels)
 
         for blk in self.blocks:
-            x, attn = blk(x, return_attention)
+            x, attn = blk(x, attn_mask=attn_mask, return_attention=return_attention)
 
         x = self.norm(x)
 

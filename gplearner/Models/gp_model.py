@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy.sparse import csr_matrix
 from transformers import BertForMaskedLM
 
 from ..Modules.modules import gpTransformerEncoder
@@ -265,7 +266,17 @@ class gpWrapper(nn.Module):
         result_matrix = result_matrix[:, :n_genes_to_keep, :]
         masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
 
-        return result_matrix, masked_labels_output, num_genes_per_cell
+        # Set up attention mask
+        # to avoid attention to padding tokens
+        attn_mask = torch.zeros_like(masked_labels_output)
+        attn_mask[masked_labels_output != -100] = 1
+
+        # never mask cls
+        attn_mask = torch.cat(
+            [torch.ones(attn_mask.shape[0], 1).to(attn_mask.device), attn_mask], dim=1
+        )
+
+        return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
 
     def encode_gp_tokens(self, gp_tokens):
         """
@@ -299,7 +310,7 @@ class gpWrapper(nn.Module):
 
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
-            emb_pad, tokens_pad, _ = self.build_input_matrix(
+            emb_pad, tokens_pad, _, attn_mask = self.build_input_matrix(
                 gf_emb,  # geneformer embeddings
                 input_dataset['input_ids'],
                 getattr(self, f'gp{i}_tokens'),
@@ -324,6 +335,7 @@ class gpWrapper(nn.Module):
 
             encoder_output = self.encoder[i](
                 emb_pad,
+                attn_mask=attn_mask,
                 gene_labels=tokens_pad,
                 inference=inference,
                 return_attention=return_attention,
@@ -371,7 +383,7 @@ class gpWrapper(nn.Module):
         # Filter to only keep genes in multiple GP
         # loop through emb list = embeddings are grouped by GP
         for i in range(len(gene_emb_list)):
-            x_out, tokens, _ = self.build_input_matrix(
+            x_out, tokens, _, attn_mask = self.build_input_matrix(
                 gene_emb_list[i],
                 tokens_list[i],
                 tokens_to_keep,
@@ -409,7 +421,7 @@ class gpWrapper(nn.Module):
         inference = False
 
         # Extract embeddings for the gene program of interest
-        emb_pad, tokens_pad, _ = self.build_input_matrix(
+        emb_pad, tokens_pad, _, attn_mask = self.build_input_matrix(
             gf_emb,  # geneformer embeddings
             input_dataset['input_ids'],
             getattr(self, f'gp{gp_idx}_tokens'),
@@ -429,9 +441,12 @@ class gpWrapper(nn.Module):
 
         # get token GP representation, logits for gene level prediction,
         # and gene_labels where masked genes = -100
-
         encoder_output = self.encoder[gp_idx](
-            emb_pad, gene_labels=tokens_pad, inference=inference, return_attention=True
+            emb_pad,
+            attn_mask=attn_mask,
+            gene_labels=tokens_pad,
+            inference=inference,
+            return_attention=True,
         )
 
         # Reorder attention matrix so genes are in the same order in each cell
@@ -443,7 +458,6 @@ class gpWrapper(nn.Module):
         # For the padding tokens, attention will be 0
         # so we can randomly reassign gene tokens to help with ranking
         all_gp_tokens = set(getattr(self, f'gp{gp_idx}_tokens_encoded').values())
-        print('Succesfully got all gp tokens')
         # add one for cls
         all_gp_tokens.add(max(all_gp_tokens) + 1)
 
@@ -477,7 +491,7 @@ class gpWrapper(nn.Module):
         tokens_pad = torch.gather(tokens_pad, 1, indices)
 
         output = {
-            'attn': attn.detach().cpu().numpy(),
+            'attn': csr_matrix(attn.detach().cpu().numpy()),
         }
 
         return output
@@ -671,7 +685,7 @@ class gpAverager(gpWrapper):
 
     def get_last_self_attn(self, gf_emb, input_dataset, gp_idx):
         # Extract embeddings for the gene program of interest
-        emb_pad, tokens_pad, _ = self.build_input_matrix(
+        emb_pad, tokens_pad, _, attn_mask = self.build_input_matrix(
             gf_emb,  # geneformer embeddings
             input_dataset['input_ids'],
             getattr(self, f'gp{gp_idx}_tokens'),
@@ -698,6 +712,9 @@ class gpAverager(gpWrapper):
         # get cosine similarity between gene and cell embedding
         # for each gene in the GP
         cosim = F.cosine_similarity(emb_pad, cell, dim=-1)
+
+        # set to 0 for padding tokens
+        cosim[tokens_pad == -100] = 0
 
         # For the padding tokens, attention will be 0
         # so we can randomly reassign gene tokens to help with ranking

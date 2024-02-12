@@ -13,6 +13,7 @@ import scanpy as sc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy.sparse import vstack
 
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
 from torch import optim
@@ -354,8 +355,7 @@ class scGPL(pl.LightningModule):
         self.gp_labels = []
 
     def _end_test_epoch_attn(self):
-        print('Concatenating attention scores')
-        attn = np.vstack(self.attn_scores)
+        attn = vstack(self.attn_scores)
 
         # convert to dataframe, first sending tensors back to cpu as numpy arrays
         meta_dict = self.cell_metadata
