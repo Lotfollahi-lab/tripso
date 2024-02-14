@@ -1,5 +1,6 @@
 import os
 import random
+import warnings
 from typing import (
     Dict,
     List,
@@ -346,6 +347,8 @@ class gpEval:
     def feature_analysis(
         self, label_to_plot, use_cell_token=False, rank_genes=True, cluster_latent=True
     ):
+        os.chdir(self.output_dir)
+
         if isinstance(label_to_plot, str):
             label_to_plot = [label_to_plot]
 
@@ -358,15 +361,19 @@ class gpEval:
 
         if rank_genes:
             if use_cell_token:
-                raise ValueError('Rank genes operation not meaningful for cel token')
-            for c in label_to_plot:
-                sc.tl.rank_genes_groups(adata, c)
-                sc.pl.rank_genes_groups(
-                    adata,
-                    n_genes=25,
-                    sharey=False,
-                    save=f'_{self.tissue}{token_tag}_by_{c}.pdf',
+                warnings.warn(
+                    'Rank genes operation not meaningful for cell token'
+                    'Skipping rank genes'
                 )
+            else:
+                for c in label_to_plot:
+                    sc.tl.rank_genes_groups(adata, c)
+                    sc.pl.rank_genes_groups(
+                        adata,
+                        n_genes=25,
+                        sharey=False,
+                        save=f'_{self.tissue}{token_tag}_by_{c}.pdf',
+                    )
 
         if cluster_latent:
             # make cluster metrics directory

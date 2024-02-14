@@ -244,12 +244,35 @@ class scGPL(pl.LightningModule):
         )
 
         if self.model_type == 'Global':
-            for t in self.model.supervised_tasks:
-                clf_loss = loss_output['loss_clf'][t]
-                setattr(self, f'train_{t}_loss', clf_loss)
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    clf_loss = loss_output['loss_clf'][t]
+                    setattr(self, f'train_{t}_loss', clf_loss)
+                    self.log(
+                        f'train/{t}_loss',
+                        clf_loss,
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=True,
+                        logger=True,
+                        sync_dist=True,
+                    )
+            elif self.global_loss == 'mse':
+                embedding_mse_loss = loss_output['embedding_mse_loss']
                 self.log(
-                    f'train/{t}_loss',
-                    clf_loss,
+                    'train/embedding_mse_loss',
+                    embedding_mse_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+            elif self.global_loss == 'masking':
+                cell_masking_loss = loss_output['cell_masking_loss']
+                self.log(
+                    'train/cell_masking_loss',
+                    cell_masking_loss,
                     on_step=True,
                     on_epoch=True,
                     prog_bar=True,
@@ -398,6 +421,7 @@ class scGPL(pl.LightningModule):
 
                 if self.return_classification_report:
                     true_classes = np.array(self.cell_metadata[t])
+                    predicted_classes = np.array(meta_dict[f'{t}_pred_encoded'])
                     report = classification_report(
                         true_classes, predicted_classes, output_dict=True
                     )
@@ -544,7 +568,6 @@ class scGPL(pl.LightningModule):
 
     def compute_loss(self, batch):
         output = self.forward(batch)
-        print('done forward pass')
 
         # calculate MLM loss for each GP
         gp_loss_dict = {}
@@ -590,8 +613,6 @@ class scGPL(pl.LightningModule):
             'loss_per_gp': gp_loss_dict,
         }
 
-        print('done computing GP loss')
-
         if self.use_gp_similarity_loss:
             gp_similarity_loss = self.compute_gp_similarity_loss(output['z'])
             loss += self.lambda_gp_similarity * gp_similarity_loss
@@ -606,6 +627,19 @@ class scGPL(pl.LightningModule):
                 loss += self.lambda_clf_loss[t] * clf_loss
 
             holder['loss_clf'] = clf_loss_dict
+
+        elif self.global_loss == 'mse':
+            embedding_mse_loss = F.mse_loss(output['cell_token'], output['gf_emb'])
+            holder['embedding_mse_loss'] = embedding_mse_loss
+            loss += embedding_mse_loss
+
+        elif self.global_loss == 'masking':
+            cell_masking_loss = F.cross_entropy(
+                output['gp_logits_lm'].reshape(-1, output['gp_logits_lm'].shape[-1]),
+                output['gp_labels'].reshape(-1),
+            )
+            holder['cell_masking_loss'] = cell_masking_loss
+            loss += cell_masking_loss
 
         holder['total_loss'] = loss
 

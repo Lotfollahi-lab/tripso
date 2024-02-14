@@ -53,6 +53,7 @@ def run_training(
     classification_labels: Optional[list] = None,
     global_attn_heads: Optional[int] = 8,
     supervised_labels: Optional[dict] = None,
+    global_masking_rate: Optional[float] = 0.15,
 ):
     """
     Wrapper function for training gpLearner model
@@ -304,6 +305,8 @@ def run_training(
             add_remaining_var=add_remaining_var,
             supervised_labels=supervised_labels,
             global_attn_heads=global_attn_heads,
+            global_loss=global_loss,
+            global_masking_rate=global_masking_rate,
         )
 
     else:

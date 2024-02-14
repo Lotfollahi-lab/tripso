@@ -521,7 +521,9 @@ class gpWrapper(nn.Module):
 
 
 class cellWrapper(nn.Module):
-    def __init__(self, gp_inputs, n_blocks, num_heads, gp_latent_size):
+    def __init__(
+        self, gp_inputs, n_blocks, num_heads, gp_latent_size, global_masking_rate
+    ):
         super().__init__()
 
         self.n_blocks = n_blocks
@@ -534,7 +536,7 @@ class cellWrapper(nn.Module):
             embed_dim=self.gp_latent_size,
             depth=self.n_blocks,
             num_heads=self.num_heads,
-            mlm_masking_prob=0,
+            mlm_masking_prob=global_masking_rate,
         )
 
     def build_input_matrix(self, z, num_genes_per_cell_list):
@@ -581,7 +583,7 @@ class cellWrapper(nn.Module):
 
         return z, gp_labels, attn_mask
 
-    def forward(self, x):
+    def forward(self, x, inference):
         """
         Input is the dictionary output of gpWrapper
         we need keys z and number of genes per cell
@@ -594,11 +596,15 @@ class cellWrapper(nn.Module):
             z,
             gene_labels=gp_labels,
             attn_mask=attn_mask,
-            inference=True,
+            inference=inference,
             return_attention=False,
         )
 
-        output = {'cell_token': encoder_output['cls'], 'gp_labels': gp_labels}
+        output = {
+            'cell_token': encoder_output['cls'],
+            'gp_logits_lm': encoder_output['logits_lm'],
+            'gp_labels': encoder_output['gene_labels'],
+        }
 
         return output
 
@@ -759,6 +765,9 @@ class gpTransformerBase(nn.Module):
             geneformer_model=geneformer_model, gf_layer_to_quant=gf_layer_to_quant
         )
 
+        # Optionally: extract Geneformer cell embeddings
+        self.gf_cell_encoder = AverageNonZero()
+
         # Set up token sets for each gene program
         if gp_inputs is None:
             gp_inputs = database.columns.tolist()
@@ -797,6 +806,7 @@ class gpTransformerBase(nn.Module):
         return_gene_embeddings=False,
         return_attention=False,
         tokens_to_keep=None,
+        return_gf_cell_emb=False,
     ):
         # input is tokenized dataset
         emb_out = self.gf_wrapper(input_dataset)
@@ -809,6 +819,11 @@ class gpTransformerBase(nn.Module):
             return_attention=return_attention,
             tokens_to_keep=tokens_to_keep,
         )
+
+        # Optionally return geneformer cell embeddings
+        if return_gf_cell_emb:
+            gf_output_dict = self.gf_cell_encoder(emb_out)
+            output['gf_emb'] = gf_output_dict['cls']
 
         return output
 
@@ -835,13 +850,11 @@ class gpTransformerGlobal(gpTransformerBase):
         global_attn_heads=8,
         global_loss='supervised',
         supervised_labels: Optional[Dict] = None,
+        global_masking_rate=0,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.global_attn_heads = global_attn_heads
-
-        if global_loss != 'supervised':
-            raise ValueError('Only supervised learning implemented for now')
 
         self.global_loss = global_loss
 
@@ -850,6 +863,7 @@ class gpTransformerGlobal(gpTransformerBase):
             gp_latent_size=self.gp_latent_size,
             n_blocks=1,
             num_heads=self.global_attn_heads,
+            global_masking_rate=global_masking_rate,
         )
 
         if self.global_loss == 'supervised':
@@ -879,17 +893,35 @@ class gpTransformerGlobal(gpTransformerBase):
         return_attention=False,
         tokens_to_keep=None,
     ):
+        return_gf_cell_emb = True if self.global_loss == 'mse' else False
+
+        if self.global_loss != 'masking':
+            inference = False
+        else:
+            if self.training:
+                inference = False
+            else:
+                inference = True
+
         base_output = super().forward(
-            input_dataset, return_gene_embeddings, return_attention, tokens_to_keep
+            input_dataset,
+            return_gene_embeddings,
+            return_attention,
+            tokens_to_keep,
+            return_gf_cell_emb,
         )
 
-        cell_output = self.cell_token_learner(base_output)
+        cell_output = self.cell_token_learner(base_output, inference)
 
         base_output['cell_token'] = cell_output['cell_token']
 
         if self.global_loss == 'supervised':
             for t, i in self.supervised_tasks.items():
                 base_output[f'logits_{t}'] = self.clf_head[i](cell_output['cell_token'])
+
+        elif self.global_loss == 'masking':
+            base_output['gp_logits_lm'] = cell_output['gp_logits_lm']
+            base_output['gp_labels'] = cell_output['gp_labels']
 
         return base_output
 
