@@ -1,6 +1,7 @@
 import os
 import random
 from typing import (
+    Dict,
     List,
     Optional,
     Union,
@@ -18,7 +19,11 @@ from sklearn.metrics import (
 )
 
 from ..Datamodules.datamodule import txDataModule
-from ..Models.gp_model import gfBaseline, gpTransformerBase
+from ..Models.gp_model import (
+    gfBaseline,
+    gpTransformerBase,
+    gpTransformerGlobal,
+)
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import (
     do_linear_regression,
@@ -75,6 +80,10 @@ class gpEval:
         Dataframe with the counts of each gene in the dataset
     add_remaining_var : bool
         Whether to initalize new transformer block covering non GP genes
+    supervised_labels : list
+        Dict {label : num_classes} for supervised classification
+    global_attn_heads : int
+        number of heads for learning cell token in global attention model
 
     Returns
     -------
@@ -96,6 +105,8 @@ class gpEval:
         gp_inputs: Optional[list] = None,
         batch_size: Optional[int] = 128,
         add_remaining_var: Optional[bool] = False,
+        supervised_labels: Optional[Dict] = None,
+        global_attn_heads: Optional[int] = 1,
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -138,6 +149,20 @@ class gpEval:
                 add_remaining_var=add_remaining_var,
             )
 
+        elif model_type == 'Global':
+            self.model = gpTransformerGlobal(
+                gene_counts_df=gene_counts_df,
+                database=gpdb,
+                do_ensembl_conversion=do_ensembl_conversion,
+                n_blocks=n_blocks,
+                num_heads=n_heads,
+                gp_latent_size=gp_latent_size,
+                gp_inputs=gp_inputs,
+                add_remaining_var=add_remaining_var,
+                supervised_labels=supervised_labels,
+                global_attn_heads=global_attn_heads,
+            )
+
         elif model_type == 'Mean':
             self.model = gfBaseline(
                 gp_inputs=gpdb.columns,
@@ -178,7 +203,10 @@ class gpEval:
 
         # Set up gpTransformer lightning module
         self.model_type = model_type
-        self.gp_transformer = self._init_trainer()
+        return_classification_report = True if supervised_labels is not None else False
+        self.gp_transformer = self._init_trainer(
+            return_classification_report=return_classification_report
+        )
 
     def _init_trainer(
         self,
@@ -187,6 +215,7 @@ class gpEval:
         gene_file_tag=None,
         return_attention=False,
         gp=None,
+        return_classification_report=False,
     ):
         if (
             self.model_type != 'Mean'
@@ -199,6 +228,7 @@ class gpEval:
                 gene_file_tag=gene_file_tag,
                 return_attention=return_attention,
                 gp=gp,
+                return_classification_report=return_classification_report,
             ).load_from_checkpoint(self.checkpoint_path)
         else:
             gp_transformer = scGPL(
@@ -208,6 +238,7 @@ class gpEval:
                 gene_file_tag=gene_file_tag,
                 return_gene_embeddings=return_gene_embeddings,
                 output_dir=self.output_dir,
+                return_classification_report=return_classification_report,
             )
 
         # reset attributes overwritten by loading from checkpoint
@@ -216,6 +247,7 @@ class gpEval:
         gp_transformer.gene_file_tag = gene_file_tag
         gp_transformer.return_attention = return_attention
         gp_transformer.gp = gp
+        gp_transformer.return_classification_report = return_classification_report
 
         return gp_transformer
 
@@ -234,11 +266,15 @@ class gpEval:
             )
             trainer.test(self.gp_transformer, txdata)
 
-    def load_anndata(self):
+    def load_anndata(self, use_cell_token=False):
         """
         Check that adata object exists
         """
-        if os.path.exists('adata_gp_embedding.h5ad'):
+        if use_cell_token:
+            if os.path.exists('adata_cell_embedding.h5ad'):
+                print(f'Loading adata from {self.output_dir}/adata_cell_embedding.h5ad')
+                adata = sc.read_h5ad('adata_cell_embedding.h5ad')
+        elif os.path.exists('adata_gp_embedding.h5ad'):
             print(f'Loading adata from {self.output_dir}/adata_gp_embedding.h5ad')
             adata = sc.read_h5ad('adata_gp_embedding.h5ad')
         else:
@@ -246,11 +282,16 @@ class gpEval:
 
         return adata
 
-    def visualize(self, label_to_plot, gp_to_plot=None):
+    def visualize(self, label_to_plot, use_cell_token=False, gp_to_plot=None):
         """
         UMAP of GP embeddings
         """
-        adata = self.load_anndata()
+        if use_cell_token:
+            adata = self.load_anndata(use_cell_token=True)
+            cell_token_tag = '_global_token'
+        else:
+            adata = self.load_anndata()
+            cell_token_tag = ''
 
         if isinstance(label_to_plot, str):
             label_to_plot = [label_to_plot]
@@ -259,12 +300,15 @@ class gpEval:
             adata = remove_single_data_points(adata, c)
 
         for c in label_to_plot:
-            sc.pl.umap(adata, color=c, save=f'_{self.tissue}_{c}.pdf')
+            sc.pl.umap(adata, color=c, save=f'_{self.tissue}_{c}{cell_token_tag}.pdf')
 
-        if gp_to_plot is None:
-            gp_to_plot = self.gp_inputs
-        for gp in gp_to_plot:
-            viz_gp(gp, color_by=label_to_plot, adata=adata, save_to=self.tissue)
+        if use_cell_token is False:
+            if isinstance(gp_to_plot, str):
+                gp_to_plot = [gp_to_plot]
+            if gp_to_plot is None:
+                gp_to_plot = self.gp_inputs
+            for gp in gp_to_plot:
+                viz_gp(gp, color_by=label_to_plot, adata=adata, save_to=self.tissue)
 
     def _evaluate_clustering_cells(self, odata, recompute_umap=False):
         adata = odata.copy()
@@ -299,17 +343,29 @@ class gpEval:
 
         return output_df
 
-    def feature_analysis(self, label_to_plot, rank_genes=True, cluster_latent=True):
+    def feature_analysis(
+        self, label_to_plot, use_cell_token=False, rank_genes=True, cluster_latent=True
+    ):
         if isinstance(label_to_plot, str):
             label_to_plot = [label_to_plot]
 
-        adata = self.load_anndata()
+        if use_cell_token:
+            adata = self.load_anndata(use_cell_token=True)
+            token_tag = '_global_token'
+        else:
+            adata = self.load_anndata()
+            token_tag = ''
 
         if rank_genes:
+            if use_cell_token:
+                raise ValueError('Rank genes operation not meaningful for cel token')
             for c in label_to_plot:
                 sc.tl.rank_genes_groups(adata, c)
                 sc.pl.rank_genes_groups(
-                    adata, n_genes=25, sharey=False, save=f'_{self.tissue}_by_{c}.pdf'
+                    adata,
+                    n_genes=25,
+                    sharey=False,
+                    save=f'_{self.tissue}{token_tag}_by_{c}.pdf',
                 )
 
         if cluster_latent:
@@ -319,25 +375,31 @@ class gpEval:
 
             df = self._evaluate_clustering_cells(adata)
             df.to_csv(
-                os.path.join('cluster_metrics', 'latent_space_clustering_metrics.csv'),
+                os.path.join(
+                    'cluster_metrics', 'latent_space_clustering_metrics{token_tag}.csv'
+                ),
                 index=False,
             )
 
             # now for each gp:
-            for gp in self.gp_inputs:
-                df = self._evaluate_clustering_cells(
-                    adata[:, adata.var['gp_idx'].str.startswith(gp)],
-                    recompute_umap=True,
-                )
-                df.to_csv(
-                    os.path.join(
-                        'cluster_metrics', f'{gp}_latent_space_clustering_metrics.csv'
-                    ),
-                    index=False,
-                )
+            # (skip if focusing on cell token)
+            if use_cell_token is False:
+                for gp in self.gp_inputs:
+                    df = self._evaluate_clustering_cells(
+                        adata[:, adata.var['gp_idx'].str.startswith(gp)],
+                        recompute_umap=True,
+                    )
+                    df.to_csv(
+                        os.path.join(
+                            'cluster_metrics',
+                            f'{gp}_latent_space_clustering_metrics.csv',
+                        ),
+                        index=False,
+                    )
 
     def logistic_regression(
         self,
+        use_cell_token=False,
         gp_features: Union[List, str] = 'all',
         labels=['cell_type', 'condition'],
         data_to_model='cell',  # "cell", "gene_singleGP" or "gene_multiGP"
@@ -349,6 +411,9 @@ class gpEval:
 
         Parameters
         ----------
+        use_cell_token : bool
+            If True, will use cell token
+            If False, will use GP tokens
         gp_features : list
             List of GP to use as features
             If "all", will use all GP
@@ -373,36 +438,37 @@ class gpEval:
             labels = [labels]
 
         if data_to_model == 'cell':
-            adata = self.load_anndata()
-
             if not os.path.exists('cell_metrics'):
                 os.makedirs('cell_metrics')
 
-            if gp_features == 'concat':
+            if use_cell_token:
+                adata = self.load_anndata(use_cell_token=True)
                 for c in labels:
                     do_logistic_regression(
                         adata,
                         c,
                         os.path.join(self.output_dir, 'cell_metrics'),
-                        f'{c}_prediction_from_concat_gp',
+                        f'{c}_prediction_from_global_cell_token',
                     )
 
             else:
+                adata = self.load_anndata()
+
                 if gp_features == 'all':
                     gp_features = self.gp_inputs
                     gp_features = list(gp_features)
 
-                for gp in gp_features:
-                    for c in labels:
-                        do_logistic_regression(
-                            adata=adata[:, adata.var['gp_idx'].str.startswith(gp)],
-                            labels_var=c,
-                            output_directory=os.path.join(
-                                self.output_dir, 'cell_metrics'
-                            ),
-                            filename=f"{c}_prediction_{gp.replace('/', '_')}",
-                            variable_to_track={'GP': gp},
-                        )
+                    for gp in gp_features:
+                        for c in labels:
+                            do_logistic_regression(
+                                adata=adata[:, adata.var['gp_idx'].str.startswith(gp)],
+                                labels_var=c,
+                                output_directory=os.path.join(
+                                    self.output_dir, 'cell_metrics'
+                                ),
+                                filename=f"{c}_prediction_{gp.replace('/', '_')}",
+                                variable_to_track={'GP': gp},
+                            )
 
         elif data_to_model == 'gene_mutliGP':
             txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
@@ -483,6 +549,7 @@ class gpEval:
 
     def linear_regression(
         self,
+        use_cell_token=False,
         gp_features: Union[List, str] = 'all',
         labels=['cell_type', 'condition'],
     ):
@@ -504,21 +571,21 @@ class gpEval:
         if isinstance(labels, str):
             labels = [labels]
 
-        adata = self.load_anndata()
-
         if not os.path.exists('cell_metrics'):
             os.makedirs('cell_metrics')
 
-        if gp_features == 'concat':
+        if use_cell_token:
+            adata = self.load_anndata(use_cell_token=True)
             for c in labels:
                 do_linear_regression(
                     adata,
                     c,
                     os.path.join(self.output_dir, 'cell_metrics'),
-                    f'{c}_prediction_from_concat_gp',
+                    f'{c}_prediction_from_global_cell_token',
                 )
-
         else:
+            adata = self.load_anndata()
+
             if gp_features == 'all':
                 gp_features = self.gp_inputs
                 gp_features = list(gp_features)
@@ -539,8 +606,8 @@ class gpEval:
         """
         os.chdir(self.output_dir)
 
-        if gp not in self.gp_inputs:
-            raise ValueError(f'{gp} not in GP inputs')
+        if (gp != 'cell_token') and (gp not in self.gp_inputs):
+            raise ValueError(f'{gp} must be one of "cell_token" or {self.gp_inputs}')
 
         # Initialize trainer
         txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)

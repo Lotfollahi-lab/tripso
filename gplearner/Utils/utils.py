@@ -567,6 +567,30 @@ class mlm_mask_generator:
 ###################################
 
 
+def wrangle_classification_report(report):
+    # Prepare dataframe for output
+    # Initialize empty lists for each column
+    output_label = []
+    metrics = []
+    values = []
+
+    # Iterate through the dictionary to extract the data
+    for output_class, metrics_dict in report.items():
+        if output_class != 'accuracy':
+            for metric, value in metrics_dict.items():
+                output_label.append(output_class)
+                metrics.append(metric)
+                values.append(value)
+
+    # Save to disk
+    output_df = pd.DataFrame(
+        {'output_class': output_label, 'metric': metrics, 'value': values}
+    )
+    output_df['accuracy'] = report['accuracy']
+
+    return output_df
+
+
 def do_logistic_regression(
     adata,
     labels_var,
@@ -603,36 +627,7 @@ def do_logistic_regression(
     # Get classification report
     report = classification_report(test_labels, pred_labels, output_dict=True)
 
-    # Prepare dataframe for output
-    # Initialize empty lists for each column
-    output_label = []
-    metrics = []
-    values = []
-
-    # Iterate through the dictionary to extract the data
-    for output_class, metrics_dict in report.items():
-        if output_class != 'accuracy':
-            for metric, value in metrics_dict.items():
-                output_label.append(output_class)
-                metrics.append(metric)
-                values.append(value)
-
-    # Save to disk
-    output_df = pd.DataFrame(
-        {'output_class': output_label, 'metric': metrics, 'value': values}
-    )
-    output_df['accuracy'] = report['accuracy']
-
-    if variable_to_track is not None:
-        for k, v in variable_to_track.items():
-            output_df[k] = v
-
-    # if hparam_to_track is not None:
-    #     # convert to list for iteration
-    #     if type(hparam_to_track) is not list:
-    #         hparam_to_track = [hparam_to_track]
-    #     for h in hparam_to_track:
-    #         output_df[h] = getattr(self, h)
+    output_df = wrangle_classification_report(report)
 
     output_df.to_csv(os.path.join(output_directory, f'{filename}.csv'), index=False)
 

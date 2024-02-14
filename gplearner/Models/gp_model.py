@@ -3,6 +3,7 @@
 ####################################
 
 import warnings
+from typing import Dict, Optional
 
 # imports
 import numpy as np
@@ -304,18 +305,31 @@ class gpWrapper(nn.Module):
         logits_lm_list = []
         gene_labels_list = []
         gene_original_labels_list = []
+        num_genes_per_cell_list = []
 
         gene_emb_list = []
         gp_labels_list = []
 
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
-            emb_pad, tokens_pad, _, attn_mask = self.build_input_matrix(
+            (
+                emb_pad,
+                tokens_pad,
+                num_genes_per_cell,
+                attn_mask,
+            ) = self.build_input_matrix(
                 gf_emb,  # geneformer embeddings
                 input_dataset['input_ids'],
                 getattr(self, f'gp{i}_tokens'),
                 gp_idx=i,
             )
+
+            # track number of genes per cell
+            # divide by GP length
+            num_genes_per_cell = num_genes_per_cell / len(
+                getattr(self, f'gp{i}_tokens')
+            )
+            num_genes_per_cell_list += [num_genes_per_cell]
 
             # Encode tokens for encoding
             tokens_pad_unencoded = tokens_pad
@@ -364,6 +378,7 @@ class gpWrapper(nn.Module):
             'gene_emb_list': gene_emb_list,
             'gp_labels_list': gp_labels_list,
             'gene_original_labels_list': gene_original_labels_list,
+            'num_genes_per_cell_list': num_genes_per_cell_list,
         }
 
         if return_gene_embeddings:
@@ -475,7 +490,9 @@ class gpWrapper(nn.Module):
             new_labels = torch.tensor(list(values_to_fill_in)).to(x.device)
 
             new_padded = torch.concat([x[labeled_genes_idx], new_labels], dim=0)
-            # bring back cls to first position
+
+            # cls is at first position in embedding
+            # so we move the label the first position
             new_padded = torch.cat([new_padded[-1].unsqueeze(0), new_padded[:-1]])
 
             holder.append(new_padded)
@@ -489,6 +506,165 @@ class gpWrapper(nn.Module):
         # Apply sorting to the corresponding rows in x
         attn = torch.gather(attn, 1, indices)
         tokens_pad = torch.gather(tokens_pad, 1, indices)
+
+        # the cls label is 1 + number of gp
+        # so sorting will move it to last position
+        # bring back to the start
+        attn = torch.cat([attn[:, -1].unsqueeze(1), attn[:, :-1]], dim=1)
+        tokens_pad = torch.cat([tokens_pad[-1].unsqueeze(0), tokens_pad[:-1]])
+
+        output = {
+            'attn': csr_matrix(attn.detach().cpu().numpy()),
+        }
+
+        return output
+
+
+class cellWrapper(nn.Module):
+    def __init__(self, gp_inputs, n_blocks, num_heads, gp_latent_size):
+        super().__init__()
+
+        self.n_blocks = n_blocks
+        self.num_heads = num_heads
+        self.gp_inputs = gp_inputs
+        self.gp_latent_size = gp_latent_size
+
+        self.encoder = gpTransformerEncoder(
+            n_gp_tokens=len(self.gp_inputs),
+            embed_dim=self.gp_latent_size,
+            depth=self.n_blocks,
+            num_heads=self.num_heads,
+            mlm_masking_prob=0,
+        )
+
+    def build_input_matrix(self, z, num_genes_per_cell_list):
+        # Prepare labels
+        batch_size = z.shape[0]
+        gp_labels = torch.tensor(
+            [[i for i in range(len(self.gp_inputs))]] * batch_size
+        ).to(z.device)
+
+        # reorder gp based on number of genes per cell
+        n_genes_per_cell = torch.tensor(np.array(num_genes_per_cell_list).T).to(
+            z.device
+        )
+
+        # Find the indices that would sort each row in descending order
+        sorted_indices = torch.argsort(-n_genes_per_cell, dim=1)
+
+        # Create a mask where genes per cell are zero
+        zero_mask = n_genes_per_cell == 0
+
+        # Zero out positions where there are zero genes per cell
+        z = torch.where(
+            zero_mask.unsqueeze(-1),
+            torch.zeros_like(z),
+            torch.gather(
+                z, 1, sorted_indices.unsqueeze(-1).expand(-1, -1, self.gp_latent_size)
+            ),
+        )
+        # label should be -100 where there are zero genes per cell
+        gp_labels = torch.where(
+            zero_mask,
+            torch.ones_like(gp_labels) * -100,
+            torch.gather(gp_labels, 1, sorted_indices),
+        )
+
+        # don't pay attention to those GP
+        attn_mask = torch.zeros(gp_labels.shape[0], gp_labels.shape[1])
+        attn_mask[gp_labels != -100] = 1
+
+        # never mask cls
+        attn_mask = torch.cat(
+            [torch.ones(attn_mask.shape[0], 1).to(attn_mask.device), attn_mask], dim=1
+        ).to(z.device)
+
+        return z, gp_labels, attn_mask
+
+    def forward(self, x):
+        """
+        Input is the dictionary output of gpWrapper
+        we need keys z and number of genes per cell
+        """
+        z, gp_labels, attn_mask = self.build_input_matrix(
+            z=x['z'], num_genes_per_cell_list=x['num_genes_per_cell_list']
+        )
+
+        encoder_output = self.encoder(
+            z,
+            gene_labels=gp_labels,
+            attn_mask=attn_mask,
+            inference=True,
+            return_attention=False,
+        )
+
+        output = {'cell_token': encoder_output['cls'], 'gp_labels': gp_labels}
+
+        return output
+
+    def get_attn(self, x):
+        """
+        Input is the dictionary output of gpWrapper
+        we need keys z and number of genes per cell
+        """
+
+        z, gp_labels, attn_mask = self.build_input_matrix(
+            z=x['z'], num_genes_per_cell_list=x['num_genes_per_cell_list']
+        )
+
+        encoder_output = self.encoder(
+            z,
+            gene_labels=gp_labels,
+            attn_mask=attn_mask,
+            inference=True,
+            return_attention=True,
+        )
+
+        # Reorder attention matrix so GP are in the same order in each cell
+        attn = encoder_output['attention']
+
+        # Average attention across heads
+        attn = attn.mean(dim=1)
+
+        # For the padding tokens, attention will be 0
+        # + 1 for cls
+        all_gp = set([i for i in range(len(self.gp_inputs) + 1)])
+
+        holder = []
+
+        for i in range(gp_labels.shape[0]):
+            # because GP are ranked by number of genes per cell
+            # all the -100 tokens will be at the end
+            x = gp_labels[i, :]
+            labeled_gp_idx = x != -100
+
+            values_to_fill_in = all_gp - set(x[labeled_gp_idx].cpu().numpy().tolist())
+
+            new_labels = torch.tensor(list(values_to_fill_in)).to(x.device)
+
+            new_padded = torch.concat([x[labeled_gp_idx], new_labels], dim=0)
+
+            # cls is at first position in embedding
+            # so we move the label the first position
+            new_padded = torch.cat([new_padded[-1].unsqueeze(0), new_padded[:-1]])
+
+            holder.append(new_padded)
+
+        gp_labels = torch.stack(holder).long().to(attn.device)
+
+        # Reorder attention matrix so GP are in the same order in each cell
+        # Create an index tensor to sort tokens_pad
+        _, indices = torch.sort(gp_labels, dim=1)
+
+        # Apply sorting to the corresponding rows in x
+        attn = torch.gather(attn, 1, indices)
+        gp_labels = torch.gather(gp_labels, 1, indices)
+
+        # the cls label is 1 + number of gp
+        # so sorting will move it to last position
+        # bring back to the start
+        attn = torch.cat([attn[:, -1].unsqueeze(1), attn[:, :-1]], dim=1)
+        gp_labels = torch.cat([gp_labels[-1].unsqueeze(0), gp_labels[:-1]])
 
         output = {
             'attn': csr_matrix(attn.detach().cpu().numpy()),
@@ -649,6 +825,82 @@ class gpTransformerBase(nn.Module):
         return output
 
 
+class gpTransformerGlobal(gpTransformerBase):
+    """
+    Learn individual GP representations + global cell token
+    """
+
+    def __init__(
+        self,
+        global_attn_heads=8,
+        global_loss='supervised',
+        supervised_labels: Optional[Dict] = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.global_attn_heads = global_attn_heads
+
+        if global_loss != 'supervised':
+            raise ValueError('Only supervised learning implemented for now')
+
+        self.global_loss = global_loss
+
+        self.cell_token_learner = cellWrapper(
+            gp_inputs=self.gp_inputs,
+            gp_latent_size=self.gp_latent_size,
+            n_blocks=1,
+            num_heads=self.global_attn_heads,
+        )
+
+        if self.global_loss == 'supervised':
+            if supervised_labels is None:
+                raise ValueError(
+                    'Please provide a dictionary' 'of the form {task_name : n_classes}'
+                )
+
+            for k, n in supervised_labels.items():
+                setattr(self, f'{k}_n_class', n)
+
+            self.supervised_tasks = {
+                t: i for i, t in enumerate(supervised_labels.keys())
+            }
+
+            self.clf_head = nn.ModuleList(
+                [
+                    nn.Linear(self.gp_latent_size, getattr(self, f'{k}_n_class'))
+                    for k in supervised_labels.keys()
+                ]
+            )
+
+    def forward(
+        self,
+        input_dataset,
+        return_gene_embeddings=False,
+        return_attention=False,
+        tokens_to_keep=None,
+    ):
+        base_output = super().forward(
+            input_dataset, return_gene_embeddings, return_attention, tokens_to_keep
+        )
+
+        cell_output = self.cell_token_learner(base_output)
+
+        base_output['cell_token'] = cell_output['cell_token']
+
+        if self.global_loss == 'supervised':
+            for t, i in self.supervised_tasks.items():
+                base_output[f'logits_{t}'] = self.clf_head[i](cell_output['cell_token'])
+
+        return base_output
+
+    def get_cell_token_attention(self, input_dataset):
+        base_output = super().forward(input_dataset)
+
+        output = self.cell_token_learner.get_attn(base_output)
+
+        return output
+
+
 ####################################
 # Baseline : averaging GP embeddings
 ####################################
@@ -660,6 +912,10 @@ class AverageNonZero(nn.Module):
 
     def forward(self, x, **kwargs):
         # extra argument only for compatibility with gpTransformerEncoder
+        # also for compatability: extract tensor if necessary
+        if isinstance(x, dict):
+            x = x['z']
+
         # Replace zero values with NaN to facilitate ignoring them during averaging
         x[x == 0] = float('nan')
 
@@ -804,8 +1060,71 @@ class gfBaseline(gpTransformerBase):
         return output
 
 
+class gfGlobal(gpTransformerGlobal):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        self.cell_token_learner = AverageNonZero()
+
+    def get_cell_token_attention(self, input_dataset):
+        warnings.warn(
+            'Using model type : Mean'
+            'Attention matrices are not available for this model type.'
+            'Instead, we return the cosine similarity between GP embeddings'
+            'and the mean GP embedding for that GP.'
+            'but note that this is not a true attention matrix.'
+        )
+
+        output = super().forward(input_dataset, return_gp_cls=True)
+
+        # get cosine similarity between cell and GP embedding
+        # for each gene in the GP
+        cosim = F.cosine_similarity(output['gp_cls'], output['cell_token'], dim=-1)
+
+        # set to 0 for padding tokens
+        cosim[output['gp_labels'] == -100] = 0
+
+        # For the padding tokens, attention will be 0
+        all_gp = set([i for i in range(len(self.gp_inputs))])
+
+        holder = []
+
+        gp_labels = output['gp_labels']
+
+        for i in range(gp_labels.shape[0]):
+            # because GP are ranked by number of genes per cell
+            # all the -100 tokens will be at the end
+            x = gp_labels[i, :]
+            labeled_gp_idx = x != -100
+
+            values_to_fill_in = all_gp - set(x[labeled_gp_idx].cpu().numpy().tolist())
+            new_labels = torch.tensor(list(values_to_fill_in)).to(x.device)
+
+            new_padded = torch.concat([x[labeled_gp_idx], new_labels], dim=0)
+            # bring back cls to first position
+            new_padded = torch.cat([new_padded[-1].unsqueeze(0), new_padded[:-1]])
+
+            holder.append(new_padded)
+
+        gp_labels = torch.stack(holder).long().to(gp_labels.device)
+
+        # Reorder attention matrix so GP are in the same order in each cell
+        # Create an index tensor to sort tokens_pad
+        _, indices = torch.sort(gp_labels, dim=1)
+
+        # Apply sorting to the corresponding rows in x
+        cosim = torch.gather(cosim, 1, indices)
+        gp_labels = torch.gather(gp_labels, 1, indices)
+
+        output = {
+            'attn': cosim.detach().cpu().numpy(),
+        }
+
+        return output
+
+
 if __name__ == '__main__':
-    from scgpl.dataloaders.data_module import txDataModule
+    from gplearner.Datamodules.datamodule import txDataModule
 
     txdata = txDataModule(
         folder='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
@@ -825,7 +1144,7 @@ if __name__ == '__main__':
         'scgpl_reproducibility/examples/pbmc_ifn/ifn_db_3gp.csv'
     )
 
-    model = gfBaseline(
+    model = gpTransformerGlobal(
         database=gpdb,
         attn_dropout=0,
         gene_counts_df=None,
@@ -839,11 +1158,9 @@ if __name__ == '__main__':
         gf_layer_to_quant=-1,
     )
 
-    out = model(batch)
+    out = model.get_cell_token_attention(batch)
 
-    print(out['z'].shape)
-
-    for i in range(len(out['logits_lm_list'])):
-        print(out['logits_lm_list'][i].shape)
+    for k, v in out.items():
+        print(k, v.shape)
 
     print('done')

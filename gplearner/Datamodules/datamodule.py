@@ -82,6 +82,31 @@ class txDataModule(LightningDataModule):
         self.pad_token_id = self.gene_token_dict.get('<pad>')
         self.max_len = 2048
 
+    def count_unique_classes(self, supervised_labels):
+        """
+        Count the number of categories in class for supervised learning
+
+        Args:
+            supervised_labels (list): List of classes to count
+
+        Returns:
+            dict: Dictionary with class names as keys and the number of samples
+                for each class as values
+        """
+        self.setup()
+
+        if isinstance(supervised_labels, str):
+            supervised_labels = [supervised_labels]
+        values = {}
+
+        for c in supervised_labels:
+            column_values = [
+                self.train_dataset[i][c] for i in range(len(self.train_dataset))
+            ]
+            values[c] = len(set(column_values))
+
+        return values
+
     def prepare_data(self):
         # Check if the folder path exists
         folder_path = Path(self.folder)
@@ -127,7 +152,7 @@ class txDataModule(LightningDataModule):
             self.val_dataset,
             collate_fn=self.custom_collate,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=self.num_workers,
         )
 

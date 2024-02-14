@@ -18,7 +18,7 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 
 from ..Datamodules.datamodule import txDataModule
-from ..Models.gp_model import gpTransformerBase
+from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import find_latest_file
 
@@ -49,6 +49,10 @@ def run_training(
     add_remaining_var: Optional[bool] = False,
     frac_for_training: Optional[float] = 1.0,
     lambda_gp_similarity: Optional[float] = 1e-2,
+    global_loss: str = 'supervised',
+    classification_labels: Optional[list] = None,
+    global_attn_heads: Optional[int] = 8,
+    supervised_labels: Optional[dict] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -114,6 +118,15 @@ def run_training(
         number of transformer blocks
     lambda_gp_similarity : float
         weight for gp similarity loss
+    global_loss : str
+        loss function for global model
+    classification_labels : list
+        list of labels for supervised classification
+    supervised_labels : list
+        Dict {label : num_classes} for supervised classification
+        TO DO: provide either classification or supervised labels / check compatibility
+    global_attn_heads : int
+        number of heads for learning cell token
 
     """
     ##########################################
@@ -208,6 +221,9 @@ def run_training(
                 'frac_for_training': frac_for_training,
                 'use_gp_similarity_loss': gp_similarity_file is not None,
                 'lambda_gp_similarity': lambda_gp_similarity,
+                'global_loss': global_loss,
+                'classification_labels': classification_labels,
+                'global_attn_heads': global_attn_heads,
             }
         )
 
@@ -269,8 +285,29 @@ def run_training(
             add_remaining_var=add_remaining_var,
         )
 
+    elif model_type == 'Global':
+        # very slow --> provide dictionary as input
+        # if global_loss == 'supervised':
+        #     # set up dictionary with number of classes for supervised labels
+        #     supervised_labels = txdata.count_unique_classes(classification_labels)
+
+        model = gpTransformerGlobal(
+            gene_counts_df=gene_counts_df,
+            database=gpdb,
+            do_ensembl_conversion=do_ensembl_conversion,
+            n_blocks=n_blocks,
+            mgm_mask_ratio=mgm,
+            num_heads=n_heads,
+            gp_latent_size=gp_latent_size,
+            attn_dropout=attn_dropout,
+            gp_inputs=gp_inputs,
+            add_remaining_var=add_remaining_var,
+            supervised_labels=supervised_labels,
+            global_attn_heads=global_attn_heads,
+        )
+
     else:
-        raise ValueError('only Base implemented for now')
+        raise ValueError('only model types Base or Global implemented for now')
 
     use_gp_similarity_loss = gp_similarity_file is not None
 
@@ -280,6 +317,7 @@ def run_training(
         gp_transformer = scGPL(
             model,
             model_type,
+            global_loss=global_loss,
             total_epochs=n_epochs,
             lr=lr,
             lr_scheduler=lr_scheduler,
@@ -294,6 +332,7 @@ def run_training(
         gp_transformer = scGPL(
             model,
             model_type,
+            global_loss=global_loss,
             lr=lr,
             total_epochs=n_epochs,
             lr_scheduler=lr_scheduler,
