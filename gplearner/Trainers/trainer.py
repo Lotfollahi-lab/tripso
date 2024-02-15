@@ -304,8 +304,9 @@ class scGPL(pl.LightningModule):
 
         setattr(self, f'{stage}_gp_similarity_loss', [])
 
-        for t in self.model.supervised_tasks:
-            setattr(self, f'{stage}_{t}_loss', [])
+        if self.global_loss == 'supervised':
+            for t in self.model.supervised_tasks:
+                setattr(self, f'{stage}_{t}_loss', [])
 
         setattr(self, f'{stage}_loss', [])
 
@@ -354,8 +355,10 @@ class scGPL(pl.LightningModule):
         # option to store cell type predictions
         if self.model_type == 'Global':
             self.cell_token.append(output['cell_token'])
-            for t in self.model.supervised_tasks:
-                self.test_clf_pred[t].append(output[f'logits_{t}'])
+
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    self.test_clf_pred[t].append(output[f'logits_{t}'])
 
     def _test_step_genes(self, batch, batch_idx):
         output = self.forward(batch)
@@ -394,6 +397,7 @@ class scGPL(pl.LightningModule):
             self._test_step_cell(batch, batch_idx)
 
     def _end_test_epoch_cell(self):
+        print('Ending test epoch - CELL MODE')
         gp_emb = torch.concat(self.gp_cls, dim=0).cpu().numpy()
 
         # make 2D for annData input
@@ -414,33 +418,38 @@ class scGPL(pl.LightningModule):
         if self.model_type == 'Global':
             cell_token = torch.cat(self.cell_token).cpu().numpy()
 
-            for t in self.model.supervised_tasks:
-                logits = torch.cat(self.test_clf_pred[t])
-                predicted_classes = torch.argmax(logits, dim=1)
-                meta_dict[f'{t}_pred_encoded'] = predicted_classes.cpu().numpy()
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    logits = torch.cat(self.test_clf_pred[t])
+                    predicted_classes = torch.argmax(logits, dim=1)
+                    meta_dict[f'{t}_pred_encoded'] = predicted_classes.cpu().numpy()
 
-                if self.return_classification_report:
-                    true_classes = np.array(self.cell_metadata[t])
-                    predicted_classes = np.array(meta_dict[f'{t}_pred_encoded'])
-                    report = classification_report(
-                        true_classes, predicted_classes, output_dict=True
-                    )
-                    output_df = wrangle_classification_report(report)
-                    output_df.to_csv(
-                        os.path.join(self.output_dir, f'{t}_classification_report.csv'),
-                        index=False,
-                    )
+                    if self.return_classification_report:
+                        true_classes = np.array(self.cell_metadata[t])
+                        predicted_classes = np.array(meta_dict[f'{t}_pred_encoded'])
+                        report = classification_report(
+                            true_classes, predicted_classes, output_dict=True
+                        )
+                        output_df = wrangle_classification_report(report)
+                        output_df.to_csv(
+                            os.path.join(
+                                self.output_dir, f'{t}_classification_report.csv'
+                            ),
+                            index=False,
+                        )
 
         meta = pd.DataFrame(meta_dict)
 
         # add non encoded string version of predicted labels
         if self.model_type == 'Global':
-            for t in self.model.supervised_tasks:
-                conversion = meta[[t, f'{t}_pred_encoded']].drop_duplicates()
-                conversion = {
-                    k: v for k, v in zip(conversion[f'{t}_pred_encoded'], conversion[t])
-                }
-                meta[f'{t}_pred'] = meta[f'{t}_pred_encoded'].map(conversion)
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    conversion = meta[[t, f'{t}_pred_encoded']].drop_duplicates()
+                    conversion = {
+                        k: v
+                        for k, v in zip(conversion[f'{t}_pred_encoded'], conversion[t])
+                    }
+                    meta[f'{t}_pred'] = meta[f'{t}_pred_encoded'].map(conversion)
 
         adata = sc.AnnData(X=gp_emb, obs=meta)
         bdata = sc.AnnData(X=cell_token, obs=meta)
@@ -507,6 +516,7 @@ class scGPL(pl.LightningModule):
         self.gp_labels = []
 
     def _end_test_epoch_attn(self):
+        print('Ending test epoch - ATTENTION MODE')
         attn = vstack(self.attn_scores)
 
         # convert to dataframe, first sending tensors back to cpu as numpy arrays
