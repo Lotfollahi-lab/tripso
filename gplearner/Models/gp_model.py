@@ -212,7 +212,7 @@ class gpWrapper(nn.Module):
         tokens_arr = np.array(holder)
 
         # binary mask (h, i, k)
-        # in cell h, is the gene as position i in GP j at position k?
+        # in cell h, is the gene as position i in our GP at position k?
         mask = (tokens_arr[:, :, np.newaxis] == gp_tokens[np.newaxis, :]).astype(int)
 
         # Now reshape so that we will zero out non GP genes in each cell

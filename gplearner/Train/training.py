@@ -54,6 +54,8 @@ def run_training(
     global_attn_heads: Optional[int] = 8,
     supervised_labels: Optional[dict] = None,
     global_masking_rate: Optional[float] = 0.15,
+    global_training: str = 'simultaneous',
+    path_to_base_model: Optional[str] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -128,6 +130,12 @@ def run_training(
         TO DO: provide either classification or supervised labels / check compatibility
     global_attn_heads : int
         number of heads for learning cell token
+    global_training : str
+        can be 'simultaneous' or 'sequential'
+        if 'sequential' will train global model after training base model
+        if 'simultaneous' will train global model at the same time as base model
+    path_to_base_model : str
+        path to pre-trained gpTransformer Base model for sequential training
 
     """
     ##########################################
@@ -222,11 +230,31 @@ def run_training(
                 'frac_for_training': frac_for_training,
                 'use_gp_similarity_loss': gp_similarity_file is not None,
                 'lambda_gp_similarity': lambda_gp_similarity,
-                'global_loss': global_loss,
-                'classification_labels': classification_labels,
-                'global_attn_heads': global_attn_heads,
             }
         )
+
+        if model_type == 'Global':
+            wandb_logger.experiment.config.update(
+                {
+                    'global_attn_heads': global_attn_heads,
+                    'global_loss': global_loss,
+                    'global_training': global_training,
+                }
+            )
+
+            if global_loss == 'supervised':
+                wandb_logger.experiment.config.update(
+                    {
+                        'classification_labels': classification_labels,
+                    }
+                )
+
+            if global_loss == 'masking':
+                wandb_logger.experiment.config.update(
+                    {
+                        'global_masking_rate': global_masking_rate,
+                    }
+                )
 
     ############################################################################
     # Dataset Preparation
@@ -238,10 +266,6 @@ def run_training(
     txdata = txDataModule(
         folder=dataset_path, batch_size=batch_size, frac_for_training=frac_for_training
     )
-
-    # dataset for getting number of classes
-    # full_dataset = txDataset(folder = dataset_path)
-    # print("Full dataset:", len(full_dataset), "cells")
 
     # Load gpdb
     gpdb = pd.read_csv(gpdb_path)
@@ -353,6 +377,28 @@ def run_training(
         gp_transformer.load_state_dict(checkpoint['state_dict'])
         n_epochs = checkpoint['epoch'] + n_epochs
 
+    # For training global model after base model
+    if global_training == 'sequential':
+        if path_to_base_model is None:
+            raise ValueError(
+                'Please provide path to pre-trained'
+                'gpTransformer Base model for sequential training'
+            )
+        # look for Base model to load
+        # if not found, this will raise an error
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+        checkpoint_path = os.path.join(output_dir, latest_ckpt)
+        checkpoint = torch.load(checkpoint_path)
+        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
+        n_epochs = checkpoint['epoch'] + n_epochs
+
+        # freeze base model
+        for name, param in gp_transformer.named_parameters():
+            if ('cell_token_learner' in name) | ('clf_head' in name):
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
     # check number of available GPUs
     num_gpus = torch.cuda.device_count()
 
@@ -385,7 +431,7 @@ def run_training(
             devices=-1,
             accelerator='auto',
             precision=16,
-            profiler='advanced',
+            profiler='simple',
         )
 
     # Ready to train with new learning rate
@@ -404,10 +450,3 @@ def run_training(
     df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
 
     wandb.finish()
-
-    ############################################################################
-    print(' ')
-    print('***')
-    print('DONE')
-    print('***')
-    print(' ')
