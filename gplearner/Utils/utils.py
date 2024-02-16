@@ -516,7 +516,7 @@ class mlm_mask_generator:
         n_tokens: int,
         masking_prob: float = 0.15,
         randomize_prob: float = 0.1,
-        no_change_prob: float = 0.1,
+        no_change_prob: float = 0.0,
     ):
         """
         * `padding_token` is the padding token `[PAD]`.
@@ -544,19 +544,22 @@ class mlm_mask_generator:
         * `x` is the batch of input token sequences.
          It's a tensor of type `long` with shape `[seq_len, batch_size]`.
         """
-
         # Mask `masking_prob` of tokens
         full_mask = torch.rand(x.shape, device=x.device) < self.masking_prob
-        # Unmask `no_mask_tokens`
-        for t in self.no_mask_tokens:
-            full_mask &= x != t
 
-        # A mask for tokens to be replaced with original tokens
-        unchanged = full_mask & (
-            torch.rand(x.shape, device=x.device) < self.no_change_prob
-        )
+        # # Unmask `no_mask_tokens`
+        # for t in self.no_mask_tokens:
+        #     full_mask &= x != t
 
-        mask = full_mask & ~unchanged
+        # # A mask for tokens to be replaced with original tokens
+        # unchanged = full_mask & (
+        #     torch.rand(x.shape, device=x.device) < self.no_change_prob
+        # )
+
+        # mask = full_mask & ~unchanged
+
+        # print('Mask:', mask.sum())
+        mask = full_mask
 
         # Return the masks for processing inside transformer
         return mask

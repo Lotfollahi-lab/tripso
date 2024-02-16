@@ -390,3 +390,5 @@ if __name__ == '__main__':
     )
     x = torch.randn(1, 5, 32)
     gene_labels = torch.randint(0, 10, (1, 5))
+    out = model(x, gene_labels, inference=False, attn_mask=None, return_attention=False)
+    print(out['gene_labels'])

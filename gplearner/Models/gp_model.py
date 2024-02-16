@@ -556,6 +556,8 @@ class cellWrapper(nn.Module):
 
         # Create a mask where genes per cell are zero
         zero_mask = n_genes_per_cell == 0
+        # reorder the mask based on sorted indices
+        zero_mask = torch.gather(zero_mask, 1, sorted_indices)
 
         # Zero out positions where there are zero genes per cell
         z = torch.where(
@@ -1188,9 +1190,12 @@ if __name__ == '__main__':
         geneformer_model='/lustre/scratch126/cellgen/team292/mm58/'
         'geneformer_endometrium/Geneformer/',
         gf_layer_to_quant=-1,
+        global_loss='masking',
+        global_attn_heads=1,
+        global_masking_rate=0.3,
     )
 
-    out = model.get_cell_token_attention(batch)
+    out = model.forward(batch)
 
     for k, v in out.items():
         print(k, v.shape)
