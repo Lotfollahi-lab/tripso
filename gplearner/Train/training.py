@@ -11,13 +11,14 @@ import torch
 
 # set up wandb
 import wandb
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+# from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 
 from ..Datamodules.datamodule import txDataModule
-from ..Models.gp_model import gpTransformerBase
+from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import find_latest_file
 
@@ -46,7 +47,15 @@ def run_training(
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
     add_remaining_var: Optional[bool] = False,
+    frac_for_training: Optional[float] = 1.0,
     lambda_gp_similarity: Optional[float] = 1e-2,
+    global_loss: str = 'supervised',
+    classification_labels: Optional[list] = None,
+    global_attn_heads: Optional[int] = 8,
+    supervised_labels: Optional[dict] = None,
+    global_masking_rate: Optional[float] = 0.15,
+    global_training: str = 'simultaneous',
+    path_to_base_model: Optional[str] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -105,10 +114,28 @@ def run_training(
         Which GP from GPDB to include in model if None, defaults to all GP
     add_remaining_var : bool
         whether to intialize a new transformer block covering non GP genes
+    frac_for_training : float
+        fraction of the dataset to use for training - default is 1.0
+        (development only)
     n_blocks : int
         number of transformer blocks
     lambda_gp_similarity : float
         weight for gp similarity loss
+    global_loss : str
+        loss function for global model
+    classification_labels : list
+        list of labels for supervised classification
+    supervised_labels : list
+        Dict {label : num_classes} for supervised classification
+        TO DO: provide either classification or supervised labels / check compatibility
+    global_attn_heads : int
+        number of heads for learning cell token
+    global_training : str
+        can be 'simultaneous' or 'sequential'
+        if 'sequential' will train global model after training base model
+        if 'simultaneous' will train global model at the same time as base model
+    path_to_base_model : str
+        path to pre-trained gpTransformer Base model for sequential training
 
     """
     ##########################################
@@ -200,10 +227,34 @@ def run_training(
                 'attn_dropout': attn_dropout,
                 'transformer_block': 'preLN',
                 'learning_rate': lr,
+                'frac_for_training': frac_for_training,
                 'use_gp_similarity_loss': gp_similarity_file is not None,
                 'lambda_gp_similarity': lambda_gp_similarity,
             }
         )
+
+        if model_type == 'Global':
+            wandb_logger.experiment.config.update(
+                {
+                    'global_attn_heads': global_attn_heads,
+                    'global_loss': global_loss,
+                    'global_training': global_training,
+                }
+            )
+
+            if global_loss == 'supervised':
+                wandb_logger.experiment.config.update(
+                    {
+                        'classification_labels': classification_labels,
+                    }
+                )
+
+            if global_loss == 'masking':
+                wandb_logger.experiment.config.update(
+                    {
+                        'global_masking_rate': global_masking_rate,
+                    }
+                )
 
     ############################################################################
     # Dataset Preparation
@@ -212,11 +263,9 @@ def run_training(
     # Instantiate dataset
     # (tokenized dataset should be created already)
     # txdata = DummyDataModule(folder = dataset_path, batch_size=batch_size)
-    txdata = txDataModule(folder=dataset_path, batch_size=batch_size)
-
-    # dataset for getting number of classes
-    # full_dataset = txDataset(folder = dataset_path)
-    # print("Full dataset:", len(full_dataset), "cells")
+    txdata = txDataModule(
+        folder=dataset_path, batch_size=batch_size, frac_for_training=frac_for_training
+    )
 
     # Load gpdb
     gpdb = pd.read_csv(gpdb_path)
@@ -261,8 +310,31 @@ def run_training(
             add_remaining_var=add_remaining_var,
         )
 
+    elif model_type == 'Global':
+        # very slow --> provide dictionary as input
+        # if global_loss == 'supervised':
+        #     # set up dictionary with number of classes for supervised labels
+        #     supervised_labels = txdata.count_unique_classes(classification_labels)
+
+        model = gpTransformerGlobal(
+            gene_counts_df=gene_counts_df,
+            database=gpdb,
+            do_ensembl_conversion=do_ensembl_conversion,
+            n_blocks=n_blocks,
+            mgm_mask_ratio=mgm,
+            num_heads=n_heads,
+            gp_latent_size=gp_latent_size,
+            attn_dropout=attn_dropout,
+            gp_inputs=gp_inputs,
+            add_remaining_var=add_remaining_var,
+            supervised_labels=supervised_labels,
+            global_attn_heads=global_attn_heads,
+            global_loss=global_loss,
+            global_masking_rate=global_masking_rate,
+        )
+
     else:
-        raise ValueError('only Base implemented for now')
+        raise ValueError('only model types Base or Global implemented for now')
 
     use_gp_similarity_loss = gp_similarity_file is not None
 
@@ -272,10 +344,11 @@ def run_training(
         gp_transformer = scGPL(
             model,
             model_type,
+            global_loss=global_loss,
             total_epochs=n_epochs,
             lr=lr,
             lr_scheduler=lr_scheduler,
-            optimizer=DeepSpeedCPUAdam,
+            # optimizer=DeepSpeedCPUAdam,
             use_gp_similarity_loss=use_gp_similarity_loss,
             gp_similarity=gp_similarity,
             output_dir=output_dir,
@@ -286,6 +359,7 @@ def run_training(
         gp_transformer = scGPL(
             model,
             model_type,
+            global_loss=global_loss,
             lr=lr,
             total_epochs=n_epochs,
             lr_scheduler=lr_scheduler,
@@ -302,6 +376,28 @@ def run_training(
         checkpoint = torch.load(checkpoint_path)
         gp_transformer.load_state_dict(checkpoint['state_dict'])
         n_epochs = checkpoint['epoch'] + n_epochs
+
+    # For training global model after base model
+    if global_training == 'sequential':
+        if path_to_base_model is None:
+            raise ValueError(
+                'Please provide path to pre-trained'
+                'gpTransformer Base model for sequential training'
+            )
+        # look for Base model to load
+        # if not found, this will raise an error
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+        checkpoint_path = os.path.join(output_dir, latest_ckpt)
+        checkpoint = torch.load(checkpoint_path)
+        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
+        n_epochs = checkpoint['epoch'] + n_epochs
+
+        # freeze base model
+        for name, param in gp_transformer.named_parameters():
+            if ('cell_token_learner' in name) | ('clf_head' in name):
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
 
     # check number of available GPUs
     num_gpus = torch.cuda.device_count()
@@ -335,7 +431,7 @@ def run_training(
             devices=-1,
             accelerator='auto',
             precision=16,
-            profiler='advanced',
+            profiler='simple',
         )
 
     # Ready to train with new learning rate
@@ -354,10 +450,3 @@ def run_training(
     df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
 
     wandb.finish()
-
-    ############################################################################
-    print(' ')
-    print('***')
-    print('DONE')
-    print('***')
-    print(' ')

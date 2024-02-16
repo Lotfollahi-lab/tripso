@@ -91,7 +91,8 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, return_attention):
+    def forward(self, x, attn_mask, return_attention):
+        # Attention mask is 0 for padding tokens (no attention)
         B, N, C = x.shape
 
         qkv = (
@@ -104,6 +105,15 @@ class Attention(nn.Module):
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
+
+        # apply attention mask for padding tokens
+        # Mask rows:
+        attn = attn * attn_mask.unsqueeze(1).unsqueeze(
+            -1
+        )  # unsqueeze to add head dimension
+        # Mask columns:
+        attn = attn * attn_mask.unsqueeze(1).unsqueeze(1)
+
         # nn.functional.scaled_dot_product_attention returns attn_weight @ value
 
         # with torch.backends.cuda.sdp_kernel(
@@ -163,8 +173,10 @@ class Block(nn.Module):
             drop=drop,
         )
 
-    def forward(self, x, return_attention):
-        y, attn = self.attn(self.norm1(x), return_attention)
+    def forward(self, x, attn_mask, return_attention):
+        y, attn = self.attn(
+            self.norm1(x), attn_mask=attn_mask, return_attention=return_attention
+        )
         # y = self.attn(self.norm1(x))
 
         x = x + self.drop_path(y)
@@ -321,7 +333,13 @@ class gpTransformerEncoder(nn.Module):
         return self.pos_drop(x), gene_labels
 
     def forward(
-        self, x, gene_labels, inference, return_attention, return_gene_embeddings=False
+        self,
+        x,
+        gene_labels,
+        inference,
+        attn_mask,
+        return_attention,
+        return_gene_embeddings=False,
     ):
         # Random masking:
         if inference is False:
@@ -331,7 +349,7 @@ class gpTransformerEncoder(nn.Module):
         x, gene_labels = self.prepare_tokens(x, gene_labels)
 
         for blk in self.blocks:
-            x, attn = blk(x, return_attention)
+            x, attn = blk(x, attn_mask=attn_mask, return_attention=return_attention)
 
         x = self.norm(x)
 
@@ -341,17 +359,21 @@ class gpTransformerEncoder(nn.Module):
 
         output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
 
-        if attn:
+        if attn is not None:
             # TO DO - OPTION TO RETURN INTERMEDIATE ATTENTION LAYERS
-            output['attention'] = attn
+            # TO DO - OPTION TO RETURN FULL ATTENTION MATRIX NOT JUST CLS
+            # print('Attention shape', attn.shape)
+            # (batch, heads, 1 + tokens, 1 + tokens)
+            # print('<cls>', attn[:, :, 0, :].shape)
+            output['attention'] = attn[:, :, 0, :]
 
         if return_gene_embeddings:
             output['gene_embeddings'] = x[:, 1:, :]
 
         return output
 
-    def get_intermediate_layers(self, x, n=1):
-        x = self.prepare_tokens(x)
+    def get_intermediate_layers(self, x, gene_labels, n=1):
+        x, gene_labels = self.prepare_tokens(x, gene_labels)
         # we return the output tokens from the `n` last blocks
         output = []
         for i, blk in enumerate(self.blocks):
@@ -368,8 +390,3 @@ if __name__ == '__main__':
     )
     x = torch.randn(1, 5, 32)
     gene_labels = torch.randint(0, 10, (1, 5))
-    print('Input shape:', x.shape)
-    print('Gene labels shape:', gene_labels.shape)
-    output = model(x, gene_labels, inference=False, return_attention=False)
-    for m in output:
-        print(output[m].shape)

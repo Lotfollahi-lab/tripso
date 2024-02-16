@@ -1,3 +1,4 @@
+from .data_generation import generate_synthetic_sc_dataset, scsim  # noqa: F401
 from .geneformer_utils import EmbExtractor  # noqa: F401
 from .gp_curation_utils import (  # noqa: F401
     Ontology,
@@ -9,6 +10,8 @@ from .utils import (  # noqa: F401
     bool_flag,
     count_genes_per_cell,
     do_balanced_downsampling,
+    do_linear_regression,
+    do_logistic_regression,
     drop_path,
     encode_labels,
     find_genes_in_multiple_gp,
@@ -38,4 +41,7 @@ __all___ = [
     'Ontology',
     'filter_by_size',
     'rm_overlapping_gp',
+    'scsim',
+    'generate_synthetic_sc_dataset' 'do_linear_regression',
+    'do_logistic_regression',
 ]

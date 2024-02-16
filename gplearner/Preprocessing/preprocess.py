@@ -78,7 +78,7 @@ def pp_and_tokenize(
     # check if tokenized data exists
     if not os.path.exists(os.path.join(root_dir, 'data/tokenized')):
         vars_to_keep = {v: v for v in vars_to_keep}
-
+        print('Tokenizing data')
         tk = TranscriptomeTokenizer(vars_to_keep, nproc=4)
 
         if n_splits is None:

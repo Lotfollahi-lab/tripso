@@ -13,14 +13,18 @@ import scanpy as sc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+from scipy.sparse import vstack
+from sklearn.metrics import classification_report
+
+# from deepspeed.ops.adam import DeepSpeedCPUAdam
 from torch import optim
 from torchmetrics.functional import pairwise_cosine_similarity
 
-from gplearner.Utils.utils import (
+from ..Utils.utils import (
     CosineLRwithWarmUp,
     ensembl_to_name,
     token_to_gene,
+    wrangle_classification_report,
 )
 
 
@@ -43,7 +47,36 @@ class scGPL(pl.LightningModule):
         (either Base, Supervised or Unsupervised)
 
     model_type:
-        Base, Supervised or Unsupervised (affects loss function)
+        Mean : learn GP representations by averaging representations
+        Base : use individual transformer blocks to learn GP representations
+        Global : additionally learn a global cell token
+
+    model_loss:
+        loss function for learning global cell token
+        only supervised implemented for now
+
+    lambda_clf_loss:
+        dictionary of form {label_name : value} weighting classification loss
+
+    output_dir:
+        path to save outputs
+
+    use_gp_similarity_loss:
+        whether to use GP similarity loss
+
+    lambda_gp_similarity:
+        weight for GP similarity loss
+
+    gp_similarity:
+        path to file containing GP similarity matrix
+
+    lr:
+        learning rate
+
+    return_classification_report:
+        whether to return classification report at test time
+        set to False if not using supervised learning
+        or if test data does not contain true labels
 
     Returns:
     --------
@@ -54,6 +87,8 @@ class scGPL(pl.LightningModule):
         self,
         model: nn.Module = None,
         model_type: str = 'Base',
+        global_loss: str = 'supervised',
+        lambda_clf_loss=1,
         output_dir: str = '/path/to/output',
         use_gp_similarity_loss: bool = False,
         lambda_gp_similarity=1e-2,
@@ -61,13 +96,18 @@ class scGPL(pl.LightningModule):
         lr: float = 1e-3,
         weight_decay: float = 0,
         optimizer: Union[
-            optim.Adam, optim.SGD, optim.AdamW, DeepSpeedCPUAdam
+            optim.Adam,
+            optim.SGD,
+            optim.AdamW,  # DeepSpeedCPUAdam
         ] = optim.AdamW,
         lr_scheduler='ReduceLROnPlateau',
         total_epochs: int = 100,
         return_gene_embeddings: bool = False,
         tokens_to_keep: Optional[List] = None,
         gene_file_tag: Optional[str] = None,
+        return_attention: bool = False,
+        gp: Optional[str] = None,
+        return_classification_report: bool = False,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -76,6 +116,8 @@ class scGPL(pl.LightningModule):
         # setup model
         self.model = model
         self.model_type = model_type
+        self.global_loss = global_loss
+        self.return_classification_report = return_classification_report
 
         if use_gp_similarity_loss and gp_similarity is None:
             raise ValueError(
@@ -87,10 +129,18 @@ class scGPL(pl.LightningModule):
 
         self.lambda_gp_similarity = lambda_gp_similarity
 
-        if model_type == 'Supervised':
-            raise NotImplementedError(
-                'Trainer for supervised model not yet implemented'
-            )
+        if (self.global_loss == 'supervised') & (self.model_type == 'Global'):
+            if isinstance(lambda_clf_loss, int) or isinstance(lambda_clf_loss, float):
+                self.lambda_clf_loss = {t: 1 for t in self.model.supervised_tasks}
+            elif isinstance(lambda_clf_loss, dict):
+                self.lambda_clf_loss = lambda_clf_loss
+            else:
+                raise ValueError(
+                    'Please provide dictionary with task names as keys'
+                    'classification loss weights as values'
+                    'e.g. {task1: 1, task2: 0.5}'
+                    'or a single float value for all tasks'
+                )
 
         # configuring optimizers
         self.lr = lr
@@ -105,21 +155,31 @@ class scGPL(pl.LightningModule):
             setattr(self, f'{stage}_mgm_gene_pred', {})
             setattr(self, f'{stage}_mgm_gene_true', {})
 
-            setattr(self, f'{stage}_loss_cell', [])
-            setattr(self, f'{stage}_mgm_gp_true', [])
-            setattr(self, f'{stage}_mgm_gp_pred', [])
-
             setattr(self, f'{stage}_gp_similarity_loss', [])
+
+            # For learning global cell token
+            if self.model_type == 'Global':
+                if self.global_loss == 'supervised':
+                    setattr(self, f'{stage}_clf_pred', {})
+                    setattr(self, f'{stage}_clf_true', {})
+
+                    for t in self.model.supervised_tasks:
+                        setattr(self, f'{stage}_{t}_loss', [])
+                        getattr(self, f'{stage}_clf_pred')[t] = []
+                        getattr(self, f'{stage}_clf_true')[t] = []
 
             setattr(self, f'{stage}_loss', [])
 
         # For output - cells
         self.gp_cls: List[float] = []
         self.cell_metadata: Dict[str, Union[str, float]] = {}
+        self.cell_token: List[float] = []
         # For output - genes
         self.x_scgpl: List[float] = []
         self.tokens_scgpl: List[float] = []
         self.gp_labels: List[str] = []
+        # For output - attention
+        self.attn_scores: List[float] = []
 
         self.output_dir = output_dir
 
@@ -127,6 +187,8 @@ class scGPL(pl.LightningModule):
         self.return_gene_embeddings = return_gene_embeddings
         self.tokens_to_keep = tokens_to_keep
         self.gene_file_tag = gene_file_tag
+        self.return_attention = return_attention
+        self.gp = gp
 
     def forward(self, x):
         out = self.model(
@@ -134,6 +196,7 @@ class scGPL(pl.LightningModule):
             return_gene_embeddings=self.return_gene_embeddings,
             tokens_to_keep=self.tokens_to_keep,
         )
+
         return out
 
     def training_step(self, batch, batch_idx):
@@ -180,18 +243,42 @@ class scGPL(pl.LightningModule):
             sync_dist=True,
         )
 
-        if self.model_type == 'Unsupervised':
-            loss_cell = loss_output['loss_cell']
-            self.train_loss_cell.append(loss_cell)
-            self.log(
-                'train/loss_cell',
-                loss_cell,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-                sync_dist=True,
-            )
+        if self.model_type == 'Global':
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    clf_loss = loss_output['loss_clf'][t]
+                    setattr(self, f'train_{t}_loss', clf_loss)
+                    self.log(
+                        f'train/{t}_loss',
+                        clf_loss,
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=True,
+                        logger=True,
+                        sync_dist=True,
+                    )
+            elif self.global_loss == 'mse':
+                embedding_mse_loss = loss_output['embedding_mse_loss']
+                self.log(
+                    'train/embedding_mse_loss',
+                    embedding_mse_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+            elif self.global_loss == 'masking':
+                cell_masking_loss = loss_output['cell_masking_loss']
+                self.log(
+                    'train/cell_masking_loss',
+                    cell_masking_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
 
         if self.use_gp_similarity_loss:
             gp_similarity_loss = loss_output['gp_similarity_loss']
@@ -215,13 +302,44 @@ class scGPL(pl.LightningModule):
         setattr(self, f'{stage}_mgm_gene_pred', {})
         setattr(self, f'{stage}_mgm_gene_true', {})
 
-        setattr(self, f'{stage}_loss_cell', [])
-        setattr(self, f'{stage}_mgm_gp_true', [])
-        setattr(self, f'{stage}_mgm_gp_pred', [])
-
         setattr(self, f'{stage}_gp_similarity_loss', [])
 
+        if self.global_loss == 'supervised':
+            for t in self.model.supervised_tasks:
+                setattr(self, f'{stage}_{t}_loss', [])
+
         setattr(self, f'{stage}_loss', [])
+
+    def validation_step(self, batch, batch_idx):
+        if (self.model_type == 'Global') & (self.global_loss == 'supervised'):
+            output = self.forward(batch)
+
+            # track true labels and predictions
+            for t in self.model.supervised_tasks:
+                self.val_clf_pred[t] += output[f'logits_{t}']
+                self.val_clf_true[t] += batch[t]
+
+    def on_validation_epoch_end(self):
+        if (self.model_type == 'Global') & (self.global_loss == 'supervised'):
+            for t in self.model.supervised_tasks:
+                # calculate accuracy
+                pred = torch.stack(self.val_clf_pred[t], dim=-1).T
+                true = torch.cat(
+                    [torch.unsqueeze(tensor, 0) for tensor in self.val_clf_true[t]]
+                )
+                acc = (pred.argmax(dim=1) == true).float().mean()
+                self.log(
+                    f'val/{t}_accuracy',
+                    acc,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+
+            self.val_clf_pred = {t: [] for t in self.model.supervised_tasks}
+            self.val_clf_true = {t: [] for t in self.model.supervised_tasks}
 
     def _test_step_cell(self, batch, batch_idx):
         output = self.forward(batch)
@@ -234,12 +352,37 @@ class scGPL(pl.LightningModule):
                 else:
                     self.cell_metadata[k] = [v]
 
+        # option to store cell type predictions
+        if self.model_type == 'Global':
+            self.cell_token.append(output['cell_token'])
+
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    self.test_clf_pred[t].append(output[f'logits_{t}'])
+
     def _test_step_genes(self, batch, batch_idx):
         output = self.forward(batch)
 
         self.x_scgpl += output['x_scgpl']
         self.tokens_scgpl += output['tokens_scgpl']
         self.gp_labels += output['gp_labels']
+
+    def _test_step_attn(self, batch, batch_idx):
+        if self.gp == 'cell_token':
+            output = self.model.get_cell_token_attention(batch)
+        else:
+            output = self.model.get_last_self_attn(batch, gp=self.gp)
+
+        # store attention scores here
+        self.attn_scores.append(output['attn'])
+
+        # and metadata for obs
+        for k, v in batch.items():
+            if k != 'input_ids':
+                if k in self.cell_metadata:
+                    self.cell_metadata[k].append(v)
+                else:
+                    self.cell_metadata[k] = [v]
 
     def test_step(
         self,
@@ -248,10 +391,13 @@ class scGPL(pl.LightningModule):
     ):
         if self.return_gene_embeddings:
             self._test_step_genes(batch, batch_idx)
+        elif self.return_attention:
+            self._test_step_attn(batch, batch_idx)
         else:
             self._test_step_cell(batch, batch_idx)
 
     def _end_test_epoch_cell(self):
+        print('Ending test epoch - CELL MODE')
         gp_emb = torch.concat(self.gp_cls, dim=0).cpu().numpy()
 
         # make 2D for annData input
@@ -268,9 +414,45 @@ class scGPL(pl.LightningModule):
                 # flatten list of lists
                 meta_dict[k] = [item for sublist in v for item in sublist]
 
+        # get cell type predictions
+        if self.model_type == 'Global':
+            cell_token = torch.cat(self.cell_token).cpu().numpy()
+
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    logits = torch.cat(self.test_clf_pred[t])
+                    predicted_classes = torch.argmax(logits, dim=1)
+                    meta_dict[f'{t}_pred_encoded'] = predicted_classes.cpu().numpy()
+
+                    if self.return_classification_report:
+                        true_classes = np.array(self.cell_metadata[t])
+                        predicted_classes = np.array(meta_dict[f'{t}_pred_encoded'])
+                        report = classification_report(
+                            true_classes, predicted_classes, output_dict=True
+                        )
+                        output_df = wrangle_classification_report(report)
+                        output_df.to_csv(
+                            os.path.join(
+                                self.output_dir, f'{t}_classification_report.csv'
+                            ),
+                            index=False,
+                        )
+
         meta = pd.DataFrame(meta_dict)
 
+        # add non encoded string version of predicted labels
+        if self.model_type == 'Global':
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    conversion = meta[[t, f'{t}_pred_encoded']].drop_duplicates()
+                    conversion = {
+                        k: v
+                        for k, v in zip(conversion[f'{t}_pred_encoded'], conversion[t])
+                    }
+                    meta[f'{t}_pred'] = meta[f'{t}_pred_encoded'].map(conversion)
+
         adata = sc.AnnData(X=gp_emb, obs=meta)
+        bdata = sc.AnnData(X=cell_token, obs=meta)
 
         # Set the var_names attribute of the AnnData object to the GP names
         # + index for each of the positions in the GP embedding vector
@@ -282,15 +464,21 @@ class scGPL(pl.LightningModule):
 
         adata.var_names = gp_labels
         adata.var['gp_idx'] = adata.var_names
+        adata.write_h5ad(os.path.join(self.output_dir, 'adata_gp_embedding.h5ad'))
 
         sc.pp.neighbors(adata, use_rep='X')
         sc.tl.umap(adata, min_dist=0.4)
 
         adata.write_h5ad(os.path.join(self.output_dir, 'adata_gp_embedding.h5ad'))
 
+        sc.pp.neighbors(bdata, use_rep='X')
+        sc.tl.umap(bdata, min_dist=0.4)
+        bdata.write_h5ad(os.path.join(self.output_dir, 'adata_cell_embedding.h5ad'))
+
         # reset
         self.gp_cls = []
         self.cell_metadata = {}
+        self.cell_token = []
 
     def _end_test_epoch_genes(self):
         # Concatenate tensors
@@ -327,9 +515,64 @@ class scGPL(pl.LightningModule):
         self.tokens_scgpl = []
         self.gp_labels = []
 
+    def _end_test_epoch_attn(self):
+        print('Ending test epoch - ATTENTION MODE')
+        attn = vstack(self.attn_scores)
+
+        # convert to dataframe, first sending tensors back to cpu as numpy arrays
+        meta_dict = self.cell_metadata
+        for k, v in meta_dict.items():
+            if isinstance(v[0], torch.Tensor):
+                meta_dict[k] = torch.cat(v).cpu().numpy().tolist()
+            else:
+                # flatten list of lists
+                meta_dict[k] = [item for sublist in v for item in sublist]
+
+        meta = pd.DataFrame(meta_dict)
+        adata = sc.AnnData(X=attn, obs=meta)
+
+        # Set the var_names attribute of the AnnData object to the gp tokens
+        if self.gp != 'cell_token':
+            gp_idx = self.model.gp_inputs.index(self.gp)
+            tokens = pd.Series(
+                getattr(
+                    self.model.multi_gp_encoder, f'gp{gp_idx}_tokens_encoded'
+                ).keys()
+            )
+            ensembl_ids = tokens.map(token_to_gene)
+            gene_names = ensembl_ids.map(ensembl_to_name)
+
+        if self.gp == 'cell_token':
+            if self.model_type == 'Global':
+                adata.var_names = ['cls'] + list(self.model.gp_inputs)
+            else:
+                adata.var_names = list(self.model.gp_inputs)
+        else:
+            if self.model_type == 'Mean':
+                adata.var_names = list(ensembl_ids)
+                adata.var['token'] = pd.Series(list(tokens), dtype=str).tolist()
+                adata.var['ensembl'] = list(ensembl_ids)
+                adata.var['gene'] = list(gene_names)
+            else:
+                adata.var_names = ['cls'] + list(ensembl_ids)
+                adata.var['token'] = ['cls'] + pd.Series(
+                    list(tokens), dtype=str
+                ).tolist()
+                adata.var['ensembl'] = ['cls'] + list(ensembl_ids)
+                adata.var['gene'] = ['cls'] + list(gene_names)
+
+        adata.write_h5ad(
+            os.path.join(self.output_dir, f'adata_{self.gp}_attn_scores.h5ad')
+        )
+
+        # reset
+        self.attn_scores = []
+
     def on_test_epoch_end(self):
         if self.return_gene_embeddings:
             self._end_test_epoch_genes()
+        elif self.return_attention:
+            self._end_test_epoch_attn()
         else:
             self._end_test_epoch_cell()
 
@@ -375,18 +618,40 @@ class scGPL(pl.LightningModule):
 
         loss = torch.sum(torch.stack(tensor_list))
 
-        if self.use_gp_similarity_loss:
-            gp_similarity_loss = self.compute_gp_similarity_loss(output['z'])
-            loss += self.lambda_gp_similarity * gp_similarity_loss
-
         # package outputs to return flexible number of objects
         holder = {
             'loss_per_gp': gp_loss_dict,
-            'total_loss': loss,
         }
 
         if self.use_gp_similarity_loss:
+            gp_similarity_loss = self.compute_gp_similarity_loss(output['z'])
+            loss += self.lambda_gp_similarity * gp_similarity_loss
             holder['gp_similarity_loss'] = gp_similarity_loss
+
+        if self.global_loss == 'supervised':
+            clf_loss_dict = {}
+
+            for t in self.model.supervised_tasks:
+                clf_loss = self.compute_clf_loss(output[f'logits_{t}'], batch[t])
+                clf_loss_dict[t] = clf_loss
+                loss += self.lambda_clf_loss[t] * clf_loss
+
+            holder['loss_clf'] = clf_loss_dict
+
+        elif self.global_loss == 'mse':
+            embedding_mse_loss = F.mse_loss(output['cell_token'], output['gf_emb'])
+            holder['embedding_mse_loss'] = embedding_mse_loss
+            loss += embedding_mse_loss
+
+        elif self.global_loss == 'masking':
+            cell_masking_loss = F.cross_entropy(
+                output['gp_logits_lm'].reshape(-1, output['gp_logits_lm'].shape[-1]),
+                output['gp_labels'].reshape(-1),
+            )
+            holder['cell_masking_loss'] = cell_masking_loss
+            loss += cell_masking_loss
+
+        holder['total_loss'] = loss
 
         return holder
 
@@ -405,6 +670,9 @@ class scGPL(pl.LightningModule):
 
         return gp_similarity_loss
 
+    def compute_clf_loss(self, logits, labels):
+        return F.cross_entropy(logits, labels)
+
     def configure_optimizers(self):
         # Define optimizer and may be consider weight decay
         # to improve generalization L2 regularization
@@ -413,7 +681,7 @@ class scGPL(pl.LightningModule):
         params = list(self.model.named_parameters())
 
         def add_custom_lr(n):
-            return 'cell_token_learner' in n
+            return 'clf_head' in n
 
         grouped_parameters = [
             {'params': [p for n, p in params if not add_custom_lr(n)], 'lr': self.lr},

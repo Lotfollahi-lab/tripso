@@ -30,7 +30,7 @@ class txDataset(Dataset):
         self.gdata = load_from_disk(folder)
 
         self.num_classes = len(set(self.gdata['label']))
-        self.num_envs = len(set(self.gdata['env']))
+        # self.num_envs = len(set(self.gdata['env']))
 
         # Metadata to keep track of
         # (we assume filtering of obs columns happens at
@@ -53,6 +53,8 @@ class txDataModule(LightningDataModule):
         batch_size=3,
         num_workers=1,
         shuffle=False,
+        # development only:
+        frac_for_training=1,
     ):
         """Create a datamodule from a tokenized Geneformer dataset
 
@@ -63,6 +65,8 @@ class txDataModule(LightningDataModule):
                 Defaults to 0.
             shuffle (bool, optional): Whether or not to have shuffling behavior
                 during sampling. Defaults to False.
+            frac_for_training (float, optional): The fraction of the dataset to use
+                for training. Defaults to 1.
         """
         super().__init__()
         self.folder = folder
@@ -70,12 +74,38 @@ class txDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.shuffle = shuffle
         token_dictionary_file = TOKEN_DICTIONARY_FILE
+        self.frac_for_training = frac_for_training
 
         with open(token_dictionary_file, 'rb') as f:
             self.gene_token_dict = pickle.load(f)
 
         self.pad_token_id = self.gene_token_dict.get('<pad>')
         self.max_len = 2048
+
+    def count_unique_classes(self, supervised_labels):
+        """
+        Count the number of categories in class for supervised learning
+
+        Args:
+            supervised_labels (list): List of classes to count
+
+        Returns:
+            dict: Dictionary with class names as keys and the number of samples
+                for each class as values
+        """
+        self.setup()
+
+        if isinstance(supervised_labels, str):
+            supervised_labels = [supervised_labels]
+        values = {}
+
+        for c in supervised_labels:
+            column_values = [
+                self.train_dataset[i][c] for i in range(len(self.train_dataset))
+            ]
+            values[c] = len(set(column_values))
+
+        return values
 
     def prepare_data(self):
         # Check if the folder path exists
@@ -88,14 +118,23 @@ class txDataModule(LightningDataModule):
 
         # Calculate lengths for train, validation, and test sets
         dataset_size = len(self.dataset)
-        train_size = int(0.8 * dataset_size)  # 80% for training
+        train_size = int(
+            0.8 * dataset_size * self.frac_for_training
+        )  # 80% for training
+        print(f'Training on {train_size} samples')
         val_size = int(0.1 * dataset_size)  # 10% for validation
-        test_size = dataset_size - train_size - val_size  # Remaining for test
+        test_size = (
+            dataset_size - int(0.8 * dataset_size) - val_size
+        )  # Remaining for test
+        if test_size > 60_000:
+            test_size = 50_000
+        print(f'Testing on {test_size} samples')
+        discard = dataset_size - train_size - val_size - test_size
 
         # Assign Train/val split(s) for use in Dataloaders
-        self.train_dataset, self.val_dataset, self.test_dataset = random_split(
+        self.train_dataset, self.val_dataset, self.test_dataset, _ = random_split(
             self.dataset,
-            [train_size, val_size, test_size],
+            [train_size, val_size, test_size, discard],
             generator=torch.Generator().manual_seed(42),
         )
 
@@ -113,7 +152,7 @@ class txDataModule(LightningDataModule):
             self.val_dataset,
             collate_fn=self.custom_collate,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=self.num_workers,
         )
 

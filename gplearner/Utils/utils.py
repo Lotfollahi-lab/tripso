@@ -17,12 +17,14 @@ import pytorch_lightning as pl
 import scanpy as sc
 import seaborn as sns
 import torch
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     adjusted_rand_score,
     classification_report,
     davies_bouldin_score,
+    mean_squared_error,
     normalized_mutual_info_score,
+    r2_score,
     silhouette_score,
 )
 from sklearn.model_selection import train_test_split
@@ -565,6 +567,30 @@ class mlm_mask_generator:
 ###################################
 
 
+def wrangle_classification_report(report):
+    # Prepare dataframe for output
+    # Initialize empty lists for each column
+    output_label = []
+    metrics = []
+    values = []
+
+    # Iterate through the dictionary to extract the data
+    for output_class, metrics_dict in report.items():
+        if output_class != 'accuracy':
+            for metric, value in metrics_dict.items():
+                output_label.append(output_class)
+                metrics.append(metric)
+                values.append(value)
+
+    # Save to disk
+    output_df = pd.DataFrame(
+        {'output_class': output_label, 'metric': metrics, 'value': values}
+    )
+    output_df['accuracy'] = report['accuracy']
+
+    return output_df
+
+
 def do_logistic_regression(
     adata,
     labels_var,
@@ -601,37 +627,57 @@ def do_logistic_regression(
     # Get classification report
     report = classification_report(test_labels, pred_labels, output_dict=True)
 
-    # Prepare dataframe for output
-    # Initialize empty lists for each column
-    output_label = []
-    metrics = []
-    values = []
+    output_df = wrangle_classification_report(report)
 
-    # Iterate through the dictionary to extract the data
-    for output_class, metrics_dict in report.items():
-        if output_class != 'accuracy':
-            for metric, value in metrics_dict.items():
-                output_label.append(output_class)
-                metrics.append(metric)
-                values.append(value)
+    output_df.to_csv(os.path.join(output_directory, f'{filename}.csv'), index=False)
 
-    # Save to disk
-    output_df = pd.DataFrame(
-        {'output_class': output_label, 'metric': metrics, 'value': values}
+
+def do_linear_regression(
+    adata,
+    labels_var,
+    output_directory,
+    filename,
+    variable_to_track=None,
+):
+    """
+    Linear regression for continuous regression based on embeddings in adata.X
+    """
+    # Split training and testing data
+    train_idx, test_idx = train_test_split(
+        range(len(adata)), test_size=0.2, random_state=42
     )
-    output_df['accuracy'] = report['accuracy']
+
+    # Get train and test data
+    train_data = adata.X[train_idx, :]
+    test_data = adata.X[test_idx, :]
+    train_labels = adata.obs[labels_var][train_idx]
+    test_labels = adata.obs[labels_var][test_idx]
+
+    # Train regressor
+    reg = LinearRegression().fit(train_data, train_labels)
+
+    # Predict on test set
+    pred_labels = reg.predict(test_data)
+
+    # Get mean squared error
+    mse = mean_squared_error(test_labels, pred_labels)
+
+    # Get coefficient of determination
+    r2 = r2_score(test_labels, pred_labels)
+
+    # Prepare dataframe for output
+    output_df = pd.DataFrame(
+        {
+            'metric': ['Mean Squared Error', 'R2'],
+            'value': [mse, r2],
+        }
+    )
 
     if variable_to_track is not None:
         for k, v in variable_to_track.items():
             output_df[k] = v
 
-    # if hparam_to_track is not None:
-    #     # convert to list for iteration
-    #     if type(hparam_to_track) is not list:
-    #         hparam_to_track = [hparam_to_track]
-    #     for h in hparam_to_track:
-    #         output_df[h] = getattr(self, h)
-
+    # Save to disk
     output_df.to_csv(os.path.join(output_directory, f'{filename}.csv'), index=False)
 
 
