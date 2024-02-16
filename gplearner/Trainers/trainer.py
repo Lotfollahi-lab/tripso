@@ -205,32 +205,43 @@ class scGPL(pl.LightningModule):
         loss = loss_output['total_loss']
 
         if len(self.train_loss_per_gp) == 0:
-            for gp in self.model.gp_inputs:
-                self.train_loss_per_gp[gp] = loss_per_gp[gp].unsqueeze(0)
-                self.log(
-                    f'train/{gp}_MGM_loss',
-                    loss_per_gp[gp],
-                    on_step=True,
-                    on_epoch=True,
-                    logger=True,
-                    prog_bar=True,
-                    sync_dist=True,
-                )
-
+            for i, gp in enumerate(self.model.gp_inputs):
+                # only log if requires_grad = True
+                if (
+                    self.model.multi_gp_encoder.encoder[i]
+                    .blocks[0]
+                    .attn.qkv.weight.requires_grad
+                ):
+                    self.train_loss_per_gp[gp] = loss_per_gp[gp].unsqueeze(0)
+                    self.log(
+                        f'train/{gp}_MGM_loss',
+                        loss_per_gp[gp],
+                        on_step=True,
+                        on_epoch=True,
+                        logger=True,
+                        prog_bar=True,
+                        sync_dist=True,
+                    )
         else:
-            for gp in self.model.gp_inputs:
-                self.train_loss_per_gp[gp] = torch.cat(
-                    [self.train_loss_per_gp[gp], loss_per_gp[gp].unsqueeze(0)], dim=0
-                )
-                self.log(
-                    f'train/{gp}_MGM_loss',
-                    loss_per_gp[gp],
-                    on_step=True,
-                    on_epoch=True,
-                    logger=True,
-                    prog_bar=True,
-                    sync_dist=True,
-                )
+            for i, gp in enumerate(self.model.gp_inputs):
+                if (
+                    self.model.multi_gp_encoder.encoder[i]
+                    .blocks[0]
+                    .attn.qkv.weight.requires_grad
+                ):
+                    self.train_loss_per_gp[gp] = torch.cat(
+                        [self.train_loss_per_gp[gp], loss_per_gp[gp].unsqueeze(0)],
+                        dim=0,
+                    )
+                    self.log(
+                        f'train/{gp}_MGM_loss',
+                        loss_per_gp[gp],
+                        on_step=True,
+                        on_epoch=True,
+                        logger=True,
+                        prog_bar=True,
+                        sync_dist=True,
+                    )
 
         self.train_loss.append(loss)
         self.log(
@@ -397,7 +408,6 @@ class scGPL(pl.LightningModule):
             self._test_step_cell(batch, batch_idx)
 
     def _end_test_epoch_cell(self):
-        print('Ending test epoch - CELL MODE')
         gp_emb = torch.concat(self.gp_cls, dim=0).cpu().numpy()
 
         # make 2D for annData input
@@ -516,7 +526,6 @@ class scGPL(pl.LightningModule):
         self.gp_labels = []
 
     def _end_test_epoch_attn(self):
-        print('Ending test epoch - ATTENTION MODE')
         attn = vstack(self.attn_scores)
 
         # convert to dataframe, first sending tensors back to cpu as numpy arrays
@@ -584,37 +593,46 @@ class scGPL(pl.LightningModule):
 
         for i in range(len(self.model.gp_inputs)):
             # Loss
-
-            loss_i = F.cross_entropy(
-                output['logits_lm_list'][i].reshape(
-                    -1, output['logits_lm_list'][i].shape[-1]
-                ),
-                output['gene_labels_list'][i].reshape(-1),
-            )
-
-            if torch.isnan(loss_i):
-                # usually happens if all labels are masked
-                print(f'Loss is NaN in {self.model.gp_inputs[i]}')
-                print('Predictions:')
-                print(output['logits_lm_list'][i])
-                print('')
-                print('True labels:')
-                print(output['gene_labels_list'][i])
-                print('')
-                print('Number of NaNs in predictions:')
-                print(torch.isnan(output['logits_lm_list'][i]).sum())
-                print('')
-                print('Number of NaNs in true labels:')
-                print(torch.isnan(output['gene_labels_list'][i]).sum())
-                gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(
-                    loss_i.device
+            if (
+                self.model.multi_gp_encoder.encoder[i]
+                .blocks[0]
+                .attn.qkv.weight.requires_grad
+            ):
+                loss_i = F.cross_entropy(
+                    output['logits_lm_list'][i].reshape(
+                        -1, output['logits_lm_list'][i].shape[-1]
+                    ),
+                    output['gene_labels_list'][i].reshape(-1),
                 )
 
-            else:
-                gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+                if torch.isnan(loss_i):
+                    # usually happens if all labels are masked
+                    print(f'Loss is NaN in {self.model.gp_inputs[i]}')
+                    print('Predictions:')
+                    print(output['logits_lm_list'][i])
+                    print('')
+                    print('True labels:')
+                    print(output['gene_labels_list'][i])
+                    print('')
+                    print('Number of NaNs in predictions:')
+                    print(torch.isnan(output['logits_lm_list'][i]).sum())
+                    print('')
+                    print('Number of NaNs in true labels:')
+                    print(torch.isnan(output['gene_labels_list'][i]).sum())
+                    gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(
+                        loss_i.device
+                    )
 
-        # compute total loss
-        tensor_list = list(gp_loss_dict.values())
+                else:
+                    gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+
+            else:
+                gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(
+                    output['logits_lm_list'][i].device
+                )
+
+            # compute total loss
+            tensor_list = list(gp_loss_dict.values())
 
         loss = torch.sum(torch.stack(tensor_list))
 

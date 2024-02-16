@@ -55,7 +55,9 @@ def run_training(
     supervised_labels: Optional[dict] = None,
     global_masking_rate: Optional[float] = 0.15,
     global_training: str = 'simultaneous',
-    path_to_base_model: Optional[str] = None,
+    path_to_base_model: str = 'path/to/pretrained/model',
+    learn_new_gp: Optional[bool] = False,
+    gp_to_learn: list = ['novel_gp'],
 ):
     """
     Wrapper function for training gpLearner model
@@ -136,6 +138,11 @@ def run_training(
         if 'simultaneous' will train global model at the same time as base model
     path_to_base_model : str
         path to pre-trained gpTransformer Base model for sequential training
+    learn_new_gp : bool
+        if True, load pretrained gpTransformer model, freeze,
+        and learn new gpTransformer block
+    gp_to_learn : list
+        list of GP to learn if learn_new_gp is True
 
     """
     ##########################################
@@ -387,17 +394,41 @@ def run_training(
         # look for Base model to load
         # if not found, this will raise an error
         latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-        checkpoint_path = os.path.join(output_dir, latest_ckpt)
+        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
         checkpoint = torch.load(checkpoint_path)
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
         n_epochs = checkpoint['epoch'] + n_epochs
 
         # freeze base model
-        for name, param in gp_transformer.named_parameters():
+        for name, param in gp_transformer.model.named_parameters():
             if ('cell_token_learner' in name) | ('clf_head' in name):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
+
+    # Learning new GP
+    if learn_new_gp:
+        # load pretrained model
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type)
+        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        checkpoint = torch.load(checkpoint_path)
+        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
+
+        # get indices of GP to learn
+        if isinstance(gp_to_learn, str):
+            gp_to_learn = [gp_to_learn]
+        gp_idx = [gpdb.columns.get_loc(gp) for gp in gp_to_learn]
+
+        # freeze all GP
+        for name, param in gp_transformer.model.named_parameters():
+            if 'multi_gp_encoder' in name:
+                param.requires_grad = False
+
+        # unfreeze new GP
+        for i in gp_idx:
+            for name, param in gp_transformer.model.named_parameters():
+                if f'multi_gp_encoder.encoder.{i}' in name:
+                    param.requires_grad = True
 
     # check number of available GPUs
     num_gpus = torch.cuda.device_count()
