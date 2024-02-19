@@ -32,6 +32,7 @@ def pp_and_tokenize(
     overlap_threshold: Optional[float] = 0.5,
     max_gp_len: Optional[int] = 100,
     name_tag: Optional[str] = 'Reactome',
+    cov_to_encode: Union[List[str], str] = ['cell_type', 'condition'],
 ):
     """
     Preprocess and tokenize data for scGPL
@@ -119,11 +120,12 @@ def pp_and_tokenize(
             )
 
         # change labels to numerical ids
-        if 'cell_type' in input_data.column_names:
-            input_data = encode_labels(input_data, 'cell_type', 'label')
+        if isinstance(cov_to_encode, str):
+            cov_to_encode = [cov_to_encode]
 
-        if 'condition' in input_data.column_names:
-            input_data = encode_labels(input_data, 'condition', 'env')
+        for col in cov_to_encode:
+            if col in input_data.column_names:
+                input_data = encode_labels(input_data, col, f'{col}_id')
 
         # Subsampling
         if subsample_by is not None:
