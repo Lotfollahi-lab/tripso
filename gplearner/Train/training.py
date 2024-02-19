@@ -58,6 +58,7 @@ def run_training(
     path_to_base_model: str = 'path/to/pretrained/model',
     learn_new_gp: Optional[bool] = False,
     gp_to_learn: list = ['novel_gp'],
+    global_n_blocks: int = 1,
 ):
     """
     Wrapper function for training gpLearner model
@@ -143,6 +144,8 @@ def run_training(
         and learn new gpTransformer block
     gp_to_learn : list
         list of GP to learn if learn_new_gp is True
+    global_n_blocks : int
+        number of transformer blocks for final transformer block
 
     """
     ##########################################
@@ -246,6 +249,7 @@ def run_training(
                     'global_attn_heads': global_attn_heads,
                     'global_loss': global_loss,
                     'global_training': global_training,
+                    'global_n_blocks': global_n_blocks,
                 }
             )
 
@@ -338,6 +342,7 @@ def run_training(
             global_attn_heads=global_attn_heads,
             global_loss=global_loss,
             global_masking_rate=global_masking_rate,
+            global_n_blocks=global_n_blocks,
         )
 
     else:
@@ -399,6 +404,9 @@ def run_training(
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
         n_epochs = checkpoint['epoch'] + n_epochs
 
+        # reset output directory
+        gp_transformer.output_dir = output_dir
+
         # freeze base model
         for name, param in gp_transformer.model.named_parameters():
             if ('cell_token_learner' in name) | ('clf_head' in name):
@@ -413,6 +421,8 @@ def run_training(
         checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
         checkpoint = torch.load(checkpoint_path)
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
+        n_epochs = checkpoint['epoch'] + n_epochs
+        gp_transformer.output_dir = output_dir
 
         # get indices of GP to learn
         if isinstance(gp_to_learn, str):

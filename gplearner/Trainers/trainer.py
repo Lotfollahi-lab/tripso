@@ -605,6 +605,9 @@ class scGPL(pl.LightningModule):
                     output['gene_labels_list'][i].reshape(-1),
                 )
 
+                print('Gene labels shape:', output['gene_labels_list'][i].shape)
+                print('Gene logits shape:', output['logits_lm_list'][i].shape)
+
                 if torch.isnan(loss_i):
                     # usually happens if all labels are masked
                     print(f'Loss is NaN in {self.model.gp_inputs[i]}')
@@ -619,16 +622,16 @@ class scGPL(pl.LightningModule):
                     print('')
                     print('Number of NaNs in true labels:')
                     print(torch.isnan(output['gene_labels_list'][i]).sum())
-                    gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(
-                        loss_i.device
+                    gp_loss_dict[self.model.gp_inputs[i]] = (
+                        torch.tensor(0).to(loss_i.device).float()
                     )
 
                 else:
                     gp_loss_dict[self.model.gp_inputs[i]] = loss_i
 
             else:
-                gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(
-                    output['logits_lm_list'][i].device
+                gp_loss_dict[self.model.gp_inputs[i]] = (
+                    torch.tensor(0).to(output['logits_lm_list'][i].device).float()
                 )
 
             # compute total loss
@@ -666,6 +669,7 @@ class scGPL(pl.LightningModule):
                 output['gp_logits_lm'].reshape(-1, output['gp_logits_lm'].shape[-1]),
                 output['gp_labels'].reshape(-1),
             )
+
             holder['cell_masking_loss'] = cell_masking_loss
             loss += cell_masking_loss
 
