@@ -547,19 +547,18 @@ class mlm_mask_generator:
         # Mask `masking_prob` of tokens
         full_mask = torch.rand(x.shape, device=x.device) < self.masking_prob
 
-        # # Unmask `no_mask_tokens`
-        # for t in self.no_mask_tokens:
-        #     full_mask &= x != t
+        # Unmask `no_mask_tokens`
+        for t in self.no_mask_tokens:
+            full_mask &= x != t
 
-        # # A mask for tokens to be replaced with original tokens
-        # unchanged = full_mask & (
-        #     torch.rand(x.shape, device=x.device) < self.no_change_prob
-        # )
+        # A mask for tokens to be replaced with original tokens
+        unchanged = full_mask & (
+            torch.rand(x.shape, device=x.device) < self.no_change_prob
+        )
 
-        # mask = full_mask & ~unchanged
+        mask = full_mask & ~unchanged
 
-        # print('Mask:', mask.sum())
-        mask = full_mask
+        # mask = full_mask
 
         # Return the masks for processing inside transformer
         return mask
