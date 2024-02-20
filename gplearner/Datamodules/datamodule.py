@@ -29,7 +29,7 @@ class txDataset(Dataset):
         """
         self.gdata = load_from_disk(folder)
 
-        self.num_classes = len(set(self.gdata['label']))
+        # self.num_classes = len(set(self.gdata['label']))
         # self.num_envs = len(set(self.gdata['env']))
 
         # Metadata to keep track of
@@ -182,9 +182,7 @@ class txDataModule(LightningDataModule):
 
         # Keep track of metadata
         for m in self.metadata:
-            if m == 'label':
-                output_dict[m] = torch.tensor([d[m] for d in batch], dtype=torch.long)
-            elif m == 'env':
+            if m.endswith('_id'):
                 output_dict[m] = torch.tensor([d[m] for d in batch], dtype=torch.long)
             else:
                 output_dict[m] = [d[m] for d in batch]

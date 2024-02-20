@@ -108,6 +108,7 @@ class gpEval:
         add_remaining_var: Optional[bool] = False,
         supervised_labels: Optional[Dict] = None,
         global_attn_heads: Optional[int] = 1,
+        global_n_blocks: Optional[int] = 1,
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -162,6 +163,7 @@ class gpEval:
                 add_remaining_var=add_remaining_var,
                 supervised_labels=supervised_labels,
                 global_attn_heads=global_attn_heads,
+                global_n_blocks=global_n_blocks,
             )
 
         elif model_type == 'Mean':
@@ -249,6 +251,7 @@ class gpEval:
         gp_transformer.return_attention = return_attention
         gp_transformer.gp = gp
         gp_transformer.return_classification_report = return_classification_report
+        gp_transformer.output_dir = self.output_dir
 
         return gp_transformer
 

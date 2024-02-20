@@ -1,4 +1,5 @@
 import os
+import warnings
 from typing import (
     Dict,
     List,
@@ -205,32 +206,43 @@ class scGPL(pl.LightningModule):
         loss = loss_output['total_loss']
 
         if len(self.train_loss_per_gp) == 0:
-            for gp in self.model.gp_inputs:
-                self.train_loss_per_gp[gp] = loss_per_gp[gp].unsqueeze(0)
-                self.log(
-                    f'train/{gp}_MGM_loss',
-                    loss_per_gp[gp],
-                    on_step=True,
-                    on_epoch=True,
-                    logger=True,
-                    prog_bar=True,
-                    sync_dist=True,
-                )
-
+            for i, gp in enumerate(self.model.gp_inputs):
+                # only log if requires_grad = True
+                if (
+                    self.model.multi_gp_encoder.encoder[i]
+                    .blocks[0]
+                    .attn.qkv.weight.requires_grad
+                ):
+                    self.train_loss_per_gp[gp] = loss_per_gp[gp].unsqueeze(0)
+                    self.log(
+                        f'train/{gp}_MGM_loss',
+                        loss_per_gp[gp],
+                        on_step=True,
+                        on_epoch=True,
+                        logger=True,
+                        prog_bar=True,
+                        sync_dist=True,
+                    )
         else:
-            for gp in self.model.gp_inputs:
-                self.train_loss_per_gp[gp] = torch.cat(
-                    [self.train_loss_per_gp[gp], loss_per_gp[gp].unsqueeze(0)], dim=0
-                )
-                self.log(
-                    f'train/{gp}_MGM_loss',
-                    loss_per_gp[gp],
-                    on_step=True,
-                    on_epoch=True,
-                    logger=True,
-                    prog_bar=True,
-                    sync_dist=True,
-                )
+            for i, gp in enumerate(self.model.gp_inputs):
+                if (
+                    self.model.multi_gp_encoder.encoder[i]
+                    .blocks[0]
+                    .attn.qkv.weight.requires_grad
+                ):
+                    self.train_loss_per_gp[gp] = torch.cat(
+                        [self.train_loss_per_gp[gp], loss_per_gp[gp].unsqueeze(0)],
+                        dim=0,
+                    )
+                    self.log(
+                        f'train/{gp}_MGM_loss',
+                        loss_per_gp[gp],
+                        on_step=True,
+                        on_epoch=True,
+                        logger=True,
+                        prog_bar=True,
+                        sync_dist=True,
+                    )
 
         self.train_loss.append(loss)
         self.log(
@@ -304,9 +316,10 @@ class scGPL(pl.LightningModule):
 
         setattr(self, f'{stage}_gp_similarity_loss', [])
 
-        if self.global_loss == 'supervised':
-            for t in self.model.supervised_tasks:
-                setattr(self, f'{stage}_{t}_loss', [])
+        if self.model_type == 'Global':
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    setattr(self, f'{stage}_{t}_loss', [])
 
         setattr(self, f'{stage}_loss', [])
 
@@ -397,7 +410,6 @@ class scGPL(pl.LightningModule):
             self._test_step_cell(batch, batch_idx)
 
     def _end_test_epoch_cell(self):
-        print('Ending test epoch - CELL MODE')
         gp_emb = torch.concat(self.gp_cls, dim=0).cpu().numpy()
 
         # make 2D for annData input
@@ -452,7 +464,6 @@ class scGPL(pl.LightningModule):
                     meta[f'{t}_pred'] = meta[f'{t}_pred_encoded'].map(conversion)
 
         adata = sc.AnnData(X=gp_emb, obs=meta)
-        bdata = sc.AnnData(X=cell_token, obs=meta)
 
         # Set the var_names attribute of the AnnData object to the GP names
         # + index for each of the positions in the GP embedding vector
@@ -471,9 +482,11 @@ class scGPL(pl.LightningModule):
 
         adata.write_h5ad(os.path.join(self.output_dir, 'adata_gp_embedding.h5ad'))
 
-        sc.pp.neighbors(bdata, use_rep='X')
-        sc.tl.umap(bdata, min_dist=0.4)
-        bdata.write_h5ad(os.path.join(self.output_dir, 'adata_cell_embedding.h5ad'))
+        if self.model_type == 'Global':
+            bdata = sc.AnnData(X=cell_token, obs=meta)
+            sc.pp.neighbors(bdata, use_rep='X')
+            sc.tl.umap(bdata, min_dist=0.4)
+            bdata.write_h5ad(os.path.join(self.output_dir, 'adata_cell_embedding.h5ad'))
 
         # reset
         self.gp_cls = []
@@ -516,7 +529,6 @@ class scGPL(pl.LightningModule):
         self.gp_labels = []
 
     def _end_test_epoch_attn(self):
-        print('Ending test epoch - ATTENTION MODE')
         attn = vstack(self.attn_scores)
 
         # convert to dataframe, first sending tensors back to cpu as numpy arrays
@@ -561,6 +573,9 @@ class scGPL(pl.LightningModule):
                 adata.var['ensembl'] = ['cls'] + list(ensembl_ids)
                 adata.var['gene'] = ['cls'] + list(gene_names)
 
+        warnings.warn('Converting X array to dense format for writing to disk')
+        adata.X = adata.X.toarray()
+
         adata.write_h5ad(
             os.path.join(self.output_dir, f'adata_{self.gp}_attn_scores.h5ad')
         )
@@ -584,37 +599,46 @@ class scGPL(pl.LightningModule):
 
         for i in range(len(self.model.gp_inputs)):
             # Loss
-
-            loss_i = F.cross_entropy(
-                output['logits_lm_list'][i].reshape(
-                    -1, output['logits_lm_list'][i].shape[-1]
-                ),
-                output['gene_labels_list'][i].reshape(-1),
-            )
-
-            if torch.isnan(loss_i):
-                # usually happens if all labels are masked
-                print(f'Loss is NaN in {self.model.gp_inputs[i]}')
-                print('Predictions:')
-                print(output['logits_lm_list'][i])
-                print('')
-                print('True labels:')
-                print(output['gene_labels_list'][i])
-                print('')
-                print('Number of NaNs in predictions:')
-                print(torch.isnan(output['logits_lm_list'][i]).sum())
-                print('')
-                print('Number of NaNs in true labels:')
-                print(torch.isnan(output['gene_labels_list'][i]).sum())
-                gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(
-                    loss_i.device
+            if (
+                self.model.multi_gp_encoder.encoder[i]
+                .blocks[0]
+                .attn.qkv.weight.requires_grad
+            ):
+                loss_i = F.cross_entropy(
+                    output['logits_lm_list'][i].reshape(
+                        -1, output['logits_lm_list'][i].shape[-1]
+                    ),
+                    output['gene_labels_list'][i].reshape(-1),
                 )
 
-            else:
-                gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+                if torch.isnan(loss_i):
+                    # usually happens if all labels are masked
+                    print(f'Loss is NaN in {self.model.gp_inputs[i]}')
+                    print('Predictions:')
+                    print(output['logits_lm_list'][i])
+                    print('')
+                    print('True labels:')
+                    print(output['gene_labels_list'][i])
+                    print('')
+                    print('Number of NaNs in predictions:')
+                    print(torch.isnan(output['logits_lm_list'][i]).sum())
+                    print('')
+                    print('Number of NaNs in true labels:')
+                    print(torch.isnan(output['gene_labels_list'][i]).sum())
+                    gp_loss_dict[self.model.gp_inputs[i]] = (
+                        torch.tensor(0).to(loss_i.device).float()
+                    )
 
-        # compute total loss
-        tensor_list = list(gp_loss_dict.values())
+                else:
+                    gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+
+            else:
+                gp_loss_dict[self.model.gp_inputs[i]] = (
+                    torch.tensor(0).to(output['logits_lm_list'][i].device).float()
+                )
+
+            # compute total loss
+            tensor_list = list(gp_loss_dict.values())
 
         loss = torch.sum(torch.stack(tensor_list))
 
@@ -628,28 +652,32 @@ class scGPL(pl.LightningModule):
             loss += self.lambda_gp_similarity * gp_similarity_loss
             holder['gp_similarity_loss'] = gp_similarity_loss
 
-        if self.global_loss == 'supervised':
-            clf_loss_dict = {}
+        if self.model_type == 'Global':
+            if self.global_loss == 'supervised':
+                clf_loss_dict = {}
 
-            for t in self.model.supervised_tasks:
-                clf_loss = self.compute_clf_loss(output[f'logits_{t}'], batch[t])
-                clf_loss_dict[t] = clf_loss
-                loss += self.lambda_clf_loss[t] * clf_loss
+                for t in self.model.supervised_tasks:
+                    clf_loss = self.compute_clf_loss(output[f'logits_{t}'], batch[t])
+                    clf_loss_dict[t] = clf_loss
+                    loss += self.lambda_clf_loss[t] * clf_loss
 
-            holder['loss_clf'] = clf_loss_dict
+                holder['loss_clf'] = clf_loss_dict
 
-        elif self.global_loss == 'mse':
-            embedding_mse_loss = F.mse_loss(output['cell_token'], output['gf_emb'])
-            holder['embedding_mse_loss'] = embedding_mse_loss
-            loss += embedding_mse_loss
+            elif self.global_loss == 'mse':
+                embedding_mse_loss = F.mse_loss(output['cell_token'], output['gf_emb'])
+                holder['embedding_mse_loss'] = embedding_mse_loss
+                loss += embedding_mse_loss
 
-        elif self.global_loss == 'masking':
-            cell_masking_loss = F.cross_entropy(
-                output['gp_logits_lm'].reshape(-1, output['gp_logits_lm'].shape[-1]),
-                output['gp_labels'].reshape(-1),
-            )
-            holder['cell_masking_loss'] = cell_masking_loss
-            loss += cell_masking_loss
+            elif self.global_loss == 'masking':
+                cell_masking_loss = F.cross_entropy(
+                    output['gp_logits_lm'].reshape(
+                        -1, output['gp_logits_lm'].shape[-1]
+                    ),
+                    output['gp_labels'].reshape(-1),
+                )
+
+                holder['cell_masking_loss'] = cell_masking_loss
+                loss += cell_masking_loss
 
         holder['total_loss'] = loss
 

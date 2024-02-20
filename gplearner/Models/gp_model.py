@@ -853,6 +853,7 @@ class gpTransformerGlobal(gpTransformerBase):
         global_loss='supervised',
         supervised_labels: Optional[Dict] = None,
         global_masking_rate=0,
+        global_n_blocks=1,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -863,7 +864,7 @@ class gpTransformerGlobal(gpTransformerBase):
         self.cell_token_learner = cellWrapper(
             gp_inputs=self.gp_inputs,
             gp_latent_size=self.gp_latent_size,
-            n_blocks=1,
+            n_blocks=global_n_blocks,
             num_heads=self.global_attn_heads,
             global_masking_rate=global_masking_rate,
         )

@@ -103,8 +103,6 @@ class Attention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
 
         # apply attention mask for padding tokens
         # Mask rows:
@@ -113,6 +111,9 @@ class Attention(nn.Module):
         )  # unsqueeze to add head dimension
         # Mask columns:
         attn = attn * attn_mask.unsqueeze(1).unsqueeze(1)
+
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
 
         # nn.functional.scaled_dot_product_attention returns attn_weight @ value
 
