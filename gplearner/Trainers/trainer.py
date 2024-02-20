@@ -1,4 +1,5 @@
 import os
+import warnings
 from typing import (
     Dict,
     List,
@@ -315,9 +316,10 @@ class scGPL(pl.LightningModule):
 
         setattr(self, f'{stage}_gp_similarity_loss', [])
 
-        if self.global_loss == 'supervised':
-            for t in self.model.supervised_tasks:
-                setattr(self, f'{stage}_{t}_loss', [])
+        if self.model_type == 'Global':
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    setattr(self, f'{stage}_{t}_loss', [])
 
         setattr(self, f'{stage}_loss', [])
 
@@ -462,7 +464,6 @@ class scGPL(pl.LightningModule):
                     meta[f'{t}_pred'] = meta[f'{t}_pred_encoded'].map(conversion)
 
         adata = sc.AnnData(X=gp_emb, obs=meta)
-        bdata = sc.AnnData(X=cell_token, obs=meta)
 
         # Set the var_names attribute of the AnnData object to the GP names
         # + index for each of the positions in the GP embedding vector
@@ -481,9 +482,11 @@ class scGPL(pl.LightningModule):
 
         adata.write_h5ad(os.path.join(self.output_dir, 'adata_gp_embedding.h5ad'))
 
-        sc.pp.neighbors(bdata, use_rep='X')
-        sc.tl.umap(bdata, min_dist=0.4)
-        bdata.write_h5ad(os.path.join(self.output_dir, 'adata_cell_embedding.h5ad'))
+        if self.model_type == 'Global':
+            bdata = sc.AnnData(X=cell_token, obs=meta)
+            sc.pp.neighbors(bdata, use_rep='X')
+            sc.tl.umap(bdata, min_dist=0.4)
+            bdata.write_h5ad(os.path.join(self.output_dir, 'adata_cell_embedding.h5ad'))
 
         # reset
         self.gp_cls = []
@@ -570,6 +573,9 @@ class scGPL(pl.LightningModule):
                 adata.var['ensembl'] = ['cls'] + list(ensembl_ids)
                 adata.var['gene'] = ['cls'] + list(gene_names)
 
+        warnings.warn('Converting X array to dense format for writing to disk')
+        adata.X = adata.X.toarray()
+
         adata.write_h5ad(
             os.path.join(self.output_dir, f'adata_{self.gp}_attn_scores.h5ad')
         )
@@ -604,9 +610,6 @@ class scGPL(pl.LightningModule):
                     ),
                     output['gene_labels_list'][i].reshape(-1),
                 )
-
-                print('Gene labels shape:', output['gene_labels_list'][i].shape)
-                print('Gene logits shape:', output['logits_lm_list'][i].shape)
 
                 if torch.isnan(loss_i):
                     # usually happens if all labels are masked
@@ -649,29 +652,32 @@ class scGPL(pl.LightningModule):
             loss += self.lambda_gp_similarity * gp_similarity_loss
             holder['gp_similarity_loss'] = gp_similarity_loss
 
-        if self.global_loss == 'supervised':
-            clf_loss_dict = {}
+        if self.model_type == 'Global':
+            if self.global_loss == 'supervised':
+                clf_loss_dict = {}
 
-            for t in self.model.supervised_tasks:
-                clf_loss = self.compute_clf_loss(output[f'logits_{t}'], batch[t])
-                clf_loss_dict[t] = clf_loss
-                loss += self.lambda_clf_loss[t] * clf_loss
+                for t in self.model.supervised_tasks:
+                    clf_loss = self.compute_clf_loss(output[f'logits_{t}'], batch[t])
+                    clf_loss_dict[t] = clf_loss
+                    loss += self.lambda_clf_loss[t] * clf_loss
 
-            holder['loss_clf'] = clf_loss_dict
+                holder['loss_clf'] = clf_loss_dict
 
-        elif self.global_loss == 'mse':
-            embedding_mse_loss = F.mse_loss(output['cell_token'], output['gf_emb'])
-            holder['embedding_mse_loss'] = embedding_mse_loss
-            loss += embedding_mse_loss
+            elif self.global_loss == 'mse':
+                embedding_mse_loss = F.mse_loss(output['cell_token'], output['gf_emb'])
+                holder['embedding_mse_loss'] = embedding_mse_loss
+                loss += embedding_mse_loss
 
-        elif self.global_loss == 'masking':
-            cell_masking_loss = F.cross_entropy(
-                output['gp_logits_lm'].reshape(-1, output['gp_logits_lm'].shape[-1]),
-                output['gp_labels'].reshape(-1),
-            )
+            elif self.global_loss == 'masking':
+                cell_masking_loss = F.cross_entropy(
+                    output['gp_logits_lm'].reshape(
+                        -1, output['gp_logits_lm'].shape[-1]
+                    ),
+                    output['gp_labels'].reshape(-1),
+                )
 
-            holder['cell_masking_loss'] = cell_masking_loss
-            loss += cell_masking_loss
+                holder['cell_masking_loss'] = cell_masking_loss
+                loss += cell_masking_loss
 
         holder['total_loss'] = loss
 
