@@ -321,6 +321,8 @@ def rm_overlapping_gp(df, token_df, threshold=0.3):
 
                 if ni > nj:
                     gp_to_drop.append(j)
+                else:
+                    gp_to_drop.append(i)
 
     print('GP to drop:', *gp_to_drop)
 
