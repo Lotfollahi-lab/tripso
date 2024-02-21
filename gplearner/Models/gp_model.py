@@ -42,10 +42,10 @@ class gfWrapper(nn.Module):
 
         self.gf_emb_extractor = EmbExtractor(emb_layer=gf_layer_to_quant)
 
-    def forward(self, input_dataset):
+    def forward(self, input_dataset, inference):
         # input is tokenized dataset
         emb_out = self.gf_emb_extractor.extract_embs(
-            model=self.gf, input_data=input_dataset
+            model=self.gf, input_data=input_dataset, inference=inference
         )
 
         return emb_out
@@ -810,8 +810,13 @@ class gpTransformerBase(nn.Module):
         tokens_to_keep=None,
         return_gf_cell_emb=False,
     ):
+        if self.training:
+            inference = False
+        else:
+            inference = True
+
         # input is tokenized dataset
-        emb_out = self.gf_wrapper(input_dataset)
+        emb_out = self.gf_wrapper(input_dataset, inference)
 
         # Extract embeddings for each gene program
         output = self.multi_gp_encoder(

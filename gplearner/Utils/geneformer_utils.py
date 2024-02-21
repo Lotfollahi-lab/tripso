@@ -188,7 +188,7 @@ class EmbExtractor:
 
         return torch.tensor(attention_mask).to(minibatch_encoding['input_ids'].device)
 
-    def extract_embs(self, model, input_data):
+    def extract_embs(self, model, input_data, inference):
         """
         Extract embeddings from input data and save as results in output_directory.
 
@@ -218,6 +218,9 @@ class EmbExtractor:
             input_data_minibatch, max_len, self.pad_token_id, model_input_size
         )
 
+        if inference:
+            model.eval()
+
         with torch.no_grad():
             outputs = model(
                 input_ids=input_data_minibatch,
@@ -225,5 +228,7 @@ class EmbExtractor:
             )
 
         embs = outputs.hidden_states[layer_to_quant]
+
+        print('Geneformer output', embs[0, :5, :5])
 
         return embs
