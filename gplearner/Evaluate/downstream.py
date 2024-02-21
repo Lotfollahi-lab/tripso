@@ -168,7 +168,7 @@ class gpEval:
 
         elif model_type == 'Mean':
             self.model = gfBaseline(
-                gp_inputs=gpdb.columns,
+                gp_inputs=gp_inputs,
                 database=gpdb,
                 do_ensembl_conversion=do_ensembl_conversion,
                 gene_counts_df=self.gene_counts_df,
@@ -314,7 +314,7 @@ class gpEval:
             for gp in gp_to_plot:
                 viz_gp(gp, color_by=label_to_plot, adata=adata, save_to=self.tissue)
 
-    def _evaluate_clustering_cells(self, odata, recompute_umap=False):
+    def _evaluate_clustering_cells(self, odata, cluster_labels, recompute_umap=False):
         adata = odata.copy()
 
         if recompute_umap:
@@ -325,25 +325,38 @@ class gpEval:
             sc.tl.leiden(adata)
 
         print('Running cluster evaluation metrics...')
-        ari_ct = adjusted_rand_score(adata.obs['leiden'], adata.obs['cell_type'])
-        if 'condition' in adata.obs.columns:
-            ari_cond = adjusted_rand_score(adata.obs['leiden'], adata.obs['condition'])
-        else:
-            ari_cond = None
+        if cluster_labels is not None:
+            if isinstance(cluster_labels, str):
+                cluster_labels = [cluster_labels]
+
+            ari_holder = []
+            ari_labels = []
+            for c in cluster_labels:
+                adata = remove_single_data_points(adata, c)
+                ari_x = adjusted_rand_score(adata.obs['leiden'], adata.obs[c])
+                ari_holder.append(ari_x)
+                ari_labels.append(c)
+
         sil = silhouette_score(adata.obsm['X_umap'], adata.obs['leiden'])
         db = davies_bouldin_score(adata.obsm['X_umap'], adata.obs['leiden'])
 
         output_df = pd.DataFrame(
             {
                 'metric': [
-                    'ARI_cell',
-                    'ARI_env',
                     'Silhouette_leiden',
                     'Davies_Bouldain_leiden',
                 ],
-                'value': [ari_ct, ari_cond, sil, db],
+                'value': [sil, db],
             }
         )
+
+        if cluster_labels is not None:
+            output_df = pd.concat(
+                [
+                    output_df,
+                    pd.DataFrame({'metric': ari_labels, 'value': ari_holder}),
+                ]
+            )
 
         return output_df
 
@@ -383,7 +396,7 @@ class gpEval:
             if not os.path.exists('cluster_metrics'):
                 os.makedirs('cluster_metrics')
 
-            df = self._evaluate_clustering_cells(adata)
+            df = self._evaluate_clustering_cells(adata, cluster_labels=label_to_plot)
             df.to_csv(
                 os.path.join(
                     'cluster_metrics', 'latent_space_clustering_metrics{token_tag}.csv'
@@ -398,6 +411,7 @@ class gpEval:
                     df = self._evaluate_clustering_cells(
                         adata[:, adata.var['gp_idx'].str.startswith(gp)],
                         recompute_umap=True,
+                        cluster_labels=label_to_plot,
                     )
                     df.to_csv(
                         os.path.join(

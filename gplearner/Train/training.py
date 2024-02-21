@@ -414,6 +414,10 @@ def run_training(
             else:
                 param.requires_grad = False
 
+        # for name, param in model.named_parameters():
+        #     if param.requires_grad:
+        #         print(f"Parameter {name} has gradients.")
+
     # Learning new GP
     if learn_new_gp:
         # load pretrained model
