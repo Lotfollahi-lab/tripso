@@ -10,6 +10,7 @@ from collections import Counter
 from itertools import combinations
 from typing import List, Optional
 
+import anndata as ad
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -591,6 +592,31 @@ def wrangle_classification_report(report):
     output_df['accuracy'] = report['accuracy']
 
     return output_df
+
+
+def subsample_to_rarest_category(adata, col):
+    # Get the counts of each category in the 'celltype' column
+    category_counts = adata.obs[col].value_counts()
+
+    # Get the number of observations for the rarest category
+    rarest_category_count = category_counts.min()
+
+    # Initialize a list to store subsampled DataFrames
+    ad_holder = []
+
+    # Subsample each category to the rarest category count and append to the list
+    for category in category_counts.index:
+        indices_to_keep = adata.obs.index[adata.obs[col] == category]
+        subsampled_indices = np.random.choice(
+            indices_to_keep, rarest_category_count, replace=False
+        )
+        sdata = adata[subsampled_indices, :].copy()
+        ad_holder.append(sdata)
+
+    # Concatenate the list of DataFrames into a single AnnData object
+    subsampled_adata = ad.concat(ad_holder)
+
+    return subsampled_adata
 
 
 def do_logistic_regression(
