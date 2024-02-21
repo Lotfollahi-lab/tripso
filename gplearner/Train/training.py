@@ -398,9 +398,11 @@ def run_training(
             )
         # look for Base model to load
         # if not found, this will raise an error
+        print('path to base model', path_to_base_model)
         latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
         checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        checkpoint = torch.load(checkpoint_path)
+        print('checkpoint path', checkpoint_path)
+        checkpoint = torch.load(latest_ckpt)
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
         n_epochs = checkpoint['epoch'] + n_epochs
 
