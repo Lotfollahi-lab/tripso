@@ -152,11 +152,10 @@ class gpWrapper(nn.Module):
                 )
             )
 
-        for i in range(len(self.gp_inputs)):
-            print(
-                'Number of genes in GP',
-                self.gp_inputs[i],
-                len(getattr(self, f'gp{i}_tokens')),
+        # Optional dimensionality reduction to reduce gene embedding size
+        if self.gp_latent_size != 256:
+            self.dim_reduction = nn.ModuleList(
+                [nn.Linear(256, self.gp_latent_size) for i in range(len(gp_inputs))]
             )
 
     def build_input_matrix(
@@ -220,6 +219,10 @@ class gpWrapper(nn.Module):
 
         # Apply the mask to the data using broadcasting
         masked_latent = gf * mask_expanded
+
+        # Optional dimensionality reduction on geneformer embeddings
+        if self.gp_latent_size != 256:
+            masked_latent = self.dim_reduction[gp_idx](masked_latent)
 
         # Now wrangle so that the non zero genes are first
         # but we maintain the order
