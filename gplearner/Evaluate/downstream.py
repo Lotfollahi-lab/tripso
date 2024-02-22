@@ -85,6 +85,9 @@ class gpEval:
         Dict {label : num_classes} for supervised classification
     global_attn_heads : int
         number of heads for learning cell token in global attention model
+    global_loss :
+        loss used to train global attention model
+        (for compatibility with gpGlobal init)
 
     Returns
     -------
@@ -109,6 +112,7 @@ class gpEval:
         supervised_labels: Optional[Dict] = None,
         global_attn_heads: Optional[int] = 1,
         global_n_blocks: Optional[int] = 1,
+        global_loss: Optional[str] = 'supervised',
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -164,6 +168,7 @@ class gpEval:
                 supervised_labels=supervised_labels,
                 global_attn_heads=global_attn_heads,
                 global_n_blocks=global_n_blocks,
+                global_loss=global_loss,
             )
 
         elif model_type == 'Mean':
@@ -204,6 +209,10 @@ class gpEval:
         self.batch_size = batch_size
         self.gpdb = gpdb
 
+        # for compatability with gpGlobal init
+        self.global_loss = global_loss
+        print('global loss:', self.global_loss)
+
         # Set up gpTransformer lightning module
         self.model_type = model_type
         return_classification_report = True if supervised_labels is not None else False
@@ -232,6 +241,7 @@ class gpEval:
                 return_attention=return_attention,
                 gp=gp,
                 return_classification_report=return_classification_report,
+                global_loss=self.global_loss,
             ).load_from_checkpoint(self.checkpoint_path)
         else:
             gp_transformer = scGPL(

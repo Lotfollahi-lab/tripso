@@ -229,6 +229,4 @@ class EmbExtractor:
 
         embs = outputs.hidden_states[layer_to_quant]
 
-        print('Geneformer output', embs[0, :5, :5])
-
         return embs
