@@ -211,7 +211,6 @@ class gpEval:
 
         # for compatability with gpGlobal init
         self.global_loss = global_loss
-        print('global loss:', self.global_loss)
 
         # Set up gpTransformer lightning module
         self.model_type = model_type
@@ -345,7 +344,7 @@ class gpEval:
                 adata = remove_single_data_points(adata, c)
                 ari_x = adjusted_rand_score(adata.obs['leiden'], adata.obs[c])
                 ari_holder.append(ari_x)
-                ari_labels.append(c)
+                ari_labels.append(f'ari_{c}')
 
         sil = silhouette_score(adata.obsm['X_umap'], adata.obs['leiden'])
         db = davies_bouldin_score(adata.obsm['X_umap'], adata.obs['leiden'])
