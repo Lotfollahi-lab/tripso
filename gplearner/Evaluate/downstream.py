@@ -211,7 +211,6 @@ class gpEval:
 
         # for compatability with gpGlobal init
         self.global_loss = global_loss
-        print('global loss:', self.global_loss)
 
         # Set up gpTransformer lightning module
         self.model_type = model_type
