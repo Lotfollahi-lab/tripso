@@ -594,6 +594,32 @@ def wrangle_classification_report(report):
     return output_df
 
 
+def subsample_cells_per_category(adata, obs_column, num_cells=2000):
+    # Create a new AnnData object to store the subsampled data
+    holder = []
+
+    # Loop through unique categories in the specified obs column
+    for category in adata.obs[obs_column].unique():
+        # Get indices of cells belonging to the current category
+        category_indices = adata.obs[obs_column] == category
+
+        # Randomly subsample 2k cells from the current category
+        if np.sum(category_indices) > num_cells:
+            subsample_indices = np.random.choice(
+                np.where(category_indices)[0], size=num_cells, replace=False
+            )
+        else:
+            # If there are fewer than 2k cells, include all cells in the category
+            subsample_indices = np.where(category_indices)[0]
+
+        holder.append(adata[subsample_indices])
+
+    # Create a new AnnData object to store the subsampled data
+    subsampled_adata = ad.concat(holder)
+
+    return subsampled_adata
+
+
 def subsample_to_rarest_category(adata, col):
     # Get the counts of each category in the 'celltype' column
     category_counts = adata.obs[col].value_counts()

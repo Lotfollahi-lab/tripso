@@ -522,7 +522,13 @@ class gpWrapper(nn.Module):
 
 class cellWrapper(nn.Module):
     def __init__(
-        self, gp_inputs, n_blocks, num_heads, gp_latent_size, global_masking_rate
+        self,
+        gp_inputs,
+        n_blocks,
+        num_heads,
+        gp_latent_size,
+        global_masking_rate,
+        use_pos_emb,
     ):
         super().__init__()
 
@@ -537,6 +543,7 @@ class cellWrapper(nn.Module):
             depth=self.n_blocks,
             num_heads=self.num_heads,
             mlm_masking_prob=global_masking_rate,
+            use_pos_emb=use_pos_emb,
         )
 
     def build_input_matrix(self, z, num_genes_per_cell_list):
@@ -859,6 +866,7 @@ class gpTransformerGlobal(gpTransformerBase):
         supervised_labels: Optional[Dict] = None,
         global_masking_rate=0,
         global_n_blocks=1,
+        use_pos_emb=True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -872,6 +880,7 @@ class gpTransformerGlobal(gpTransformerBase):
             n_blocks=global_n_blocks,
             num_heads=self.global_attn_heads,
             global_masking_rate=global_masking_rate,
+            use_pos_emb=use_pos_emb,
         )
 
         if self.global_loss == 'supervised':

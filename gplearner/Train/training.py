@@ -59,6 +59,7 @@ def run_training(
     learn_new_gp: Optional[bool] = False,
     gp_to_learn: list = ['novel_gp'],
     global_n_blocks: int = 1,
+    global_use_pos_emb: bool = True,
 ):
     """
     Wrapper function for training gpLearner model
@@ -146,6 +147,8 @@ def run_training(
         list of GP to learn if learn_new_gp is True
     global_n_blocks : int
         number of transformer blocks for final transformer block
+    global_use_pos_emb : bool
+        whether to use positional embeddings for final transformer block
 
     """
     ##########################################
@@ -250,6 +253,7 @@ def run_training(
                     'global_loss': global_loss,
                     'global_training': global_training,
                     'global_n_blocks': global_n_blocks,
+                    'global_use_pos_emb': global_use_pos_emb,
                 }
             )
 
@@ -343,6 +347,7 @@ def run_training(
             global_loss=global_loss,
             global_masking_rate=global_masking_rate,
             global_n_blocks=global_n_blocks,
+            use_pos_emb=global_use_pos_emb,
         )
 
     else:

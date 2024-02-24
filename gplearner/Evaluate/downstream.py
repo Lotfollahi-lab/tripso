@@ -88,6 +88,8 @@ class gpEval:
     global_loss :
         loss used to train global attention model
         (for compatibility with gpGlobal init)
+    global_use_pos_emb : bool
+        Whether to use positional embeddings in global attention model
 
     Returns
     -------
@@ -113,6 +115,7 @@ class gpEval:
         global_attn_heads: Optional[int] = 1,
         global_n_blocks: Optional[int] = 1,
         global_loss: Optional[str] = 'supervised',
+        global_use_pos_emb: Optional[bool] = True,
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -169,6 +172,7 @@ class gpEval:
                 global_attn_heads=global_attn_heads,
                 global_n_blocks=global_n_blocks,
                 global_loss=global_loss,
+                use_pos_emb=global_use_pos_emb,
             )
 
         elif model_type == 'Mean':
