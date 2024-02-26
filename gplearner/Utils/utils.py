@@ -580,10 +580,13 @@ def wrangle_classification_report(report):
     # Iterate through the dictionary to extract the data
     for output_class, metrics_dict in report.items():
         if output_class != 'accuracy':
-            for metric, value in metrics_dict.items():
-                output_label.append(output_class)
-                metrics.append(metric)
-                values.append(value)
+            if isinstance(metrics_dict, dict):
+                for metric, value in metrics_dict.items():
+                    output_label.append(output_class)
+                    metrics.append(metric)
+                    values.append(value)
+            else:
+                print(metrics_dict)
 
     # Save to disk
     output_df = pd.DataFrame(
@@ -682,6 +685,10 @@ def do_logistic_regression(
     report = classification_report(test_labels, pred_labels, output_dict=True)
 
     output_df = wrangle_classification_report(report)
+
+    if variable_to_track:
+        for k, v in variable_to_track.items():
+            output_df[k] = v
 
     output_df.to_csv(os.path.join(output_directory, f'{filename}.csv'), index=False)
 
