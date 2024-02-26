@@ -657,6 +657,10 @@ def do_logistic_regression(
 
     output_df = wrangle_classification_report(report)
 
+    if variable_to_track is not None:
+        for k, v in variable_to_track.items():
+            output_df[k] = v
+
     output_df.to_csv(os.path.join(output_directory, f'{filename}.csv'), index=False)
 
 
