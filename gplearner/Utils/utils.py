@@ -11,6 +11,7 @@ from itertools import combinations
 from typing import List, Optional
 
 import anndata as ad
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -33,6 +34,9 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm.notebook import tqdm
 
 random.seed(0)
+
+# for exporting pdfs
+matplotlib.rcParams['pdf.fonttype'] = 42  # to export text as editable
 
 ###################################
 # Generic

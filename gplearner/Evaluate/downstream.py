@@ -8,6 +8,7 @@ from typing import (
     Union,
 )
 
+import matplotlib
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
@@ -35,6 +36,10 @@ from ..Utils.utils import (
     remove_single_data_points,
     viz_gp,
 )
+
+# for exporting pdfs
+matplotlib.rcParams['pdf.fonttype'] = 42
+
 
 ############################################
 # Main class
