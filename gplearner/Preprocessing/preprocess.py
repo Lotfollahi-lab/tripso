@@ -8,10 +8,11 @@ from typing import (
 )
 
 import numpy as np
+import scanpy as sc
 from datasets import concatenate_datasets, load_from_disk
 from geneformer import TranscriptomeTokenizer
 
-from ..Utils.utils import do_balanced_downsampling, encode_labels
+from ..Utils.utils import do_balanced_downsampling_anndata, encode_labels
 from .gp_curation import make_gpdb
 
 seed = 0
@@ -21,9 +22,11 @@ random.seed(seed)
 
 def pp_and_tokenize(
     root_dir: str,
+    adata_path: Optional[str] = None,
     vars_to_keep: Union[Dict, List] = ['cell_type'],
     subsample_by: Optional[List] = ['cell_type'],
     n_cells_per_class: int = 10_000,
+    chunk_size: int = 50_000,
     n_splits: Optional[int] = None,
     reference_gpdb: Union[List[str], str] = '/path/to/reference/databases',
     use_ontology: Optional[bool] = False,
@@ -41,6 +44,8 @@ def pp_and_tokenize(
     -----------
     root_dir : str
         Root directory where h5ad / tokenized data is stored
+    adata_path : str
+        Path to anndata object to tokenize
     vars_to_keep : list
         obs column names to keep from anndata object
         these will be kept as columns in the input_dataset
@@ -51,10 +56,8 @@ def pp_and_tokenize(
         what is the minimum number of cells to keep in each class
         If the number of cells in a category is less than this number,
         keep all cells in that category
-    n_splits : int
-        If the data is split into multiple h5ad files, how many splits are there?
-        This is necessary to avoid memory issues with datasets >50k cells (approx)
-
+    chunk_size : int
+        Size of chunks to split the data into
 
     reference_gpdb : list
         List of paths to reference databases
@@ -76,9 +79,67 @@ def pp_and_tokenize(
 
     tissue = root_dir.split('/')[-1]
 
+    # check for anndata object in input_h5ad directory
+    if not os.path.exists(os.path.join(root_dir, 'data/input_h5ad')):
+        if adata_path is None:
+            raise ValueError('Please provide path to anndata object')
+
+        adata = sc.read_h5ad(adata_path)
+
+        # optionally downsample
+        if subsample_by is not None:
+            print('Subsampling anndata object')
+
+            if isinstance(subsample_by, str):
+                subsample_by = [subsample_by]
+
+            adata.obs['subsampling_col'] = adata.obs[subsample_by].apply(
+                lambda x: '_'.join(x), axis=1
+            )
+
+            adata = do_balanced_downsampling_anndata(
+                adata,
+                subsample_by='subsampling_col',
+                n_cells_per_class=n_cells_per_class,
+            )
+
+            adata.obs.drop('subsampling_col', axis=1, inplace=True)
+
+            # save to disk
+            os.makedirs(os.path.join(root_dir, 'data/input_h5ad'), exist_ok=True)
+            adata.write_h5ad(
+                os.path.join(root_dir, 'data/input_h5ad', f'{tissue}.h5ad')
+            )
+
+        # Save chunks
+        # Split the cells into groups of chunk_size
+        obs_groups = [
+            adata.obs_names[i : i + chunk_size]
+            for i in range(0, len(adata.obs_names), chunk_size)
+        ]
+
+        # Iterate over each group and subset the AnnData object
+        n_splits = 0
+        for i, obs_names in enumerate(obs_groups):
+            subset_adata = adata[obs_names, :].copy()
+
+            # Create a directory for the subset if it doesn't exist
+            output_directory = 'data/input_h5ad'
+            subset_directory = os.path.join(output_directory, f'subset_{i+1}')
+            os.makedirs(subset_directory, exist_ok=True)
+
+            # Write the subset to disk
+            filename = os.path.join(subset_directory, 'adata.h5ad')
+            subset_adata.write(filename)
+
+            n_splits += 1
+
     # check if tokenized data exists
     if not os.path.exists(os.path.join(root_dir, 'data/tokenized')):
         vars_to_keep = {v: v for v in vars_to_keep}
+
+        vars_to_keep['idx'] = 'idx'
+
         print('Tokenizing data')
         tk = TranscriptomeTokenizer(vars_to_keep, nproc=4)
 
@@ -127,29 +188,6 @@ def pp_and_tokenize(
             if col in input_data.column_names:
                 input_data = encode_labels(input_data, col, f'{col}_id')
 
-        # Subsampling
-        if subsample_by is not None:
-            if isinstance(subsample_by, str):
-                input_data = input_data.map(
-                    lambda example: {'downsample_col': example[subsample_by]}
-                )
-
-            elif isinstance(subsample_by, list):
-
-                def make_combined_col(example, cols=subsample_by):
-                    example['downsample_col'] = '_'.join(
-                        [str(example[col]) for col in cols]
-                    )
-                    return example
-
-                input_data = input_data.map(make_combined_col, num_proc=16)
-
-            input_data = do_balanced_downsampling(
-                input_data['downsample_col'], input_data, n_cells_per_class
-            )
-
-            # Now drop the downsample_col column
-            input_data = input_data.remove_columns(['downsample_col'])
         input_data.save_to_disk(folder_path)
 
         print('Saved', len(input_data), 'cells')

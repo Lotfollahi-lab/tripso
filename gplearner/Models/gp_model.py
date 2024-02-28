@@ -152,13 +152,6 @@ class gpWrapper(nn.Module):
                 )
             )
 
-        for i in range(len(self.gp_inputs)):
-            print(
-                'Number of genes in GP',
-                self.gp_inputs[i],
-                len(getattr(self, f'gp{i}_tokens')),
-            )
-
     def build_input_matrix(
         self, gf, input_ids, gpi_tokens_list, gp_idx, mode='full_model'
     ):
