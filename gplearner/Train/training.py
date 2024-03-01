@@ -7,6 +7,7 @@ from typing import Literal, Optional
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
+import scanpy as sc
 import torch
 
 # set up wandb
@@ -59,6 +60,8 @@ def run_training(
     learn_new_gp: Optional[bool] = False,
     gp_to_learn: list = ['novel_gp'],
     global_n_blocks: int = 1,
+    reconstruction_loss: Optional[str] = 'mse',
+    adata_path: Optional[str] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -162,7 +165,7 @@ def run_training(
     pl.seed_everything(seed)
     torch.manual_seed(seed)
 
-    wandb.login()
+    # wandb.login()
 
     # get date for today in YYYY-MM-DD format
     today = datetime.datetime.today().strftime('%Y-%m-%d')
@@ -267,15 +270,45 @@ def run_training(
                     }
                 )
 
+            if global_loss == 'reconstruction':
+                wandb_logger.experiment.config.update(
+                    {
+                        'reconstruction_loss': reconstruction_loss,
+                    }
+                )
+
     ############################################################################
     # Dataset Preparation
     ############################################################################
 
+    # Optionally load anndata object
+    if (model_type == 'Global') & (global_loss == 'reconstruction'):
+        if adata_path is None:
+            raise ValueError('Please provide path to anndata object')
+        else:
+            adata = sc.read_h5ad(adata_path)
+            total_n_genes = adata.X.shape[1]
+            num_cells = adata.X.shape[0]
+
+    else:
+        adata = None
+        total_n_genes = 0
+        num_cells = 0
+
     # Instantiate dataset
     # (tokenized dataset should be created already)
     # txdata = DummyDataModule(folder = dataset_path, batch_size=batch_size)
+    if reconstruction_loss == 'mse':
+        transform_adata = True
+    else:
+        transform_adata = False
+
     txdata = txDataModule(
-        folder=dataset_path, batch_size=batch_size, frac_for_training=frac_for_training
+        folder=dataset_path,
+        batch_size=batch_size,
+        frac_for_training=frac_for_training,
+        adata=adata,
+        transform_adata=transform_adata,
     )
 
     # Load gpdb
@@ -343,6 +376,8 @@ def run_training(
             global_loss=global_loss,
             global_masking_rate=global_masking_rate,
             global_n_blocks=global_n_blocks,
+            reconstruction_loss=reconstruction_loss,
+            total_n_genes=total_n_genes,
         )
 
     else:
@@ -365,6 +400,9 @@ def run_training(
             gp_similarity=gp_similarity,
             output_dir=output_dir,
             lambda_gp_similarity=lambda_gp_similarity,
+            n_cells=txdata.train_size,
+            batch_size=batch_size,
+            total_n_genes=total_n_genes,
         )
     else:
         # otherwise defaults to pytorch AdamW
@@ -379,6 +417,9 @@ def run_training(
             gp_similarity=gp_similarity,
             output_dir=output_dir,
             lambda_gp_similarity=lambda_gp_similarity,
+            n_cells=int(0.8 * num_cells * frac_for_training),
+            batch_size=batch_size,
+            total_n_genes=total_n_genes,
         )
 
     # For continuing training from checkpoint
@@ -398,27 +439,26 @@ def run_training(
             )
         # look for Base model to load
         # if not found, this will raise an error
-        print('path to base model', path_to_base_model)
         latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
         checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        print('checkpoint path', checkpoint_path)
+        print('Loading from checkpoint', checkpoint_path)
         checkpoint = torch.load(latest_ckpt)
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-        n_epochs = checkpoint['epoch'] + n_epochs
+        n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
 
         # reset output directory
         gp_transformer.output_dir = output_dir
 
         # freeze base model
         for name, param in gp_transformer.model.named_parameters():
-            if ('cell_token_learner' in name) | ('clf_head' in name):
+            if (
+                ('cell_token_learner' in name)
+                | ('clf_head' in name)
+                | ('count_head' in name)
+            ):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
-
-        # for name, param in model.named_parameters():
-        #     if param.requires_grad:
-        #         print(f"Parameter {name} has gradients.")
 
     # Learning new GP
     if learn_new_gp:

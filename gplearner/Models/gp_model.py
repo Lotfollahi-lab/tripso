@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from scipy.sparse import csr_matrix
 from transformers import BertForMaskedLM
 
-from ..Modules.modules import gpTransformerEncoder
+from ..Modules.modules import Mlp, gpTransformerEncoder
 from ..Utils.geneformer_utils import EmbExtractor
 from ..Utils.utils import get_gp_tokens, pad_array
 
@@ -675,6 +675,52 @@ class cellWrapper(nn.Module):
 
 
 ####################################
+# Count reconstruction
+####################################
+
+
+class CountHead(nn.Module):
+    def __init__(
+        self,
+        loss_mode: str = 'mse',
+        n_genes: int = 25426,
+        d_model: int = 256,
+    ):
+        super().__init__()
+        self.loss_mode = loss_mode
+
+        self.mlp = Mlp(d_model, d_model)
+
+        if self.loss_mode == 'mse':
+            self.relu_output = nn.Sequential(nn.Linear(d_model, n_genes), nn.ReLU())
+
+        elif self.loss_mode == 'zinb':
+            self.linear_output = nn.Linear(d_model, n_genes)
+            self.softmax_output = nn.Sequential(
+                nn.Linear(d_model, n_genes), nn.Softmax(dim=-1)
+            )
+
+        elif self.loss_mode == 'nb':
+            self.softmax_output = nn.Sequential(
+                nn.Linear(d_model, n_genes), nn.Softmax(dim=-1)
+            )
+
+    def forward(self, x):
+        # use cls token for count prediction
+        count_outputs = {}
+        mlp_output = self.mlp(x)
+        mlp_output = nn.functional.normalize(mlp_output, dim=-1, p=2)
+        if self.loss_mode == 'mse':
+            count_outputs['count_lognorm'] = self.relu_output(mlp_output)
+        elif self.loss_mode == 'zinb':
+            count_outputs['count_mean'] = self.softmax_output(mlp_output)
+            count_outputs['count_dropout'] = self.linear_output(mlp_output)
+        elif self.loss_mode == 'nb':
+            count_outputs['count_mean'] = self.softmax_output(mlp_output)
+        return count_outputs
+
+
+####################################
 # Define model
 ####################################
 
@@ -849,6 +895,8 @@ class gpTransformerGlobal(gpTransformerBase):
         self,
         global_attn_heads=8,
         global_loss='supervised',
+        total_n_genes=25426,
+        reconstruction_loss='mse',
         supervised_labels: Optional[Dict] = None,
         global_masking_rate=0,
         global_n_blocks=1,
@@ -887,6 +935,13 @@ class gpTransformerGlobal(gpTransformerBase):
                 ]
             )
 
+        if self.global_loss == 'reconstruction':
+            self.reconstruction_loss = reconstruction_loss
+
+            self.count_head = CountHead(
+                loss_mode=reconstruction_loss, n_genes=total_n_genes
+            )
+
     def forward(
         self,
         input_dataset,
@@ -897,7 +952,8 @@ class gpTransformerGlobal(gpTransformerBase):
         return_gf_cell_emb = True if self.global_loss == 'mse' else False
 
         if self.global_loss != 'masking':
-            inference = False
+            # no masking
+            inference = True
         else:
             if self.training:
                 inference = False
@@ -923,6 +979,10 @@ class gpTransformerGlobal(gpTransformerBase):
         elif self.global_loss == 'masking':
             base_output['gp_logits_lm'] = cell_output['gp_logits_lm']
             base_output['gp_labels'] = cell_output['gp_labels']
+
+        elif self.global_loss == 'reconstruction':
+            count_output = self.count_head(cell_output['cell_token'])
+            base_output['count_output'] = count_output
 
         return base_output
 

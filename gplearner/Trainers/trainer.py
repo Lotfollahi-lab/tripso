@@ -19,9 +19,15 @@ from sklearn.metrics import classification_report
 
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
 from torch import optim
+from torchmetrics import MeanSquaredError, PearsonCorrCoef
 from torchmetrics.functional import pairwise_cosine_similarity
 
-from ..Utils.utils import (
+from ..Utils.losses import (
+    mse_loss,
+    nb,
+    zinb,
+)
+from ..Utils.utils import (  # one_hot_encoder,
     CosineLRwithWarmUp,
     ensembl_to_name,
     token_to_gene,
@@ -109,6 +115,9 @@ class scGPL(pl.LightningModule):
         return_attention: bool = False,
         gp: Optional[str] = None,
         return_classification_report: bool = False,
+        total_n_genes: int = 20_000,
+        n_cells: int = 128,
+        batch_size: int = 128,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -142,6 +151,46 @@ class scGPL(pl.LightningModule):
                     'e.g. {task1: 1, task2: 0.5}'
                     'or a single float value for all tasks'
                 )
+
+        if (self.model_type == 'Global') & (self.global_loss == 'reconstruction'):
+            self.reconstruction_loss = self.model.reconstruction_loss
+            if (
+                self.reconstruction_loss
+                in ['nb', 'zinb']
+                # and (conditions is not None)
+            ):
+                # self.n_conditions = [len(conditions[cond])
+                # for cond in conditions.keys()]
+                # self.conditions = conditions
+                # self.condition_encodings = {
+                #     cond: {
+                #         k: v for k, v in zip(conditions[cond],
+                # range(len(conditions[cond])))
+                #     }
+                #     for cond in conditions.keys()
+                # }
+                # self.conditions_combined = conditions_combined
+                # self.n_conditions_combined = len(conditions_combined)
+                # self.conditions_combined_encodings = {
+                #     k: v
+                #     for k, v in zip(conditions_combined,
+                # range(len(conditions_combined)))
+                # }
+                # self.theta = torch.nn.Parameter(
+                #     torch.randn(total_n_genes, self.n_conditions_combined)
+                # )
+                self.theta = torch.nn.Parameter(torch.ones(total_n_genes))
+            else:
+                self.theta = None
+
+            self.metric = nn.ModuleDict(
+                {
+                    'mse': MeanSquaredError(),
+                    'pearson': PearsonCorrCoef(num_outputs=n_cells),
+                }
+            )
+            self.true_counts_list: List[int] = []
+            self.pred_counts_list: List[int] = []
 
         # configuring optimizers
         self.lr = lr
@@ -292,6 +341,18 @@ class scGPL(pl.LightningModule):
                     sync_dist=True,
                 )
 
+            elif self.global_loss == 'reconstruction':
+                reconstruction_loss = loss_output['reconstruction_loss']
+                self.log(
+                    f'train/{self.model.reconstruction_loss}_loss',
+                    reconstruction_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+
         if self.use_gp_similarity_loss:
             gp_similarity_loss = loss_output['gp_similarity_loss']
             self.train_gp_similarity_loss.append(gp_similarity_loss)
@@ -320,6 +381,33 @@ class scGPL(pl.LightningModule):
             if self.global_loss == 'supervised':
                 for t in self.model.supervised_tasks:
                     setattr(self, f'{stage}_{t}_loss', [])
+
+            if self.global_loss == 'reconstruction':
+                # return Pearson correlation coefficient
+                true_counts = torch.cat(self.true_counts_list).float()
+                pred_counts = torch.cat(self.pred_counts_list)
+                pearson = self.metric['pearson'](pred_counts.T, true_counts.T)
+                mean_pearson = torch.mean(pearson)
+                self.log(
+                    'train/pearson',
+                    mean_pearson,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                )
+                mse = self.metric['mse'](pred_counts, true_counts)
+                mean_mse = torch.mean(mse)
+                self.log(
+                    'train/mse',
+                    mean_mse,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                )
+
+        # empty lists
+        self.true_counts_list = []
+        self.pred_counts_list = []
 
         setattr(self, f'{stage}_loss', [])
 
@@ -502,8 +590,6 @@ class scGPL(pl.LightningModule):
         gp_labels = np.array(
             [item for sublist in self.gp_labels for item in sublist]
         ).flatten()
-        # gp_labels = [item for sublist in self.gp_labels for item in sublist]
-        # gp_labels = torch.cat(self.gp_labels, dim=0).cpu().numpy()
 
         # Create anndata object for clustering and visualisation
         adata = sc.AnnData(X=x_scgpl)
@@ -679,6 +765,20 @@ class scGPL(pl.LightningModule):
                 holder['cell_masking_loss'] = cell_masking_loss
                 loss += cell_masking_loss
 
+            elif self.global_loss == 'reconstruction':
+                reconstruction_loss = self.compute_count_loss(output, batch)
+                holder['reconstruction_loss'] = reconstruction_loss
+                loss += reconstruction_loss
+
+                self.true_counts_list.append(batch['counts'])
+
+                if self.model.reconstruction_loss in ['mse']:
+                    self.pred_counts_list.append(
+                        output['count_output']['count_lognorm']
+                    )
+                if self.model.reconstruction_loss in ['nb', 'zinb']:
+                    self.pred_counts_list.append(output['count_output']['count_mean'])
+
         holder['total_loss'] = loss
 
         return holder
@@ -700,6 +800,72 @@ class scGPL(pl.LightningModule):
 
     def compute_clf_loss(self, logits, labels):
         return F.cross_entropy(logits, labels)
+
+    def compute_count_loss(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        batch: Dict[str, torch.Tensor],
+    ):
+        true_counts = batch['counts']
+        batch_size_factor = np.array(batch['size_factor'])
+        batch_size_factor = torch.tensor(batch_size_factor)
+        batch_size_factor = batch_size_factor.to(true_counts.device)
+
+        if self.model.reconstruction_loss == 'mse':
+            loss = (
+                mse_loss(outputs['count_output']['count_lognorm'], true_counts)
+                .sum(dim=-1)
+                .mean()
+                .float()
+            )
+            return loss
+
+        elif self.model.reconstruction_loss == 'zinb':
+            # combined_batch = torch.tensor(batch['combined_batch'])
+            # combined_batch = combined_batch.to(self.target_device)
+            dec_mean_gamma, dec_dropout = (
+                outputs['count_output']['count_mean'],
+                outputs['count_output']['count_dropout'],
+            )
+            size_factor_view = batch_size_factor.unsqueeze(1).expand(
+                dec_mean_gamma.size(0), dec_mean_gamma.size(1)
+            )
+            dec_mean = dec_mean_gamma * size_factor_view
+            # dispersion = F.linear(
+            #     one_hot_encoder(combined_batch,
+            # self.n_conditions_combined), self.theta
+            # )
+            dispersion = self.theta
+            dispersion = torch.exp(dispersion)
+            loss = (
+                -zinb(x=true_counts, mu=dec_mean, theta=dispersion, pi=dec_dropout)
+                .sum(dim=-1)
+                .mean()
+            )
+            return loss
+
+        elif self.model.reconstruction_loss == 'nb':
+            # combined_batch = torch.tensor(batch['combined_batch'])
+            # combined_batch = combined_batch.to(self.target_device)
+            dec_mean_gamma = outputs['count_output']['count_mean']
+            size_factor_view = batch_size_factor.unsqueeze(1).expand(
+                dec_mean_gamma.size(0), dec_mean_gamma.size(1)
+            )
+            dec_mean = dec_mean_gamma * size_factor_view
+            # dispersion = F.linear(
+            #     one_hot_encoder(combined_batch,
+            # self.n_conditions_combined), self.theta
+            # )
+            #
+            dispersion = self.theta
+            dispersion = torch.exp(dispersion)
+            loss = -nb(x=true_counts, mu=dec_mean, theta=dispersion).sum(dim=-1).mean()
+            return loss
+
+        else:
+            raise ValueError(
+                'Reconstruction loss not supported' 'Please choose from mse, nb or zinb'
+            )
 
     def configure_optimizers(self):
         # Define optimizer and may be consider weight decay

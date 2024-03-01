@@ -1,3 +1,4 @@
+import glob
 import os
 import random
 from typing import (
@@ -25,9 +26,8 @@ def pp_and_tokenize(
     adata_path: Optional[str] = None,
     vars_to_keep: Union[Dict, List] = ['cell_type'],
     subsample_by: Optional[List] = ['cell_type'],
-    n_cells_per_class: int = 10_000,
+    n_cells_per_class: int = 20_000,
     chunk_size: int = 50_000,
-    n_splits: Optional[int] = None,
     reference_gpdb: Union[List[str], str] = '/path/to/reference/databases',
     use_ontology: Optional[bool] = False,
     n_cells_to_count: Optional[int] = 100,
@@ -36,6 +36,7 @@ def pp_and_tokenize(
     max_gp_len: Optional[int] = 100,
     name_tag: Optional[str] = 'Reactome',
     cov_to_encode: Union[List[str], str] = ['cell_type', 'condition'],
+    tissue: Optional[str] = None,
 ):
     """
     Preprocess and tokenize data for scGPL
@@ -77,7 +78,8 @@ def pp_and_tokenize(
     """
     # Step 1 : Tokenize data
 
-    tissue = root_dir.split('/')[-1]
+    if tissue is None:
+        tissue = root_dir.split('/')[-1]
 
     # check for anndata object in input_h5ad directory
     if not os.path.exists(os.path.join(root_dir, 'data/input_h5ad')):
@@ -85,6 +87,10 @@ def pp_and_tokenize(
             raise ValueError('Please provide path to anndata object')
 
         adata = sc.read_h5ad(adata_path)
+        print('Input anndata object', adata.shape)
+
+        if 'cell_idx' not in adata.obs.columns:
+            adata.obs['cell_idx'] = adata.obs.index
 
         # optionally downsample
         if subsample_by is not None:
@@ -107,9 +113,8 @@ def pp_and_tokenize(
 
             # save to disk
             os.makedirs(os.path.join(root_dir, 'data/input_h5ad'), exist_ok=True)
-            adata.write_h5ad(
-                os.path.join(root_dir, 'data/input_h5ad', f'{tissue}.h5ad')
-            )
+
+            adata.write_h5ad(os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad'))
 
         # Save chunks
         # Split the cells into groups of chunk_size
@@ -134,6 +139,11 @@ def pp_and_tokenize(
 
             n_splits += 1
 
+    subset_dirs = glob.glob(f'{root_dir}/data/input_h5ad/subset_*')
+    n_splits = (
+        max([int(dir.split('_')[-1]) for dir in subset_dirs]) if subset_dirs else 0
+    )
+
     # check if tokenized data exists
     if not os.path.exists(os.path.join(root_dir, 'data/tokenized')):
         vars_to_keep = {v: v for v in vars_to_keep}
@@ -153,6 +163,7 @@ def pp_and_tokenize(
 
         else:
             for i in range(1, n_splits + 1):
+                print(f'Tokenizing subset {i}')
                 tk.tokenize_data(
                     f'{root_dir}/data/input_h5ad/subset_{i}',  # h5ad data directory
                     f'{root_dir}/data/tokenized/',
@@ -170,13 +181,13 @@ def pp_and_tokenize(
     # check if folder is empty:
     if len(os.listdir(folder_path)) == 0:
         # load datasets
-        if n_splits is None:
+        if n_splits == 0:
             input_data = load_from_disk(f'{root_dir}/data/tokenized/{tissue}.dataset')
         else:
             input_data = concatenate_datasets(
                 [
                     load_from_disk(f'{root_dir}/data/tokenized/{tissue}_{i}.dataset')
-                    for i in range(1, n_splits)
+                    for i in range(1, n_splits + 1)
                 ]
             )
 
