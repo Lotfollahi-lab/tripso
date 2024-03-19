@@ -43,6 +43,16 @@ matplotlib.rcParams['pdf.fonttype'] = 42  # to export text as editable
 ###################################
 
 
+def one_hot_encoder(idx, n_cls):
+    assert torch.max(idx).item() < n_cls
+    if idx.dim() == 1:
+        idx = idx.unsqueeze(1)
+    onehot = torch.zeros(idx.size(0), n_cls)
+    onehot = onehot.to(idx.device)
+    onehot.scatter_(1, idx.long(), 1)
+    return onehot
+
+
 def find_latest_file(output_dir, tissue, supervised_tag):
     # Define the pattern to match the desired file format
     pattern = f'*_gp_transformer_{tissue}_{supervised_tag}*.ckpt'
@@ -120,6 +130,7 @@ def remove_leading_numbers_and_underscore(input_string):
 def encode_labels(input_data, input_col, new_col):
     """
     Encode labels as integers
+    works on Huggingface dataset class
     """
     label_values = list(set(input_data[input_col]))
     label_dict = {l: i for i, l in enumerate(label_values)}
@@ -136,6 +147,7 @@ def encode_labels(input_data, input_col, new_col):
 def do_balanced_downsampling(class_values, input_data, n_cells_per_class):
     """
     Perform balanced subsampling of input data
+    for Huggingface dataset class
 
     """
     # Calculate class frequencies
@@ -152,6 +164,73 @@ def do_balanced_downsampling(class_values, input_data, n_cells_per_class):
     input_data = input_data.select(balanced_samples)
 
     return input_data
+
+
+def do_balanced_downsampling_anndata(adata, subsample_by, n_cells_per_class):
+    """
+    Perform balanced subsampling of input data
+
+    """
+    # Calculate class frequencies
+    class_counts = adata.obs[subsample_by].value_counts()
+
+    # Perform balanced subsampling
+    balanced_samples = []
+
+    for label, count in class_counts.items():
+        subsample_count = min(count, n_cells_per_class)
+        class_indices = adata.obs.index[adata.obs[subsample_by] == label]
+        subsample_indices = np.random.choice(
+            class_indices, subsample_count, replace=False
+        )
+        balanced_samples.extend(subsample_indices)
+
+    input_data = adata[balanced_samples, :]
+
+    return input_data
+
+
+def label_encoder(adata, encoder, condition_key=None):
+    """
+    Description:
+    ------------
+    Encode labels of Annotated `adata` matrix.
+
+    Parameters:
+    ----------
+    adata: : `~anndata.AnnData`
+         Annotated data matrix.
+    encoder: Dict
+         dictionary of encoded labels.
+    condition_key: String
+         column name of conditions in `adata.obs` data frame.
+
+    Returns:
+    -------
+    labels: `~numpy.ndarray`
+         Array of encoded labels
+    label_encoder: Dict
+         dictionary with labels and encoded labels as key, value pairs.
+    """
+    unique_conditions = list(np.unique(adata.obs[condition_key]))
+    labels = np.zeros(adata.shape[0])
+
+    if not set(unique_conditions).issubset(set(encoder.keys())):
+        missing_labels = set(unique_conditions).difference(set(encoder.keys()))
+        print(
+            f'Warning: Labels in adata.obs[{condition_key}]'
+            'is not a subset of label-encoder!'
+        )
+        print(f'The missing labels are: {missing_labels}')
+        print('Therefore integer value of those labels is set to -1')
+        for data_cond in unique_conditions:
+            if data_cond not in encoder.keys():
+                labels[adata.obs[condition_key] == data_cond] = -1
+
+    for condition, label in encoder.items():
+        labels[adata.obs[condition_key] == condition] = label
+    labels = [int(x) for x in labels]
+    return labels
 
 
 ###################################
