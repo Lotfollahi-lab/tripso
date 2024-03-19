@@ -11,7 +11,7 @@ from scipy.stats import wasserstein_distance
 from sklearn.metrics.pairwise import rbf_kernel
 from tqdm import tqdm
 
-from .Utils.utils import do_logistic_regression
+from ..Utils.utils import do_logistic_regression
 
 
 def calc_gp_stats(model, dm):
