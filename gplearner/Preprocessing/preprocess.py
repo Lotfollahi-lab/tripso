@@ -36,7 +36,10 @@ def pp_and_tokenize(
     max_gp_len: Optional[int] = 100,
     name_tag: Optional[str] = 'Reactome',
     cov_to_encode: Union[List[str], str] = ['cell_type', 'condition'],
+    batch_keys: Optional[List[str]] = None,
     tissue: Optional[str] = None,
+    save_intermediate: Optional[bool] = False,
+    hvg_batch_key: Optional[str] = None,
 ):
     """
     Preprocess and tokenize data for scGPL
@@ -89,8 +92,15 @@ def pp_and_tokenize(
         adata = sc.read_h5ad(adata_path)
         print('Input anndata object', adata.shape)
 
-        if 'cell_idx' not in adata.obs.columns:
-            adata.obs['cell_idx'] = adata.obs.index
+        if 'idx' not in adata.obs.columns:
+            adata.obs['idx'] = adata.obs.index
+
+        if batch_keys is not None:
+            if isinstance(batch_keys, str):
+                batch_keys = [batch_keys]
+            adata.obs['batch_key'] = adata.obs[batch_keys].apply(
+                lambda x: '_'.join(x), axis=1
+            )
 
         # optionally downsample
         if subsample_by is not None:
@@ -100,7 +110,7 @@ def pp_and_tokenize(
                 subsample_by = [subsample_by]
 
             adata.obs['subsampling_col'] = adata.obs[subsample_by].apply(
-                lambda x: '_'.join(x), axis=1
+                lambda x: '_'.join(str(x)), axis=1
             )
 
             adata = do_balanced_downsampling_anndata(
@@ -111,9 +121,15 @@ def pp_and_tokenize(
 
             adata.obs.drop('subsampling_col', axis=1, inplace=True)
 
-            # save to disk
+            # save to disk - dataset with only HVG
             os.makedirs(os.path.join(root_dir, 'data/input_h5ad'), exist_ok=True)
 
+            if 'highly_variable' not in adata.var.columns:
+                if hvg_batch_key is None:
+                    raise ValueError('Please provide batch key for HVG calculation')
+                sc.pp.highly_variable_genes(adata, batch_key=hvg_batch_key)
+
+            adata = adata[:, adata.var.highly_variable]
             adata.write_h5ad(os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad'))
 
         # Save chunks
@@ -122,6 +138,15 @@ def pp_and_tokenize(
             adata.obs_names[i : i + chunk_size]
             for i in range(0, len(adata.obs_names), chunk_size)
         ]
+
+        # for dealing with missing values in pyarrow
+        for column in adata.obs.columns:
+            if column != 'n_counts':
+                adata.obs[column] = np.where(
+                    adata.obs[column].isnull(), ' ', adata.obs[column]
+                )
+                # print(column, adata.obs[column].dtype)
+                # print('Number of missing values:', adata.obs[column].isnull().sum())
 
         # Iterate over each group and subset the AnnData object
         n_splits = 0
@@ -150,10 +175,13 @@ def pp_and_tokenize(
 
         vars_to_keep['idx'] = 'idx'
 
+        if batch_keys is not None:
+            vars_to_keep['batch_key'] = 'batch_key'
+
         print('Tokenizing data')
         tk = TranscriptomeTokenizer(vars_to_keep, nproc=4)
 
-        if n_splits is None:
+        if n_splits == 0:
             tk.tokenize_data(
                 f'{root_dir}/data/input_h5ad',  # h5ad data directory
                 f'{root_dir}/data/tokenized',
@@ -195,6 +223,9 @@ def pp_and_tokenize(
         if isinstance(cov_to_encode, str):
             cov_to_encode = [cov_to_encode]
 
+        if batch_keys is not None:
+            cov_to_encode.append('batch_key')
+
         for col in cov_to_encode:
             if col in input_data.column_names:
                 input_data = encode_labels(input_data, col, f'{col}_id')
@@ -219,4 +250,5 @@ def pp_and_tokenize(
             overlap_threshold=overlap_threshold,
             max_gp_len=max_gp_len,
             name_tag=name_tag,
+            save_intermediate=save_intermediate,
         )

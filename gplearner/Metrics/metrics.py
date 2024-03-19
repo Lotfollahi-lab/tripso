@@ -6,6 +6,9 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
+from scipy.sparse import issparse
+from scipy.stats import wasserstein_distance
+from sklearn.metrics.pairwise import rbf_kernel
 from tqdm import tqdm
 
 from .Utils.utils import do_logistic_regression
@@ -526,3 +529,117 @@ def evaluate_by_cell(model, adata, output_directory):
             filename=f"condition_prediction_{gp.replace('/', '_')}",
             variable_to_track={'GP': gp},
         )
+
+
+##################################################
+# For evaluating distribution of generated counts
+##################################################
+
+
+def mmd_loss_calc(source_features, target_features, gamma):
+    """Initializes Maximum Mean Discrepancy(MMD)
+    between source_features and target_features.
+    - Gretton, Arthur, et al. "A Kernel Two-Sample Test". 2012.
+    Parameters
+    ----------
+    source_features: torch.Tensor
+         Tensor with shape [batch_size, z_dim]
+    target_features: torch.Tensor
+         Tensor with shape [batch_size, z_dim]
+    Returns
+    -------
+    Returns the computed MMD between x and y.
+    """
+
+    xx = rbf_kernel(source_features, source_features, gamma)
+    xy = rbf_kernel(source_features, target_features, gamma)
+    yy = rbf_kernel(target_features, target_features, gamma)
+
+    return xx.mean() + yy.mean() - 2 * xy.mean()
+
+
+# Metrics below were taken from:
+# https://github.com/facebookresearch/CPA/blob/main/cpa/helper.py
+# Date of access: 2024.01.08
+
+
+def evaluate_mmd(adata, pred_adata, condition_key, de_genes_dict=None):
+    mmd_list = []
+    for cond in pred_adata.obs[condition_key].unique():
+        adata_ = adata[adata.obs[condition_key] == cond].copy()
+        pred_adata_ = pred_adata[pred_adata.obs[condition_key] == cond].copy()
+        if issparse(adata_.X):
+            adata_.X = adata_.X.A
+        if issparse(pred_adata_.X):
+            pred_adata_.X = pred_adata_.X.A
+
+        gammas = [2, 1, 0.5, 0.1, 0.01, 0.005]
+        print('start mmd calculation')
+        mmd = np.mean(
+            list(map(lambda x: mmd_loss_calc(adata_.X, pred_adata_.X, x), gammas))
+        )
+        print('end mmd calculation')
+
+        mmd_list.append({'condition': cond, 'mmd': mmd})
+
+        if de_genes_dict:
+            de_genes = de_genes_dict[cond]
+            sub_adata_ = adata_[:, de_genes]
+            sub_pred_adata_ = pred_adata_[:, de_genes]
+            mmd_deg = mmd_loss_calc(
+                torch.Tensor(sub_adata_.X), torch.Tensor(sub_pred_adata_.X)
+            )
+            mmd_list[-1]['mmd_deg'] = mmd_deg
+
+    mmd_df = pd.DataFrame(mmd_list).set_index('condition')
+
+    return mmd_df
+
+
+def evaluate_emd(true_data, pred_data, condition_key=None, de_genes_dict=None):
+    emd_list = []
+    if condition_key:  # instead of condition have it per timepoint
+        for cond in pred_data.obs[condition_key].unique():
+            adata_ = true_data[true_data.obs[condition_key] == cond].copy()
+            pred_adata_ = pred_data[pred_data.obs[condition_key] == cond].copy()
+            if issparse(adata_.X):
+                adata_.X = adata_.X.A
+            if issparse(pred_adata_.X):
+                pred_adata_.X = pred_adata_.X.A
+            wd = []
+            for i, _ in enumerate(adata_.var_names):
+                wd.append(
+                    wasserstein_distance(
+                        torch.Tensor(adata_.X[:, i]), torch.Tensor(pred_adata_.X[:, i])
+                    )
+                )
+            emd_list.append({'condition': cond, 'emd': np.mean(wd)})
+
+            if de_genes_dict:
+                de_genes = de_genes_dict[cond]
+                sub_adata_ = adata_[:, de_genes]
+                sub_pred_adata_ = pred_adata_[:, de_genes]
+                wd_deg = []
+                for i, _ in enumerate(sub_adata_.var_names):
+                    wd_deg.append(
+                        wasserstein_distance(
+                            torch.Tensor(sub_adata_.X[:, i]),
+                            torch.Tensor(sub_pred_adata_.X[:, i]),
+                        )
+                    )
+                emd_list[-1]['emd_deg'] = np.mean(wd_deg)
+
+        emd_df = pd.DataFrame(emd_list).set_index('condition')
+    else:
+        true_data_ = true_data.copy()
+        pred_data_ = pred_data.copy()
+        wd = []
+        for i, _ in enumerate(true_data_.var_names):
+            wd.append(
+                wasserstein_distance(
+                    torch.Tensor(true_data_.X[:, i]), torch.Tensor(pred_data_.X[:, i])
+                )
+            )
+        emd_list.append({'emd': np.mean(wd)})
+        emd_df = pd.DataFrame(emd_list).set_index(true_data_.var_names)
+    return emd_df

@@ -62,6 +62,8 @@ def run_training(
     global_n_blocks: int = 1,
     reconstruction_loss: Optional[str] = 'mse',
     adata_path: Optional[str] = None,
+    use_flash: Optional[bool] = False,
+    weight_decay: float = 0.0,
 ):
     """
     Wrapper function for training gpLearner model
@@ -149,11 +151,15 @@ def run_training(
         list of GP to learn if learn_new_gp is True
     global_n_blocks : int
         number of transformer blocks for final transformer block
+    use_flash:
+        whether to use flash attention in transformer block
 
     """
     ##########################################
     # Setup
     ##########################################
+
+    torch.set_float32_matmul_precision('medium')
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -165,7 +171,7 @@ def run_training(
     pl.seed_everything(seed)
     torch.manual_seed(seed)
 
-    # wandb.login()
+    wandb.login()
 
     # get date for today in YYYY-MM-DD format
     today = datetime.datetime.today().strftime('%Y-%m-%d')
@@ -243,6 +249,8 @@ def run_training(
                 'frac_for_training': frac_for_training,
                 'use_gp_similarity_loss': gp_similarity_file is not None,
                 'lambda_gp_similarity': lambda_gp_similarity,
+                'use_flash': use_flash,
+                'weight_decay': weight_decay,
             }
         )
 
@@ -288,12 +296,21 @@ def run_training(
         else:
             adata = sc.read_h5ad(adata_path)
             total_n_genes = adata.X.shape[1]
-            num_cells = adata.X.shape[0]
+            if 'batch_key' in adata.obs.columns:
+                n_condition_combined = adata.obs['batch_key'].nunique()
+            else:
+                if reconstruction_loss in ['zinb', 'nb']:
+                    raise ValueError(
+                        'No batch_key found'
+                        'for ZINB or NB reconstruction loss'
+                        'Please provide batch_key in adata.obs'
+                        'by passing batch_keys argument to preprocess function'
+                    )
 
     else:
         adata = None
         total_n_genes = 0
-        num_cells = 0
+        n_condition_combined = 1
 
     # Instantiate dataset
     # (tokenized dataset should be created already)
@@ -352,6 +369,7 @@ def run_training(
             attn_dropout=attn_dropout,
             gp_inputs=gp_inputs,
             add_remaining_var=add_remaining_var,
+            use_flash=use_flash,
         )
 
     elif model_type == 'Global':
@@ -378,6 +396,7 @@ def run_training(
             global_n_blocks=global_n_blocks,
             reconstruction_loss=reconstruction_loss,
             total_n_genes=total_n_genes,
+            use_flash=use_flash,
         )
 
     else:
@@ -400,9 +419,9 @@ def run_training(
             gp_similarity=gp_similarity,
             output_dir=output_dir,
             lambda_gp_similarity=lambda_gp_similarity,
-            n_cells=txdata.train_size,
-            batch_size=batch_size,
+            n_condition_combined=n_condition_combined,
             total_n_genes=total_n_genes,
+            weight_decay=weight_decay,
         )
     else:
         # otherwise defaults to pytorch AdamW
@@ -417,9 +436,9 @@ def run_training(
             gp_similarity=gp_similarity,
             output_dir=output_dir,
             lambda_gp_similarity=lambda_gp_similarity,
-            n_cells=int(0.8 * num_cells * frac_for_training),
-            batch_size=batch_size,
+            n_condition_combined=n_condition_combined,
             total_n_genes=total_n_genes,
+            weight_decay=weight_decay,
         )
 
     # For continuing training from checkpoint
@@ -444,7 +463,7 @@ def run_training(
         print('Loading from checkpoint', checkpoint_path)
         checkpoint = torch.load(latest_ckpt)
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-        n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
+        # n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
 
         # reset output directory
         gp_transformer.output_dir = output_dir
@@ -473,7 +492,11 @@ def run_training(
         # get indices of GP to learn
         if isinstance(gp_to_learn, str):
             gp_to_learn = [gp_to_learn]
-        gp_idx = [gpdb.columns.get_loc(gp) for gp in gp_to_learn]
+        gp_idx = [
+            gp_transformer.model.gp_inputs.index(gp)
+            for gp in gp_to_learn
+            if gp in gp_transformer.model.gp_inputs
+        ]
 
         # freeze all GP
         for name, param in gp_transformer.model.named_parameters():
@@ -502,7 +525,7 @@ def run_training(
             devices=-1,
             accelerator='auto',  # uses ddp per default for multi-gpu training
             strategy=strategy,
-            precision=16,
+            precision='bf16-mixed',
             profiler='simple',
         )
     else:
@@ -517,8 +540,9 @@ def run_training(
             logger=wandb_logger,
             devices=-1,
             accelerator='auto',
-            precision=16,
-            profiler='simple',
+            precision='bf16-mixed',
+            profiler='advanced',
+            strategy=strategy,
         )
 
     # Ready to train with new learning rate

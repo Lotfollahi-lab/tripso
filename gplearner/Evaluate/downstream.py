@@ -39,7 +39,7 @@ from ..Utils.utils import (
 
 # for exporting pdfs
 matplotlib.rcParams['pdf.fonttype'] = 42
-
+torch.set_float32_matmul_precision('medium')
 
 ############################################
 # Main class
@@ -118,6 +118,7 @@ class gpEval:
         global_attn_heads: Optional[int] = 1,
         global_n_blocks: Optional[int] = 1,
         global_loss: Optional[str] = 'supervised',
+        reconstruction_loss: Optional[str] = 'zinb',
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -174,7 +175,10 @@ class gpEval:
                 global_attn_heads=global_attn_heads,
                 global_n_blocks=global_n_blocks,
                 global_loss=global_loss,
+                reconstruction_loss=reconstruction_loss,
             )
+
+            self.reconstruction_loss = reconstruction_loss
 
         elif model_type == 'Mean':
             self.model = gfBaseline(
@@ -232,6 +236,7 @@ class gpEval:
         return_attention=False,
         gp=None,
         return_classification_report=False,
+        test_random_baseline=False,
     ):
         if (
             self.model_type != 'Mean'
@@ -246,6 +251,7 @@ class gpEval:
                 gp=gp,
                 return_classification_report=return_classification_report,
                 global_loss=self.global_loss,
+                test_random_baseline=test_random_baseline,
             ).load_from_checkpoint(self.checkpoint_path)
         else:
             gp_transformer = scGPL(
@@ -266,6 +272,7 @@ class gpEval:
         gp_transformer.gp = gp
         gp_transformer.return_classification_report = return_classification_report
         gp_transformer.output_dir = self.output_dir
+        gp_transformer.test_random_baseline = test_random_baseline
 
         return gp_transformer
 
@@ -628,6 +635,9 @@ class gpEval:
                 gp_features = self.gp_inputs
                 gp_features = list(gp_features)
 
+            elif isinstance(gp_features, str):
+                gp_features = [gp_features]
+
             for gp in gp_features:
                 for c in labels:
                     do_linear_regression(
@@ -644,6 +654,9 @@ class gpEval:
         """
         os.chdir(self.output_dir)
 
+        if self.model.use_flash:
+            raise ValueError('Attention weights not available with flash attentiokn')
+
         if (gp != 'cell_token') and (gp not in self.gp_inputs):
             raise ValueError(f'{gp} must be one of "cell_token" or {self.gp_inputs}')
 
@@ -654,4 +667,39 @@ class gpEval:
 
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
 
+        trainer.test(gp_transformer, txdata)
+
+    def test_random_baseline(self, adata_path):
+        '''
+        Compare Pearson and MSE of count reconstruction for true cells vs random cells
+        '''
+
+        # to do check reconstruction loss
+        if (self.model_type != 'Global') & (self.model.global_loss != 'reconstruction'):
+            raise ValueError(
+                'Random baseline only implemented for reconstruction '
+                'loss from global cell token,'
+                f'not {self.model_type}, {self.model.global_loss}'
+            )
+
+        # Load data
+        adata = sc.read_h5ad(adata_path)
+
+        if self.reconstruction_loss == 'mse':
+            transform_adata = True
+        else:
+            transform_adata = False
+
+        # Initialize trainer
+        os.chdir(self.output_dir)
+
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            adata=adata,
+            transform_adata=transform_adata,
+        )
+
+        gp_transformer = self._init_trainer(test_random_baseline=True)
+        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
         trainer.test(gp_transformer, txdata)

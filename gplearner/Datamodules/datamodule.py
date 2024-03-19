@@ -20,7 +20,10 @@ random.seed(0)
 
 class txDataset(Dataset):
     def __init__(
-        self, folder='./data/tokenized.dataset', adata=None, transform_adata=True
+        self,
+        folder='./data/tokenized.dataset',
+        adata=None,
+        transform_adata=True,
     ):
         """Create a dataset from a directory with a tokenized Geneformer dataset
 
@@ -33,6 +36,9 @@ class txDataset(Dataset):
         self.gdata = load_from_disk(folder)
 
         if adata:
+            # calculate size factor on raw data:
+            self.size_factor = np.ravel(adata.X.sum(axis=1))
+
             if transform_adata:
                 print('Normalizing and log-transforming adata')
                 print(
@@ -45,10 +51,6 @@ class txDataset(Dataset):
                     'After transformation adata.X min-max :'
                     f'{adata.X.min()} - {adata.X.max()}'
                 )
-
-            else:
-                # calculate size factor on raw data:
-                self.size_factor = np.ravel(adata.X.sum(axis=1))
 
             self.adata = adata[self.gdata['idx']]
 
@@ -94,7 +96,7 @@ class txDataModule(LightningDataModule):
         adata=None,
         transform_adata=True,
         batch_size=3,
-        num_workers=8,
+        num_workers=4,
         shuffle=False,
         # development only:
         frac_for_training=1,
@@ -126,33 +128,6 @@ class txDataModule(LightningDataModule):
         self.max_len = 2048
         self.adata = adata
         self.transform_adata = transform_adata
-
-        # self.condition_keys = condition_keys
-        # self.condition_encodings = condition_encodings
-        # self.conditions_combined_encodings = conditions_combined_encodings
-        # self.drop_last = drop_last
-
-        # # create condition encoder for categorical variables in
-        # # form of dictionary with key: value pairs based on condition_keys
-        # if (self.condition_encodings is not None)
-        # and (self.condition_keys is not None):
-        #     self.conditions = [
-        #         label_encoder(
-        #             tgt_adata,
-        #             encoder=self.condition_encodings[self.condition_keys[i]],
-        #             condition_key=self.condition_keys[i],
-        #         )
-        #         for i in range(len(self.condition_encodings))
-        #     ]
-        #     self.conditions = torch.tensor(self.conditions, dtype=torch.long).T
-        #     self.conditions_combined = label_encoder(
-        #         tgt_adata,
-        #         encoder=self.conditions_combined_encodings,
-        #         condition_key='conditions_combined',
-        #     )
-        #     self.conditions_combined = torch.tensor(
-        #         self.conditions_combined, dtype=torch.long
-        #     )
 
     def count_unique_classes(self, supervised_labels):
         """
@@ -186,7 +161,9 @@ class txDataModule(LightningDataModule):
 
     def setup(self, stage=None):
         self.dataset = txDataset(
-            self.folder, adata=self.adata, transform_adata=self.transform_adata
+            self.folder,
+            adata=self.adata,
+            transform_adata=self.transform_adata,
         )
         self.metadata = self.dataset.metadata
 
@@ -247,9 +224,6 @@ class txDataModule(LightningDataModule):
         )
 
     def custom_collate(self, batch):
-        # FOR TOKENIZED DATA
-        # if memory issues -> don't hardcode 2048 and pad to max length of batch
-
         model_input_size = 2048
         input_batch_id = [torch.tensor(d['gdata']['input_ids']) for d in batch]
         length = torch.stack([torch.tensor(d['gdata']['length']) for d in batch])
@@ -274,7 +248,7 @@ class txDataModule(LightningDataModule):
 
         # FOR ANNDATA
         if self.adata is not None:
-            counts = [torch.tensor(d['adata'].X) for d in batch]
+            counts = [torch.tensor(d['adata'].X.toarray()) for d in batch]
             counts = torch.cat(counts, dim=0)
             output_dict['counts'] = counts
             output_dict['size_factor'] = [d['size_factor'] for d in batch]

@@ -70,6 +70,8 @@ class gpWrapper(nn.Module):
         num_heads,
         mgm_mask_ratio,
         add_remaining_var,
+        use_flash,
+        model_type,
     ):
         super().__init__()
 
@@ -78,6 +80,7 @@ class gpWrapper(nn.Module):
         self.num_heads = num_heads
         self.mgm_mask_ratio = mgm_mask_ratio
         self.gp_inputs = gp_inputs
+        self.model_type = model_type
 
         # Store all genes included in at least one GP
         self.all_gp_tokens = set()
@@ -116,6 +119,7 @@ class gpWrapper(nn.Module):
                     depth=self.n_blocks,
                     num_heads=self.num_heads,
                     mlm_masking_prob=self.mgm_mask_ratio,
+                    use_flash=use_flash,
                 )
                 for i in range(len(gp_inputs))
             ]
@@ -305,60 +309,68 @@ class gpWrapper(nn.Module):
 
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
-            (
-                emb_pad,
-                tokens_pad,
-                num_genes_per_cell,
-                attn_mask,
-            ) = self.build_input_matrix(
-                gf_emb,  # geneformer embeddings
-                input_dataset['input_ids'],
-                getattr(self, f'gp{i}_tokens'),
-                gp_idx=i,
-            )
-
-            # track number of genes per cell
-            # divide by GP length
-            num_genes_per_cell = num_genes_per_cell / len(
-                getattr(self, f'gp{i}_tokens')
-            )
-            num_genes_per_cell_list += [num_genes_per_cell]
-
-            # Encode tokens for encoding
-            tokens_pad_unencoded = tokens_pad
-
-            tokens_pad = (
-                tokens_pad.cpu()
-                .apply_(
-                    lambda x: getattr(self, f'gp{i}_tokens_encoded')[x]
-                    if x in getattr(self, f'gp{i}_tokens_encoded').keys()
-                    else -100
+            # when learning new GP, onyl do FW pass on new GP
+            if (
+                (self.training)
+                & (self.encoder[i].blocks[0].attn.qkv.weight.requires_grad is False)
+                & (self.model_type == 'Base')
+            ):
+                continue
+            else:
+                (
+                    emb_pad,
+                    tokens_pad,
+                    num_genes_per_cell,
+                    attn_mask,
+                ) = self.build_input_matrix(
+                    gf_emb,  # geneformer embeddings
+                    input_dataset['input_ids'],
+                    getattr(self, f'gp{i}_tokens'),
+                    gp_idx=i,
                 )
-                .to(emb_pad.device)
-            )
 
-            # get token GP representation, logits for gene level prediction,
-            # and gene_labels where masked genes = -100
-
-            encoder_output = self.encoder[i](
-                emb_pad,
-                attn_mask=attn_mask,
-                gene_labels=tokens_pad,
-                inference=inference,
-                return_attention=return_attention,
-                return_gene_embeddings=return_gene_embeddings,
-            )
-
-            gp_token_list.append(encoder_output['cls'])
-            logits_lm_list.append(encoder_output['logits_lm'])
-            gene_labels_list.append(encoder_output['gene_labels'])
-
-            if return_gene_embeddings:
-                gene_emb_list.append(encoder_output['gene_embeddings'])
-                gene_original_labels_list.append(tokens_pad_unencoded)
-                gp_labels_list.append(
-                    [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
+                # track number of genes per cell
+                # divide by GP length
+                num_genes_per_cell = num_genes_per_cell / len(
+                    getattr(self, f'gp{i}_tokens')
                 )
+                num_genes_per_cell_list += [num_genes_per_cell]
+
+                # Encode tokens for encoding
+                tokens_pad_unencoded = tokens_pad
+
+                tokens_pad = (
+                    tokens_pad.cpu()
+                    .apply_(
+                        lambda x: getattr(self, f'gp{i}_tokens_encoded')[x]
+                        if x in getattr(self, f'gp{i}_tokens_encoded').keys()
+                        else -100
+                    )
+                    .to(emb_pad.device)
+                )
+
+                # get token GP representation, logits for gene level prediction,
+                # and gene_labels where masked genes = -100
+
+                encoder_output = self.encoder[i](
+                    emb_pad,
+                    attn_mask=attn_mask,
+                    gene_labels=tokens_pad,
+                    inference=inference,
+                    return_attention=return_attention,
+                    return_gene_embeddings=return_gene_embeddings,
+                )
+
+                gp_token_list.append(encoder_output['cls'])
+                logits_lm_list.append(encoder_output['logits_lm'])
+                gene_labels_list.append(encoder_output['gene_labels'])
+
+                if return_gene_embeddings:
+                    gene_emb_list.append(encoder_output['gene_embeddings'])
+                    gene_original_labels_list.append(tokens_pad_unencoded)
+                    gp_labels_list.append(
+                        [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
+                    )
 
         # Concatenate tensors
         z = torch.stack(gp_token_list, dim=1)
@@ -515,7 +527,13 @@ class gpWrapper(nn.Module):
 
 class cellWrapper(nn.Module):
     def __init__(
-        self, gp_inputs, n_blocks, num_heads, gp_latent_size, global_masking_rate
+        self,
+        gp_inputs,
+        n_blocks,
+        num_heads,
+        gp_latent_size,
+        global_masking_rate,
+        use_flash,
     ):
         super().__init__()
 
@@ -530,6 +548,7 @@ class cellWrapper(nn.Module):
             depth=self.n_blocks,
             num_heads=self.num_heads,
             mlm_masking_prob=global_masking_rate,
+            use_flash=use_flash,
         )
 
     def build_input_matrix(self, z, num_genes_per_cell_list):
@@ -709,7 +728,7 @@ class CountHead(nn.Module):
         # use cls token for count prediction
         count_outputs = {}
         mlp_output = self.mlp(x)
-        mlp_output = nn.functional.normalize(mlp_output, dim=-1, p=2)
+        mlp_output = F.normalize(mlp_output, dim=-1, p=2)
         if self.loss_mode == 'mse':
             count_outputs['count_lognorm'] = self.relu_output(mlp_output)
         elif self.loss_mode == 'zinb':
@@ -743,6 +762,7 @@ class gpTransformerBase(nn.Module):
         num_heads=1,
         n_blocks=1,
         mgm_mask_ratio=0.5,
+        use_flash=False,
         geneformer_model='/lustre/scratch126/cellgen/team292/mm58/'
         'geneformer_endometrium/Geneformer/',
         gf_layer_to_quant=-1,
@@ -750,6 +770,7 @@ class gpTransformerBase(nn.Module):
         '/Geneformer/geneformer/token_dictionary.pkl',
         gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
         '/Geneformer/geneformer/gene_name_id_dict.pkl',
+        model_type='Base',
     ):
         """
         database :
@@ -826,6 +847,7 @@ class gpTransformerBase(nn.Module):
         self.do_ensembl_conversion = do_ensembl_conversion
         self.n_blocks = n_blocks
         self.attn_dropout = attn_dropout
+        self.use_flash = use_flash
 
         self.multi_gp_encoder = gpWrapper(
             database=self.gpdb,
@@ -839,6 +861,8 @@ class gpTransformerBase(nn.Module):
             mgm_mask_ratio=self.mgm_mask_ratio,
             gp_inputs=gp_inputs,
             add_remaining_var=add_remaining_var,
+            use_flash=self.use_flash,
+            model_type=model_type,
         )
 
     def forward(
@@ -900,9 +924,10 @@ class gpTransformerGlobal(gpTransformerBase):
         supervised_labels: Optional[Dict] = None,
         global_masking_rate=0,
         global_n_blocks=1,
+        use_flash=False,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(use_flash=use_flash, model_type='Global', **kwargs)
         self.global_attn_heads = global_attn_heads
 
         self.global_loss = global_loss
@@ -913,6 +938,7 @@ class gpTransformerGlobal(gpTransformerBase):
             n_blocks=global_n_blocks,
             num_heads=self.global_attn_heads,
             global_masking_rate=global_masking_rate,
+            use_flash=use_flash,
         )
 
         if self.global_loss == 'supervised':
