@@ -11,6 +11,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from scipy.sparse import csr_matrix
 from transformers import BertForMaskedLM
 
@@ -21,6 +22,10 @@ from ..Utils.utils import get_gp_tokens, pad_array
 ####################################
 # Geneformer
 ####################################
+
+gf_path = TOKEN_DICTIONARY_FILE.rsplit('/', 1)[0]
+GENE_NAME_FILE = gf_path + '/gene_name_id_dict.pkl'
+GENEFORMER_MODEL_PATH = gf_path
 
 
 class gfWrapper(nn.Module):
@@ -763,13 +768,10 @@ class gpTransformerBase(nn.Module):
         n_blocks=1,
         mgm_mask_ratio=0.5,
         use_flash=False,
-        geneformer_model='/lustre/scratch126/cellgen/team292/mm58/'
-        'geneformer_endometrium/Geneformer/',
+        geneformer_model=GENEFORMER_MODEL_PATH,
         gf_layer_to_quant=-1,
-        gene_token_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
-        '/Geneformer/geneformer/token_dictionary.pkl',
-        gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
-        '/Geneformer/geneformer/gene_name_id_dict.pkl',
+        gene_token_path=TOKEN_DICTIONARY_FILE,
+        gene_name_path=GENE_NAME_FILE,
         model_type='Base',
     ):
         """
@@ -1136,10 +1138,8 @@ class gfBaseline(gpTransformerBase):
         self,
         gene_counts_df,
         num_heads,
-        gene_token_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
-        '/Geneformer/geneformer/token_dictionary.pkl',
-        gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
-        '/Geneformer/geneformer/gene_name_id_dict.pkl',
+        gene_token_path=TOKEN_DICTIONARY_FILE,
+        gene_name_path=GENE_NAME_FILE,
         add_remaining_var=False,
         **kwargs,
     ):
