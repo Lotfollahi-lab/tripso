@@ -19,6 +19,7 @@ import pytorch_lightning as pl
 import scanpy as sc
 import seaborn as sns
 import torch
+from geneformer import TOKEN_DICTIONARY_FILE
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -254,21 +255,17 @@ def pad_array(arr, desired_length=2048, padding_value=-100):
 # GP wrangling
 ###################################
 
+gf_path = TOKEN_DICTIONARY_FILE.rsplit('/', 1)[0]
+GENE_NAME_FILE = gf_path + '/gene_name_id_dict.pkl'
+GENEFORMER_MODEL_PATH = gf_path
+
 # for converting between gene formats
 # load gene token dict
-with open(
-    '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
-    'Geneformer/geneformer/token_dictionary.pkl',
-    'rb',
-) as f:
+with open(TOKEN_DICTIONARY_FILE, 'rb') as f:
     token_dictionary = pickle.load(f)
 
 # load gene name to ensembl dict
-with open(
-    '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
-    'Geneformer/geneformer/gene_name_id_dict.pkl',
-    'rb',
-) as f:
+with open(GENE_NAME_FILE, 'rb') as f:
     name_dictionary = pickle.load(f)
 
 ensembl_to_name = {v: k for k, v in name_dictionary.items()}
