@@ -23,9 +23,10 @@ from ..Utils.utils import get_gp_tokens, pad_array
 # Geneformer
 ####################################
 
-gf_path = TOKEN_DICTIONARY_FILE.rsplit('/', 1)[0]
-GENE_NAME_FILE = gf_path + '/gene_name_id_dict.pkl'
-GENEFORMER_MODEL_PATH = gf_path
+GENE_NAME_FILE = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl'  # noqa
+GENEFORMER_MODEL_PATH = (
+    '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/'
+)
 
 
 class gfWrapper(nn.Module):

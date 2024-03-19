@@ -19,7 +19,7 @@ import pytorch_lightning as pl
 import scanpy as sc
 import seaborn as sns
 import torch
-from geneformer import TOKEN_DICTIONARY_FILE
+from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -255,9 +255,8 @@ def pad_array(arr, desired_length=2048, padding_value=-100):
 # GP wrangling
 ###################################
 
-gf_path = TOKEN_DICTIONARY_FILE.rsplit('/', 1)[0]
-GENE_NAME_FILE = gf_path + '/gene_name_id_dict.pkl'
-GENEFORMER_MODEL_PATH = gf_path
+GENE_NAME_FILE = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl'  # noqa
+
 
 # for converting between gene formats
 # load gene token dict
