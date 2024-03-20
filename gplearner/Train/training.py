@@ -44,6 +44,7 @@ def run_training(
     gp_latent_size: int = 256,
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
+    finetune_lr: float = 1e-5,
     resume_training: Optional[bool] = False,
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
@@ -285,6 +286,13 @@ def run_training(
                     }
                 )
 
+            if global_training == 'finetune':
+                wandb_logger.experiment.config.update(
+                    {
+                        'finetune_lr': finetune_lr,
+                    }
+                )
+
     ############################################################################
     # Dataset Preparation
     ############################################################################
@@ -413,6 +421,8 @@ def run_training(
             global_loss=global_loss,
             total_epochs=n_epochs,
             lr=lr,
+            finetune_lr=finetune_lr,
+            use_finetune_lr=global_training == 'finetune',
             lr_scheduler=lr_scheduler,
             # optimizer=DeepSpeedCPUAdam,
             use_gp_similarity_loss=use_gp_similarity_loss,
@@ -430,6 +440,8 @@ def run_training(
             model_type,
             global_loss=global_loss,
             lr=lr,
+            finetune_lr=finetune_lr,
+            use_finetune_lr=global_training == 'finetune',
             total_epochs=n_epochs,
             lr_scheduler=lr_scheduler,
             use_gp_similarity_loss=use_gp_similarity_loss,
@@ -478,6 +490,26 @@ def run_training(
                 param.requires_grad = True
             else:
                 param.requires_grad = False
+
+    # For training global model after base model
+    # but finetuning original GP blocks
+    if global_training == 'finetune':
+        if path_to_base_model is None:
+            raise ValueError(
+                'Please provide path to pre-trained'
+                'gpTransformer Base model for finetuning'
+            )
+        # look for Base model to load
+        # if not found, this will raise an error
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        print('Loading from checkpoint', checkpoint_path)
+        checkpoint = torch.load(latest_ckpt)
+        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
+        # n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
+
+        # reset output directory
+        gp_transformer.output_dir = output_dir
 
     # Learning new GP
     if learn_new_gp:
@@ -541,7 +573,7 @@ def run_training(
             devices=-1,
             accelerator='auto',
             precision='bf16-mixed',
-            profiler='advanced',
+            profiler='simple',
             strategy=strategy,
         )
 

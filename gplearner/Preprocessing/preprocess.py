@@ -127,7 +127,9 @@ def pp_and_tokenize(
             if 'highly_variable' not in adata.var.columns:
                 if hvg_batch_key is None:
                     raise ValueError('Please provide batch key for HVG calculation')
-                sc.pp.highly_variable_genes(adata, batch_key=hvg_batch_key)
+                sc.pp.highly_variable_genes(
+                    adata, batch_key=hvg_batch_key, flavor='seurat_v3', n_top_genes=2000
+                )
 
             adata = adata[:, adata.var.highly_variable]
             adata.write_h5ad(os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad'))

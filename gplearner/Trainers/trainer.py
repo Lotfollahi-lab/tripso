@@ -121,6 +121,8 @@ class scGPL(pl.LightningModule):
         total_n_genes: int = 20_000,
         n_condition_combined: int = 1,  # number of batches for zinb and nb
         test_random_baseline: bool = False,
+        finetune_lr: float = 1e-5,
+        use_finetune_lr: bool = False,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -178,6 +180,8 @@ class scGPL(pl.LightningModule):
         self.total_epochs = total_epochs
         self.weight_decay = weight_decay
         self.optimizer_class = optimizer
+        self.finetune_lr = finetune_lr
+        self.use_finetune_lr = use_finetune_lr
 
         # Initialise list to append loss and accuracy
         for stage in ['train', 'val', 'test']:
@@ -547,6 +551,10 @@ class scGPL(pl.LightningModule):
             # return Pearson correlation coefficient
             true_counts = torch.cat(self.test_true_counts_list).float()
             pred_counts = torch.cat(self.test_pred_counts_list)
+            print('True counts shape:', true_counts.shape)
+            print('Predicted counts shape:', pred_counts.shape)
+            print('True counts max value:', true_counts.max())
+            print('Predicted counts max value:', pred_counts.max())
 
             # shuffle the counts
             true_counts_shuffled = true_counts[torch.randperm(true_counts.size(0))]
@@ -1023,15 +1031,21 @@ class scGPL(pl.LightningModule):
         params = list(self.model.named_parameters())
 
         def add_custom_lr(n):
-            return 'clf_head' in n
+            return 'multi_gp_encoder' in n
 
-        grouped_parameters = [
-            {'params': [p for n, p in params if not add_custom_lr(n)], 'lr': self.lr},
-            {
-                'params': [p for n, p in params if add_custom_lr(n)],
-                'lr': self.lr * 1e-2,
-            },
-        ]
+        if self.use_finetune_lr:
+            grouped_parameters = [
+                {
+                    'params': [p for n, p in params if not add_custom_lr(n)],
+                    'lr': self.lr,
+                },
+                {
+                    'params': [p for n, p in params if add_custom_lr(n)],
+                    'lr': self.finetune_lr,
+                },
+            ]
+        else:
+            grouped_parameters = [{'params': [p for n, p in params], 'lr': self.lr}]
 
         optimizer = self.optimizer_class(
             grouped_parameters, lr=self.lr, weight_decay=self.weight_decay
