@@ -335,6 +335,9 @@ class gpWrapper(nn.Module):
                     gp_idx=i,
                 )
 
+                # only do computation for cells with more than 2 genes
+                idx_keep = num_genes_per_cell > 2
+
                 # track number of genes per cell
                 # divide by GP length
                 num_genes_per_cell = num_genes_per_cell / len(
@@ -342,41 +345,62 @@ class gpWrapper(nn.Module):
                 )
                 num_genes_per_cell_list += [num_genes_per_cell]
 
-                # Encode tokens for encoding
-                tokens_pad_unencoded = tokens_pad
+                # Initialize a placeholder for <cls> token
+                cls_tokens = torch.zeros((emb_pad.shape[0], self.gp_latent_size)).to(
+                    emb_pad.device
+                )
 
-                tokens_pad = (
-                    tokens_pad.cpu()
-                    .apply_(
-                        lambda x: getattr(self, f'gp{i}_tokens_encoded')[x]
-                        if x in getattr(self, f'gp{i}_tokens_encoded').keys()
-                        else -100
+                # Run gp transformer block on cells with sufficient signal
+                if idx_keep.sum() != 0:
+                    emb_pad = emb_pad[idx_keep]
+                    tokens_pad = tokens_pad[idx_keep]
+                    attn_mask = attn_mask[idx_keep]
+
+                    # Encode tokens for encoding
+                    tokens_pad_unencoded = tokens_pad
+
+                    tokens_pad = (
+                        tokens_pad.cpu()
+                        .apply_(
+                            lambda x: getattr(self, f'gp{i}_tokens_encoded')[x]
+                            if x in getattr(self, f'gp{i}_tokens_encoded').keys()
+                            else -100
+                        )
+                        .to(emb_pad.device)
                     )
-                    .to(emb_pad.device)
-                )
 
-                # get token GP representation, logits for gene level prediction,
-                # and gene_labels where masked genes = -100
+                    # get token GP representation, logits for gene level prediction,
+                    # and gene_labels where masked genes = -100
 
-                encoder_output = self.encoder[i](
-                    emb_pad,
-                    attn_mask=attn_mask,
-                    gene_labels=tokens_pad,
-                    inference=inference,
-                    return_attention=return_attention,
-                    return_gene_embeddings=return_gene_embeddings,
-                )
+                    encoder_output = self.encoder[i](
+                        emb_pad,
+                        attn_mask=attn_mask,
+                        gene_labels=tokens_pad,
+                        inference=inference,
+                        return_attention=return_attention,
+                        return_gene_embeddings=return_gene_embeddings,
+                    )
 
-                gp_token_list.append(encoder_output['cls'])
-                logits_lm_list.append(encoder_output['logits_lm'])
-                gene_labels_list.append(encoder_output['gene_labels'])
+                    # Combine computed embeddings and dummy embeddings
+                    cls_tokens[idx_keep] = encoder_output['cls']
+                    logits_lm_list.append(encoder_output['logits_lm'])
+                    gene_labels_list.append(encoder_output['gene_labels'])
+
+                else:
+                    # dummy logits and gene labels so we can still index the list
+                    # and know which gp it corresponds to
+                    logits_lm_list.append(torch.zeros(1, 1, 1).to(emb_pad.device))
+                    gene_labels_list.append(torch.zeros(1, 1).to(emb_pad.device))
+
+                gp_token_list.append(cls_tokens)
 
                 if return_gene_embeddings:
-                    gene_emb_list.append(encoder_output['gene_embeddings'])
-                    gene_original_labels_list.append(tokens_pad_unencoded)
-                    gp_labels_list.append(
-                        [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
-                    )
+                    if idx_keep.sum() != 0:
+                        gene_emb_list.append(encoder_output['gene_embeddings'])
+                        gene_original_labels_list.append(tokens_pad_unencoded)
+                        gp_labels_list.append(
+                            [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
+                        )
 
         # Concatenate tensors
         z = torch.stack(gp_token_list, dim=1)

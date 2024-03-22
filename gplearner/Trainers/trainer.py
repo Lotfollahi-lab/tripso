@@ -282,15 +282,17 @@ class scGPL(pl.LightningModule):
                     )
 
         self.train_loss.append(loss)
-        self.log(
-            'train/loss',
-            loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=True,
-        )
+
+        if loss is not None:
+            self.log(
+                'train/loss',
+                loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
 
         if self.model_type == 'Global':
             if self.global_loss == 'supervised':
@@ -551,8 +553,6 @@ class scGPL(pl.LightningModule):
             # return Pearson correlation coefficient
             true_counts = torch.cat(self.test_true_counts_list).float()
             pred_counts = torch.cat(self.test_pred_counts_list)
-            print('True counts shape:', true_counts.shape)
-            print('Predicted counts shape:', pred_counts.shape)
             print('True counts max value:', true_counts.max())
             print('Predicted counts max value:', pred_counts.max())
 
@@ -571,6 +571,31 @@ class scGPL(pl.LightningModule):
                 pred_counts.T, true_counts_shuffled.T
             )
             mean_pearson_shuffled = torch.mean(pearson_shuffled)
+
+            # Pearson correlation for non zero genes
+            n_cells, n_genes = pred_counts.shape
+            mean_pearson_non_zero = []
+
+            for cell_idx in range(n_cells):
+                # For each cell, identify non-zero genes
+                non_zero_genes = true_counts[cell_idx, :] > 0
+
+                # Filter out zero-expression genes for this cell
+                # in both pred and true counts
+                pred_non_zero = pred_counts[cell_idx, non_zero_genes]
+                true_non_zero = true_counts[cell_idx, non_zero_genes]
+
+                if (
+                    len(pred_non_zero) > 1
+                ):  # Ensure there's more than one gene to calculate Pearson correlation
+                    # Calculate Pearson correlation for the non-zero genes in this cell
+                    pearson_corr = torch.corrcoef(
+                        torch.stack((pred_non_zero, true_non_zero))
+                    )[0, 1]
+                    mean_pearson_non_zero.append(pearson_corr)
+
+            # Compute the mean Pearson correlation across all cells
+            mean_pearson_non_zero = torch.tensor(mean_pearson_non_zero).mean()
 
             # MSE
             mse = self.metric['mse'](pred_counts, true_counts)
@@ -616,6 +641,7 @@ class scGPL(pl.LightningModule):
                     'metric': [
                         'pearson',
                         'pearson_shuffled',
+                        'pearson_non_zero',
                         'mse',
                         'mse_shuffled',
                         'true_zeros',
@@ -626,6 +652,7 @@ class scGPL(pl.LightningModule):
                     'value': [
                         mean_pearson.item(),
                         mean_pearson_shuffled.item(),
+                        mean_pearson_non_zero.item(),
                         mean_mse.item(),
                         mean_mse_shuffled.item(),
                         true_zeros,
@@ -850,6 +877,14 @@ class scGPL(pl.LightningModule):
                 .blocks[0]
                 .attn.qkv.weight.requires_grad
             ):
+                # check it output is dummy 0s
+                # if yes skip
+                if output['logits_lm_list'][i].sum() == 0:
+                    gp_loss_dict[self.model.gp_inputs[i]] = (
+                        torch.tensor(0).to(output['logits_lm_list'][i].device).float()
+                    )
+                    continue
+
                 loss_i = F.cross_entropy(
                     output['logits_lm_list'][i].reshape(
                         -1, output['logits_lm_list'][i].shape[-1]
@@ -859,18 +894,6 @@ class scGPL(pl.LightningModule):
 
                 if torch.isnan(loss_i):
                     # usually happens if all labels are masked
-                    print(f'Loss is NaN in {self.model.gp_inputs[i]}')
-                    print('Predictions:')
-                    print(output['logits_lm_list'][i])
-                    print('')
-                    print('True labels:')
-                    print(output['gene_labels_list'][i])
-                    print('')
-                    print('Number of NaNs in predictions:')
-                    print(torch.isnan(output['logits_lm_list'][i]).sum())
-                    print('')
-                    print('Number of NaNs in true labels:')
-                    print(torch.isnan(output['gene_labels_list'][i]).sum())
                     gp_loss_dict[self.model.gp_inputs[i]] = (
                         torch.tensor(0).to(loss_i.device).float()
                     )
@@ -883,10 +906,18 @@ class scGPL(pl.LightningModule):
                     torch.tensor(0).to(output['logits_lm_list'][i].device).float()
                 )
 
-            # compute total loss
-            tensor_list = list(gp_loss_dict.values())
+        # compute total loss
+        tensor_list = list(gp_loss_dict.values())
 
         loss = torch.sum(torch.stack(tensor_list))
+
+        # if loss is 0, return none
+        # THIS MAY CAUSE ISSUES WITH DDP
+        # POSSIBLE WORK AROUND IS THAT FOR MULTI GPU TRAINING
+        # HAVE DUMMY THING LIKE LOSS = 0 TO COMPUTATION GRAPH
+        # AND ON SINGLE GPU THEN WE SKIP?
+        if (loss == 0) & (self.model_type == 'Base'):
+            loss = None
 
         # package outputs to return flexible number of objects
         holder = {

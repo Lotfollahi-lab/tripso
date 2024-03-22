@@ -558,7 +558,7 @@ def run_training(
             accelerator='auto',  # uses ddp per default for multi-gpu training
             strategy=strategy,
             precision='bf16-mixed',
-            profiler='simple',
+            # profiler='simple',
         )
     else:
         trainer = pl.Trainer(
@@ -573,7 +573,7 @@ def run_training(
             devices=-1,
             accelerator='auto',
             precision='bf16-mixed',
-            profiler='simple',
+            # profiler='simple',
             strategy=strategy,
         )
 
