@@ -123,15 +123,20 @@ def pp_and_tokenize(
 
             # save to disk - dataset with only HVG
             os.makedirs(os.path.join(root_dir, 'data/input_h5ad'), exist_ok=True)
+            adata.write_h5ad(os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad'))
 
-            if 'highly_variable' not in adata.var.columns:
-                if hvg_batch_key is None:
+        if 'highly_variable' not in adata.var.columns:
+            if hvg_batch_key is None:
+                if batch_keys is not None:
+                    hvg_batch_key = 'batch_key'
+                else:
                     raise ValueError('Please provide batch key for HVG calculation')
-                sc.pp.highly_variable_genes(
-                    adata, batch_key=hvg_batch_key, flavor='seurat_v3', n_top_genes=2000
-                )
+            sc.pp.highly_variable_genes(
+                adata, batch_key=hvg_batch_key, flavor='seurat_v3', n_top_genes=2000
+            )
 
             adata = adata[:, adata.var.highly_variable]
+            os.makedirs(os.path.join(root_dir, 'data/input_h5ad'), exist_ok=True)
             adata.write_h5ad(os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad'))
 
         # Save chunks
