@@ -137,7 +137,9 @@ def pp_and_tokenize(
 
             adata = adata[:, adata.var.highly_variable]
             os.makedirs(os.path.join(root_dir, 'data/input_h5ad'), exist_ok=True)
-            adata.write_h5ad(os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad'))
+            adata.write_h5ad(
+                os.path.join(root_dir, f'data/input_h5ad/{tissue}_hvg.h5ad')
+            )
 
         # Save chunks
         # Split the cells into groups of chunk_size
