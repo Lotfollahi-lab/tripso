@@ -572,6 +572,31 @@ class scGPL(pl.LightningModule):
             )
             mean_pearson_shuffled = torch.mean(pearson_shuffled)
 
+            # Pearson correlation for non zero genes
+            n_cells, n_genes = pred_counts.shape
+            mean_pearson_non_zero = []
+
+            for cell_idx in range(n_cells):
+                # For each cell, identify non-zero genes
+                non_zero_genes = true_counts[cell_idx, :] > 0
+
+                # Filter out zero-expression genes for this cell
+                # in both pred and true counts
+                pred_non_zero = pred_counts[cell_idx, non_zero_genes]
+                true_non_zero = true_counts[cell_idx, non_zero_genes]
+
+                if (
+                    len(pred_non_zero) > 1
+                ):  # Ensure there's more than one gene to calculate Pearson correlation
+                    # Calculate Pearson correlation for the non-zero genes in this cell
+                    pearson_corr = torch.corrcoef(
+                        torch.stack((pred_non_zero, true_non_zero))
+                    )[0, 1]
+                    mean_pearson_non_zero.append(pearson_corr)
+
+            # Compute the mean Pearson correlation across all cells
+            mean_pearson_non_zero = torch.tensor(mean_pearson_non_zero).mean()
+
             # MSE
             mse = self.metric['mse'](pred_counts, true_counts)
             mean_mse = torch.mean(mse)
@@ -616,6 +641,7 @@ class scGPL(pl.LightningModule):
                     'metric': [
                         'pearson',
                         'pearson_shuffled',
+                        'pearson_non_zero',
                         'mse',
                         'mse_shuffled',
                         'true_zeros',
@@ -626,6 +652,7 @@ class scGPL(pl.LightningModule):
                     'value': [
                         mean_pearson.item(),
                         mean_pearson_shuffled.item(),
+                        mean_pearson_non_zero.item(),
                         mean_mse.item(),
                         mean_mse_shuffled.item(),
                         true_zeros,
