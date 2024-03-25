@@ -2,6 +2,7 @@ import datetime
 import os
 import random
 import uuid
+import warnings
 from typing import Literal, Optional
 
 import numpy as np
@@ -18,7 +19,7 @@ from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 
-from ..Datamodules.datamodule import txDataModule
+from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import find_latest_file
@@ -302,8 +303,11 @@ def run_training(
         if adata_path is None:
             raise ValueError('Please provide path to anndata object')
         else:
+            anndata_dataset = AnnDataset(adata_path)
+            total_n_genes = anndata_dataset.get_n_genes()
+
+            # TO DO : HOW CAN WE DO THIS WITHOUT READING ANNDATA OBJECT?
             adata = sc.read_h5ad(adata_path)
-            total_n_genes = adata.X.shape[1]
             if 'batch_key' in adata.obs.columns:
                 n_condition_combined = adata.obs['batch_key'].nunique()
             else:
@@ -324,16 +328,16 @@ def run_training(
     # (tokenized dataset should be created already)
     # txdata = DummyDataModule(folder = dataset_path, batch_size=batch_size)
     if reconstruction_loss == 'mse':
-        transform_adata = True
-    else:
-        transform_adata = False
+        warnings.warn(
+            'Using MSE loss for reconstruction'
+            '\nMake sure you pass anndata object with normalized counts'
+        )
 
     txdata = txDataModule(
         folder=dataset_path,
         batch_size=batch_size,
         frac_for_training=frac_for_training,
-        adata=adata,
-        transform_adata=transform_adata,
+        adata_path=adata_path,
     )
 
     # Load gpdb
