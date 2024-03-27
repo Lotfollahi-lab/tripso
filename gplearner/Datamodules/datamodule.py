@@ -37,6 +37,18 @@ class AnnDataset(Dataset):
 
         self.adata = adata
 
+        if 'batch_key' in adata.obs.columns:
+            n_condition_combined = adata.obs['batch_key'].nunique()
+        else:
+            raise ValueError(
+                'No batch_key found'
+                'for ZINB or NB reconstruction loss'
+                'Please provide batch_key in adata.obs'
+                'by passing batch_keys argument to preprocess function'
+            )
+
+        self.n_condition_combined = n_condition_combined
+
     def __len__(self):
         return self.adata.shape[0]
 
@@ -118,7 +130,7 @@ class txDataModule(LightningDataModule):
         folder='./data/tokenized.dataset',
         adata_path=None,  # should be h5ad object that matches tokenized dataset exactly
         batch_size=3,
-        num_workers=8,
+        num_workers=4,
         shuffle=False,
         # development only:
         frac_for_training=1,
@@ -155,8 +167,9 @@ class txDataModule(LightningDataModule):
         folder_path = Path(self.folder)
         assert folder_path.exists(), 'tokenized folder does not exist'
 
-        adata_path = Path(self.adata_path)
-        assert adata_path.exists(), 'adata path does not exist'
+        if self.adata_path is not None:
+            adata_path = Path(self.adata_path)
+            assert adata_path.exists(), 'adata path does not exist'
 
     def setup(self, stage=None):
         # Load the tokenized dataset

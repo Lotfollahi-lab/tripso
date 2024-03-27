@@ -8,7 +8,6 @@ from typing import Literal, Optional
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
-import scanpy as sc
 import torch
 
 # set up wandb
@@ -305,22 +304,9 @@ def run_training(
         else:
             anndata_dataset = AnnDataset(adata_path)
             total_n_genes = anndata_dataset.get_n_genes()
-
-            # TO DO : HOW CAN WE DO THIS WITHOUT READING ANNDATA OBJECT?
-            adata = sc.read_h5ad(adata_path)
-            if 'batch_key' in adata.obs.columns:
-                n_condition_combined = adata.obs['batch_key'].nunique()
-            else:
-                if reconstruction_loss in ['zinb', 'nb']:
-                    raise ValueError(
-                        'No batch_key found'
-                        'for ZINB or NB reconstruction loss'
-                        'Please provide batch_key in adata.obs'
-                        'by passing batch_keys argument to preprocess function'
-                    )
+            n_condition_combined = anndata_dataset.n_condition_combined
 
     else:
-        adata = None
         total_n_genes = 0
         n_condition_combined = 1
 

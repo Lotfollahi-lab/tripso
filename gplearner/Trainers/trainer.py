@@ -1063,11 +1063,11 @@ class scGPL(pl.LightningModule):
         if self.use_finetune_lr:
             grouped_parameters = [
                 {
-                    'params': [p for n, p in params if not add_custom_lr(n)],
+                    'params': [p for n, p in params if add_custom_lr(n)],
                     'lr': self.lr,
                 },
                 {
-                    'params': [p for n, p in params if add_custom_lr(n)],
+                    'params': [p for n, p in params if not add_custom_lr(n)],
                     'lr': self.finetune_lr,
                 },
             ]
