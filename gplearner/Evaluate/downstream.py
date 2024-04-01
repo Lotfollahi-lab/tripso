@@ -515,7 +515,7 @@ class gpEval:
                                 variable_to_track={'GP': gp},
                             )
 
-        elif data_to_model == 'gene_mutliGP':
+        elif data_to_model == 'gene_multiGP':
             txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
 
             if not os.path.exists('gene_metrics'):
