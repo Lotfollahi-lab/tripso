@@ -5,6 +5,7 @@ from .gp_model import (
     gpAverager,
     gpTransformerBase,
     gpWrapper,
+    scgptWrapper,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     'gpAverager',
     'gpWrapper',
     'gfWrapper',
+    'scgptWrapper',
 ]

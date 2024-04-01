@@ -1,3 +1,3 @@
 from .datamodule import txDataModule  # noqa
-
-all = ['txDataModule']
+from .datamodule import scgptDataModule
+all = ['txDataModule', 'scgptDataModule']
