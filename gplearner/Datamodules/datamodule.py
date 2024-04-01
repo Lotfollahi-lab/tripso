@@ -2,7 +2,6 @@ import pickle
 import random
 from pathlib import Path
 
-import numpy as np
 import scanpy as sc
 import torch
 from datasets import load_from_disk
@@ -18,12 +17,66 @@ from torch.utils.data import (
 random.seed(0)
 
 
-class txDataset(Dataset):
+class AnnDataset(Dataset):
+    def __init__(
+        self,
+        path='/path/to/adata.h5ad',
+    ):
+        """Create a dataset from an anndata object
+
+        Args:
+            folder (str): path to h5ad file
+
+        """
+
+        # Load the data
+        if path.endswith('.h5ad'):
+            adata = sc.read_h5ad(path)
+        elif path.endswith('.loom'):
+            adata = sc.read_loom(path)
+
+        self.adata = adata
+
+        if 'batch_key' in adata.obs.columns:
+            n_condition_combined = adata.obs['batch_key'].nunique()
+        else:
+            raise ValueError(
+                'No batch_key found'
+                'for ZINB or NB reconstruction loss'
+                'Please provide batch_key in adata.obs'
+                'by passing batch_keys argument to preprocess function'
+            )
+
+        self.n_condition_combined = n_condition_combined
+
+    def __len__(self):
+        return self.adata.shape[0]
+
+    def __getitem__(self, idx):
+        adata_tensor = torch.tensor(self.adata.X[idx, :], dtype=torch.float32)
+        obs = self.adata.obs.iloc[idx, :]
+        idx = obs['idx']
+
+        # obs = self.adata.obs.iloc[idx, :]
+        # var = self.adata.var.iloc[idx, :]
+
+        output = {
+            'X': adata_tensor,
+            'idx': idx,
+            #  "obs" : obs,
+            #  "var" : var,
+            'size_factor': adata_tensor.sum(axis=-1),
+        }
+        return output
+
+    def get_n_genes(self):
+        return self.adata.shape[1]
+
+
+class tkDataset(Dataset):
     def __init__(
         self,
         folder='./data/tokenized.dataset',
-        adata=None,
-        transform_adata=True,
     ):
         """Create a dataset from a directory with a tokenized Geneformer dataset
 
@@ -34,42 +87,6 @@ class txDataset(Dataset):
 
         """
         self.gdata = load_from_disk(folder)
-
-        if adata:
-            # calculate size factor on raw data:
-            self.size_factor = np.ravel(adata.X.sum(axis=1))
-
-            if transform_adata:
-                print('Normalizing and log-transforming adata')
-                print(
-                    'Before transformation adata.X min-max :'
-                    f'{adata.X.min()} - {adata.X.max()}'
-                )
-                sc.pp.normalize_total(adata, target_sum=1e4)
-                sc.pp.log1p(adata)
-                print(
-                    'After transformation adata.X min-max :'
-                    f'{adata.X.min()} - {adata.X.max()}'
-                )
-
-            self.adata = adata[self.gdata['idx']]
-
-            # check matching between tokenized data and anndata object:
-            if len(self.adata) != len(self.gdata):
-                print('adata', len(self.adata))
-                print('tokenized data', len(self.gdata))
-                raise ValueError(
-                    'Number of cells in adata and tokenized dataset do not match'
-                )
-
-            # check if the index is the same
-            if not all(self.adata.obs_names == self.gdata['idx']):
-                print('adata', self.adata.obs_names[:5])
-                print('tk data', self.gdata['idx'][:5])
-                print(len(set(self.adata.obs_names) - set(self.gdata['idx'])))
-                raise ValueError('Index of adata and tokenized data do not match')
-        else:
-            self.adata = None
 
         # Metadata to keep track of
         # (we assume filtering of obs columns happens at
@@ -82,10 +99,28 @@ class txDataset(Dataset):
         return len(self.gdata)
 
     def __getitem__(self, ind):
+        return self.gdata[ind]
+
+
+class txDataset(Dataset):
+    def __init__(self, tk_dataset, adata_dataset):
+        self.tk_dataset = tk_dataset
+        self.adata_dataset = adata_dataset
+
+    def __len__(self):
+        return len(self.tk_dataset)
+
+    def __getitem__(self, idx):
+        tk = self.tk_dataset[idx]
+
+        if self.adata_dataset is not None:
+            adata = self.adata_dataset[idx]
+        else:
+            adata = None
+
         return {
-            'gdata': self.gdata[ind],
-            'adata': self.adata[ind] if self.adata else None,
-            'size_factor': self.size_factor[ind] if self.adata else None,
+            'tk': tk,
+            'adata': adata,
         }
 
 
@@ -93,8 +128,7 @@ class txDataModule(LightningDataModule):
     def __init__(
         self,
         folder='./data/tokenized.dataset',
-        adata=None,
-        transform_adata=True,
+        adata_path=None,  # should be h5ad object that matches tokenized dataset exactly
         batch_size=3,
         num_workers=4,
         shuffle=False,
@@ -115,6 +149,7 @@ class txDataModule(LightningDataModule):
         """
         super().__init__()
         self.folder = folder
+        self.adata_path = adata_path
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.shuffle = shuffle
@@ -126,49 +161,40 @@ class txDataModule(LightningDataModule):
 
         self.pad_token_id = self.gene_token_dict.get('<pad>')
         self.max_len = 2048
-        self.adata = adata
-        self.transform_adata = transform_adata
-
-    def count_unique_classes(self, supervised_labels):
-        """
-        Count the number of categories in class for supervised learning
-
-        Args:
-            supervised_labels (list): List of classes to count
-
-        Returns:
-            dict: Dictionary with class names as keys and the number of samples
-                for each class as values
-        """
-        self.setup()
-
-        if isinstance(supervised_labels, str):
-            supervised_labels = [supervised_labels]
-        values = {}
-
-        for c in supervised_labels:
-            column_values = [
-                self.train_dataset[i][c] for i in range(len(self.train_dataset))
-            ]
-            values[c] = len(set(column_values))
-
-        return values
 
     def prepare_data(self):
         # Check if the folder path exists
         folder_path = Path(self.folder)
         assert folder_path.exists(), 'tokenized folder does not exist'
 
+        if self.adata_path is not None:
+            adata_path = Path(self.adata_path)
+            assert adata_path.exists(), 'adata path does not exist'
+
     def setup(self, stage=None):
-        self.dataset = txDataset(
-            self.folder,
-            adata=self.adata,
-            transform_adata=self.transform_adata,
-        )
-        self.metadata = self.dataset.metadata
+        # Load the tokenized dataset
+        tokenized_dataset = tkDataset(self.folder)
+
+        # Optionally load anndata object
+        if self.adata_path is not None:
+            anndata_dataset = AnnDataset(self.adata_path)
+
+            if len(tokenized_dataset) != len(anndata_dataset):
+                raise ValueError(
+                    'Tokenized dataset and anndata object do not have the same length'
+                )
+
+            # Create main dataset
+            self.dataset = txDataset(tokenized_dataset, anndata_dataset)
+
+        else:
+            self.dataset = txDataset(tokenized_dataset, None)
+
+        self.metadata = tokenized_dataset.metadata
 
         # Calculate lengths for train, validation, and test sets
         dataset_size = len(self.dataset)
+
         train_size = int(
             0.8 * dataset_size * self.frac_for_training
         )  # 80% for training
@@ -186,6 +212,11 @@ class txDataModule(LightningDataModule):
             test_size = 50_000
         self.test_size = test_size
         print(f'Testing on {test_size} samples')
+
+        # # FOR DEBUGGING
+        # train_size = 10
+        # val_size = 10
+        # test_size = 10
 
         discard = dataset_size - train_size - val_size - test_size
 
@@ -224,9 +255,12 @@ class txDataModule(LightningDataModule):
         )
 
     def custom_collate(self, batch):
+        # Step 1 : tokenized dataset
+        tokenized_batch = [d['tk'] for d in batch]
+
         model_input_size = 2048
-        input_batch_id = [torch.tensor(d['gdata']['input_ids']) for d in batch]
-        length = torch.stack([torch.tensor(d['gdata']['length']) for d in batch])
+        input_batch_id = [torch.tensor(d['input_ids']) for d in tokenized_batch]
+        length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
         input_batch_id = pad_tensor_list(
             input_batch_id, 2048, self.pad_token_id, model_input_size
@@ -241,16 +275,24 @@ class txDataModule(LightningDataModule):
         for m in self.metadata:
             if m.endswith('_id'):
                 output_dict[m] = torch.tensor(
-                    [d['gdata'][m] for d in batch], dtype=torch.long
+                    [d[m] for d in tokenized_batch], dtype=torch.long
                 )
             else:
-                output_dict[m] = [d['gdata'][m] for d in batch]
+                output_dict[m] = [d[m] for d in tokenized_batch]
 
-        # FOR ANNDATA
-        if self.adata is not None:
-            counts = [torch.tensor(d['adata'].X.toarray()) for d in batch]
-            counts = torch.cat(counts, dim=0)
+        # Optionally also pass the anndata object
+        if self.adata_path is not None:
+            adata_batch = [d['adata'] for d in batch]
+
+            counts = torch.stack([d['X'] for d in adata_batch])
+            idx = [d['idx'] for d in adata_batch]
+
+            # check cell indices match
+            assert all(
+                [a == b for a, b in zip(output_dict['idx'], idx)]
+            ), 'Cell indices do not match'
+
             output_dict['counts'] = counts
-            output_dict['size_factor'] = [d['size_factor'] for d in batch]
+            output_dict['size_factor'] = [d['size_factor'] for d in adata_batch]
 
         return output_dict

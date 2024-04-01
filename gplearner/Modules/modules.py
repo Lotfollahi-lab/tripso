@@ -52,6 +52,7 @@ class Mlp(nn.Module):
         hidden_features=None,
         out_features=None,
         act_layer=nn.GELU,
+        # act_layer = nn.ReLU,
         drop=0.0,
     ):
         super().__init__()
@@ -165,6 +166,7 @@ class Block(nn.Module):
         attn_drop=0.0,
         drop_path=0.0,
         act_layer=nn.GELU,
+        # act_layer=nn.ReLU,
         norm_layer=nn.LayerNorm,
         use_flash=False,
     ):

@@ -295,10 +295,16 @@ class gpEval:
         """
         Check that adata object exists
         """
+        os.chdir(self.output_dir)
         if use_cell_token:
             if os.path.exists('adata_cell_embedding.h5ad'):
                 print(f'Loading adata from {self.output_dir}/adata_cell_embedding.h5ad')
                 adata = sc.read_h5ad('adata_cell_embedding.h5ad')
+            else:
+                raise ValueError(
+                    f'No adata found in {self.output_dir}. '
+                    'Please run generate_embeddings() first'
+                )
         elif os.path.exists('adata_gp_embedding.h5ad'):
             print(f'Loading adata from {self.output_dir}/adata_gp_embedding.h5ad')
             adata = sc.read_h5ad('adata_gp_embedding.h5ad')
