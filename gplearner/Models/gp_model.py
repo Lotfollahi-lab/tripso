@@ -78,6 +78,7 @@ class gpWrapper(nn.Module):
         add_remaining_var,
         use_flash,
         model_type,
+        learn_new_gp,
     ):
         super().__init__()
 
@@ -87,6 +88,7 @@ class gpWrapper(nn.Module):
         self.mgm_mask_ratio = mgm_mask_ratio
         self.gp_inputs = gp_inputs
         self.model_type = model_type
+        self.learning_new_gp = learn_new_gp
 
         # Store all genes included in at least one GP
         self.all_gp_tokens = set()
@@ -320,6 +322,8 @@ class gpWrapper(nn.Module):
                 (self.training)
                 & (self.encoder[i].blocks[0].attn.qkv.weight.requires_grad is False)
                 & (self.model_type == 'Base')
+                # & (self.learning_new_gp) # commented out for backwards compatibility
+                # but would be good to have
             ):
                 continue
             else:
@@ -774,6 +778,7 @@ class gpTransformerBase(nn.Module):
         gene_token_path=TOKEN_DICTIONARY_FILE,
         gene_name_path=GENE_NAME_FILE,
         model_type='Base',
+        learn_new_gp=False,
     ):
         """
         database :
@@ -866,6 +871,7 @@ class gpTransformerBase(nn.Module):
             add_remaining_var=add_remaining_var,
             use_flash=self.use_flash,
             model_type=model_type,
+            learn_new_gp=learn_new_gp,
         )
 
     def forward(
@@ -1241,6 +1247,29 @@ class gfGlobal(gpTransformerGlobal):
         }
 
         return output
+
+
+####################################
+# Embedding evaluation
+####################################
+
+
+class EmbEvaluatorHead(nn.Module):
+    '''
+    Evaluate embeddings by training a classifier
+    '''
+
+    def __init__(
+        self,
+        emb_dim: int,
+        n_classes: int,
+    ):
+        super().__init__()
+
+        self.clf_head = nn.Linear(emb_dim, n_classes)
+
+    def forward(self, x):
+        return self.clf_head(x)
 
 
 if __name__ == '__main__':

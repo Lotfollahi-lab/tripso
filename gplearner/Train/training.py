@@ -368,6 +368,7 @@ def run_training(
             gp_inputs=gp_inputs,
             add_remaining_var=add_remaining_var,
             use_flash=use_flash,
+            learn_new_gp=learn_new_gp,
         )
 
     elif model_type == 'Global':

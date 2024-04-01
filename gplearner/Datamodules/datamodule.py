@@ -1,3 +1,4 @@
+import os
 import pickle
 import random
 from pathlib import Path
@@ -124,16 +125,46 @@ class txDataset(Dataset):
         }
 
 
+class EmbDataset(Dataset):
+    def __init__(self, folder_path, data_type):
+        self.data_type = data_type
+        if self.data_type == 'dataset':
+            self.emb = load_from_disk(folder_path)
+        elif self.data_type == 'h5ad':
+            self.emb = sc.read_h5ad(folder_path)
+        else:
+            raise ValueError('data_type should be either dataset or h5ad')
+
+    def __len__(self):
+        return len(self.emb)
+
+    def __getitem__(self, idx):
+        if self.data_type == 'dataset':
+            return self.emb[idx]
+        elif self.data_type == 'h5ad':
+            return {
+                'X': torch.tensor(self.emb.X[idx, :], dtype=torch.float32),
+                'obs': self.emb.obs.iloc[idx, :],
+                'var': self.emb.var,
+            }
+
+
+#####################
+# Datamodules
+#####################
+
+
 class txDataModule(LightningDataModule):
     def __init__(
         self,
         folder='./data/tokenized.dataset',
         adata_path=None,  # should be h5ad object that matches tokenized dataset exactly
         batch_size=3,
-        num_workers=4,
+        num_workers=1,
         shuffle=False,
         # development only:
         frac_for_training=1,
+        data_split_to_pass_to_val_step='val',
     ):
         """Create a datamodule from a tokenized Geneformer dataset
 
@@ -155,6 +186,7 @@ class txDataModule(LightningDataModule):
         self.shuffle = shuffle
         token_dictionary_file = TOKEN_DICTIONARY_FILE
         self.frac_for_training = frac_for_training
+        self.data_for_validation_step = data_split_to_pass_to_val_step
 
         with open(token_dictionary_file, 'rb') as f:
             self.gene_token_dict = pickle.load(f)
@@ -237,13 +269,30 @@ class txDataModule(LightningDataModule):
         )
 
     def val_dataloader(self):
-        return DataLoader(
-            self.val_dataset,
-            collate_fn=self.custom_collate,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-        )
+        if self.data_for_validation_step == 'train':
+            return DataLoader(
+                self.train_dataset,
+                collate_fn=self.custom_collate,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+            )
+        elif self.data_for_validation_step == 'test':
+            return DataLoader(
+                self.test_dataset,
+                collate_fn=self.custom_collate,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+            )
+        else:
+            return DataLoader(
+                self.val_dataset,
+                collate_fn=self.custom_collate,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+            )
 
     def test_dataloader(self):
         return DataLoader(
@@ -294,5 +343,107 @@ class txDataModule(LightningDataModule):
 
             output_dict['counts'] = counts
             output_dict['size_factor'] = [d['size_factor'] for d in adata_batch]
+
+        return output_dict
+
+
+class EmbDataModule(LightningDataModule):
+    def __init__(
+        self,
+        folder_path,
+        batch_size=3,
+        num_workers=1,
+        emb_label=None,
+        meta_labels=None,
+        data_type='dataset',
+    ):
+        super().__init__()
+        self.folder_path = folder_path
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.emb_to_keep = emb_label
+        self.meta_labels = meta_labels
+        self.data_type = data_type
+
+    def prepare_data(self):
+        folder_path = Path(self.folder_path)
+        assert folder_path.exists(), 'folder path does not exist'
+
+    def setup(self, stage=None):
+        self.train_dataset = EmbDataset(
+            os.path.join(self.folder_path, 'train_set'), data_type=self.data_type
+        )
+        self.val_dataset = EmbDataset(
+            os.path.join(self.folder_path, 'val_set'), data_type=self.data_type
+        )
+        self.test_dataset = EmbDataset(
+            os.path.join(self.folder_path, 'test_set'), data_type=self.data_type
+        )
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            collate_fn=self.custom_collate,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_dataset,
+            collate_fn=self.custom_collate,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_dataset,
+            collate_fn=self.custom_collate,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+        )
+
+    def custom_collate(self, batch):
+        if self.data_type == 'dataset':
+            # Step 1 : get relevant embeddings
+            emb = [torch.tensor(d[self.emb_to_keep]) for d in batch]
+
+            output_dict = {
+                self.emb_to_keep: torch.stack(emb),
+            }
+
+            # Step 2: get metadata
+            for m in self.meta_labels:
+                if m.endswith('_id'):
+                    output_dict[m] = torch.tensor(
+                        [d[m] for d in batch], dtype=torch.long
+                    )
+                else:
+                    output_dict[m] = [d[m] for d in batch]
+
+        elif self.data_type == 'h5ad':
+            emb = [torch.tensor(d['X']) for d in batch]
+
+            # only keep embedding of interest
+            var = batch[0]['var']
+            emb_idx = var.index.get_loc(self.emb_to_keep)
+            emb = emb[:, emb_idx]
+
+            output_dict = {
+                self.emb_to_keep: emb,
+            }
+
+            # get metadata
+            for m in self.meta_labels:
+                if m.endswith('_id'):
+                    output_dict[m] = torch.tensor(
+                        [d['obs'][m] for d in batch], dtype=torch.long
+                    )
+                else:
+                    output_dict[m] = [d['obs'][m] for d in batch]
 
         return output_dict

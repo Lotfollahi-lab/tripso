@@ -14,27 +14,27 @@ import pandas as pd
 import pytorch_lightning as pl
 import scanpy as sc
 import torch
+from datasets import load_from_disk
+from pytorch_lightning.loggers import CSVLogger
 from sklearn.metrics import (
     adjusted_rand_score,
     davies_bouldin_score,
     silhouette_score,
 )
 
-from ..Datamodules.datamodule import txDataModule
+from ..Datamodules.datamodule import EmbDataModule, txDataModule
 from ..Models.gp_model import (
     gfBaseline,
     gpTransformerBase,
     gpTransformerGlobal,
 )
-from ..Trainers.trainer import scGPL
+from ..Trainers.trainer import EmbEvaluator, scGPL
 from ..Utils.utils import (
-    do_linear_regression,
     do_logistic_regression,
     find_genes_in_multiple_gp,
     find_latest_file,
     get_genes_in_single_gp,
     remove_single_data_points,
-    viz_gp,
 )
 
 # for exporting pdfs
@@ -237,6 +237,8 @@ class gpEval:
         gp=None,
         return_classification_report=False,
         test_random_baseline=False,
+        save_emb=False,
+        split_label=None,
     ):
         if (
             self.model_type != 'Mean'
@@ -252,6 +254,8 @@ class gpEval:
                 return_classification_report=return_classification_report,
                 global_loss=self.global_loss,
                 test_random_baseline=test_random_baseline,
+                save_emb=save_emb,
+                split_label=split_label,
             ).load_from_checkpoint(self.checkpoint_path)
         else:
             gp_transformer = scGPL(
@@ -262,6 +266,8 @@ class gpEval:
                 return_gene_embeddings=return_gene_embeddings,
                 output_dir=self.output_dir,
                 return_classification_report=return_classification_report,
+                save_emb=save_emb,
+                split_label=split_label,
             )
 
         # reset attributes overwritten by loading from checkpoint
@@ -273,6 +279,8 @@ class gpEval:
         gp_transformer.return_classification_report = return_classification_report
         gp_transformer.output_dir = self.output_dir
         gp_transformer.test_random_baseline = test_random_baseline
+        gp_transformer.save_emb = save_emb
+        gp_transformer.split_label = split_label
 
         return gp_transformer
 
@@ -313,33 +321,36 @@ class gpEval:
 
         return adata
 
-    def visualize(self, label_to_plot, use_cell_token=False, gp_to_plot=None):
+    def visualize(
+        self,
+        label_to_plot,
+        data_to_plot='test',
+        gp_to_plot=None,
+        subsample=None,
+    ):
         """
         UMAP of GP embeddings
         """
-        if use_cell_token:
-            adata = self.load_anndata(use_cell_token=True)
-            cell_token_tag = '_global_token'
-        else:
-            adata = self.load_anndata()
-            cell_token_tag = ''
-
         if isinstance(label_to_plot, str):
             label_to_plot = [label_to_plot]
+
+        folder = os.path.join(self.output_dir, 'embeddings')
+        emb = load_from_disk(os.path.join(folder, f'{data_to_plot}_split'))
+
+        if subsample is not None:
+            emb = emb.shuffle(seed=0).select(range(subsample))
+
+        x = emb[gp_to_plot].to_numpy()
+        y = emb[label_to_plot].to_pandas()
+        adata = sc.AnnData(X=x, obs=y)
 
         for c in label_to_plot:
             adata = remove_single_data_points(adata, c)
 
         for c in label_to_plot:
-            sc.pl.umap(adata, color=c, save=f'_{self.tissue}_{c}{cell_token_tag}.pdf')
-
-        if use_cell_token is False:
-            if isinstance(gp_to_plot, str):
-                gp_to_plot = [gp_to_plot]
-            if gp_to_plot is None:
-                gp_to_plot = self.gp_inputs
-            for gp in gp_to_plot:
-                viz_gp(gp, color_by=label_to_plot, adata=adata, save_to=self.tissue)
+            sc.pp.neighbors(adata, use_rep='X')
+            sc.tl.umap(adata)
+            sc.pl.umap(adata, color=c, save=f'_{self.tissue}_{gp_to_plot}_by_{c}.pdf')
 
     def _evaluate_clustering_cells(self, odata, cluster_labels, recompute_umap=False):
         adata = odata.copy()
@@ -488,40 +499,7 @@ class gpEval:
         if isinstance(labels, str):
             labels = [labels]
 
-        if data_to_model == 'cell':
-            if not os.path.exists('cell_metrics'):
-                os.makedirs('cell_metrics')
-
-            if use_cell_token:
-                adata = self.load_anndata(use_cell_token=True)
-                for c in labels:
-                    do_logistic_regression(
-                        adata,
-                        c,
-                        os.path.join(self.output_dir, 'cell_metrics'),
-                        f'{c}_prediction_from_global_cell_token',
-                    )
-
-            else:
-                adata = self.load_anndata()
-
-                if gp_features == 'all':
-                    gp_features = self.gp_inputs
-                    gp_features = list(gp_features)
-
-                    for gp in gp_features:
-                        for c in labels:
-                            do_logistic_regression(
-                                adata=adata[:, adata.var['gp_idx'].str.startswith(gp)],
-                                labels_var=c,
-                                output_directory=os.path.join(
-                                    self.output_dir, 'cell_metrics'
-                                ),
-                                filename=f"{c}_prediction_{gp.replace('/', '_')}",
-                                variable_to_track={'GP': gp},
-                            )
-
-        elif data_to_model == 'gene_multiGP':
+        if data_to_model == 'gene_multiGP':
             txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
 
             if not os.path.exists('gene_metrics'):
@@ -598,62 +576,6 @@ class gpEval:
                 variable_to_track={'embedding_type': 'scGPL'},
             )
 
-    def linear_regression(
-        self,
-        use_cell_token=False,
-        gp_features: Union[List, str] = 'all',
-        labels=['cell_type', 'condition'],
-    ):
-        """
-        Run logistic regression to predict labels from features
-
-        Parameters
-        ----------
-        gp_features : list
-            List of GP to use as features
-            If "all", will use all GP
-            If "concat", will concatenate all GP
-        labels : list
-            List of labels to predict
-        """
-        os.chdir(self.output_dir)
-
-        # prepare output directories
-        if isinstance(labels, str):
-            labels = [labels]
-
-        if not os.path.exists('cell_metrics'):
-            os.makedirs('cell_metrics')
-
-        if use_cell_token:
-            adata = self.load_anndata(use_cell_token=True)
-            for c in labels:
-                do_linear_regression(
-                    adata,
-                    c,
-                    os.path.join(self.output_dir, 'cell_metrics'),
-                    f'{c}_prediction_from_global_cell_token',
-                )
-        else:
-            adata = self.load_anndata()
-
-            if gp_features == 'all':
-                gp_features = self.gp_inputs
-                gp_features = list(gp_features)
-
-            elif isinstance(gp_features, str):
-                gp_features = [gp_features]
-
-            for gp in gp_features:
-                for c in labels:
-                    do_linear_regression(
-                        adata=adata[:, adata.var['gp_idx'].str.startswith(gp)],
-                        labels_var=c,
-                        output_directory=os.path.join(self.output_dir, 'cell_metrics'),
-                        filename=f"{c}_prediction_{gp.replace('/', '_')}",
-                        variable_to_track={'GP': gp},
-                    )
-
     def generate_attention_matrix(self, gp):
         """
         Get attention weights from gpTransformer
@@ -709,3 +631,80 @@ class gpEval:
         gp_transformer = self._init_trainer(test_random_baseline=True)
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
         trainer.test(gp_transformer, txdata)
+
+    def save_embeddings(self, split='train'):
+        '''
+        Save embeddings as Dataset
+        '''
+
+        gp_transformer = self._init_trainer(save_emb=True, split_label=split)
+
+        # Turn off gradients
+        for n, p in gp_transformer.named_parameters():
+            p.requires_grad = False
+
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_val_step=split,
+        )
+
+        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+
+        trainer.validate(gp_transformer, txdata)
+
+    def evaluate_embeddings(
+        self,
+        n_classes,
+        emb_dim,
+        task,
+        lr,
+        emb_label,
+        y_label,
+        folder_path,
+        batch_size,
+        num_workers,
+        meta_labels=None,
+        data_type='dataset',
+        n_epochs=30,
+    ):
+        '''
+        Train nn.Linear layer based on embeddings
+        '''
+
+        os.makedirs(os.path.join(self.output_dir, 'cell_metrics'), exist_ok=True)
+
+        emb_evaluator = EmbEvaluator(
+            n_classes=n_classes,
+            emb_dim=emb_dim,
+            task=task,
+            lr=lr,
+            emb_label=emb_label,
+            y_label=y_label,
+            output_dir=self.output_dir,
+        )
+
+        emb_dm = EmbDataModule(
+            folder_path,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            emb_label=emb_label,
+            meta_labels=meta_labels,
+            data_type=data_type,
+        )
+
+        logger = CSVLogger(
+            os.path.join(self.output_dir, 'evaluation_logs'),
+            name=f'{emb_label}_{y_label.replace("_id", "")}',
+        )
+
+        trainer = pl.Trainer(
+            max_epochs=n_epochs,
+            devices=-1,
+            accelerator='auto',
+            logger=logger,
+            precision=16,
+        )
+
+        trainer.fit(emb_evaluator, emb_dm)
+        trainer.test(emb_evaluator, emb_dm)
