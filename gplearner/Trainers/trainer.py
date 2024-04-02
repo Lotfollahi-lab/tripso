@@ -426,6 +426,12 @@ class scGPL(pl.LightningModule):
 
             emb_dict = {}
 
+            if 'Cell92781' in batch['idx']:
+                # get index
+                idx = batch['idx'].index('Cell92781')
+                print('Cell92781 found in batch')
+                print('Embedding for GP1', output['z'][idx, 0, :].detach().cpu())
+
             for i, gp in enumerate(self.model.gp_inputs):
                 emb_dict[gp] = output['z'][:, i, :].detach().cpu()
 
@@ -1317,7 +1323,7 @@ class EmbEvaluator(pl.LightningModule):
 
         self.test_pred.append(y_out)
         self.test_true.append(y)
-        self.y_unencoded.append(y_unencoded)
+        self.y_unencoded += y_unencoded
 
         return loss
 
@@ -1339,7 +1345,7 @@ class EmbEvaluator(pl.LightningModule):
             output_df = wrangle_classification_report(report)
 
             # convert labels back to original strings
-            original_labels = torch.cat(self.y_unencoded).cpu().numpy()
+            original_labels = self.y_unencoded
             conversion_df = pd.DataFrame(
                 {
                     'encoded': true_classes,
@@ -1348,14 +1354,15 @@ class EmbEvaluator(pl.LightningModule):
             ).drop_duplicates()
 
             conversion_dict = {
-                k: v
+                str(k): v
                 for k, v in zip(conversion_df['encoded'], conversion_df['original'])
             }
 
             output_df = output_df[
                 ~output_df['output_class'].isin(['macro avg', 'weighted avg'])
             ]
-            output_df['original'] = output_df['output_class'].map(conversion_dict)
+            output_df['output_class'] = output_df['output_class'].astype(str)
+            output_df['output_class'] = output_df['output_class'].map(conversion_dict)
 
             output_df.to_csv(
                 os.path.join(

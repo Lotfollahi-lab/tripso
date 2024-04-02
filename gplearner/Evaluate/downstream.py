@@ -331,26 +331,40 @@ class gpEval:
         """
         UMAP of GP embeddings
         """
+        os.chdir(self.output_dir)
+
         if isinstance(label_to_plot, str):
             label_to_plot = [label_to_plot]
 
-        folder = os.path.join(self.output_dir, 'embeddings')
-        emb = load_from_disk(os.path.join(folder, f'{data_to_plot}_split'))
+        if gp_to_plot is None:
+            gp_to_plot = list(self.gp_inputs)
+        if isinstance(gp_to_plot, str):
+            gp_to_plot = [gp_to_plot]
+
+        emb = load_from_disk(os.path.join('embeddings', f'{data_to_plot}_set'))
 
         if subsample is not None:
             emb = emb.shuffle(seed=0).select(range(subsample))
 
-        x = emb[gp_to_plot].to_numpy()
-        y = emb[label_to_plot].to_pandas()
-        adata = sc.AnnData(X=x, obs=y)
+        for gp in gp_to_plot:
+            x = np.array(emb[gp])
+            y = pd.DataFrame(
+                {k: emb[k] for k in emb.column_names if k in label_to_plot}
+            )
+            adata = sc.AnnData(X=x, obs=y)
 
-        for c in label_to_plot:
-            adata = remove_single_data_points(adata, c)
+            for c in label_to_plot:
+                adata = remove_single_data_points(adata, c)
 
-        for c in label_to_plot:
-            sc.pp.neighbors(adata, use_rep='X')
-            sc.tl.umap(adata)
-            sc.pl.umap(adata, color=c, save=f'_{self.tissue}_{gp_to_plot}_by_{c}.pdf')
+            for c in label_to_plot:
+                sc.pp.neighbors(adata, use_rep='X')
+                sc.tl.umap(adata)
+                sc.pl.umap(
+                    adata,
+                    color=c,
+                    save=f'_{self.tissue}_{gp}_by_{c}.pdf',
+                    frameon=False,
+                )
 
     def _evaluate_clustering_cells(self, odata, cluster_labels, recompute_umap=False):
         adata = odata.copy()
