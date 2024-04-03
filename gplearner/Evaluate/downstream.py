@@ -298,17 +298,18 @@ class gpEval:
     def evaluate_embeddings(
         self,
         n_classes,
-        emb_dim,
-        task,
-        lr,
-        emb_label,
         y_label,
         folder_path,
-        batch_size,
-        num_workers,
+        emb_label=None,
+        task='classification',
+        emb_dim=256,
+        lr=1e-3,
+        batch_size=128,
+        num_workers=1,
         meta_labels=None,
         data_type='dataset',
-        n_epochs=30,
+        n_epochs=3,
+        continuous_cov=[],
     ):
         '''
         Train nn.Linear layer based on embeddings
@@ -316,40 +317,49 @@ class gpEval:
 
         os.makedirs(os.path.join(self.output_dir, 'cell_metrics'), exist_ok=True)
 
-        emb_evaluator = EmbEvaluator(
-            n_classes=n_classes,
-            emb_dim=emb_dim,
-            task=task,
-            lr=lr,
-            emb_label=emb_label,
-            y_label=y_label,
-            output_dir=self.output_dir,
-        )
+        if emb_label is None:
+            emb_label = list(self.gp_inputs)
 
-        emb_dm = EmbDataModule(
-            folder_path,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            emb_label=emb_label,
-            meta_labels=meta_labels,
-            data_type=data_type,
-        )
+        elif isinstance(emb_label, str):
+            emb_label = [emb_label]
 
-        logger = CSVLogger(
-            os.path.join(self.output_dir, 'evaluation_logs'),
-            name=f'{emb_label}_{y_label.replace("_id", "")}',
-        )
+        for gp in emb_label:
+            print(f'Evaluating {gp} embeddings')
+            emb_evaluator = EmbEvaluator(
+                n_classes=n_classes,
+                emb_dim=emb_dim,
+                task=task,
+                lr=lr,
+                emb_label=gp,
+                y_label=y_label,
+                output_dir=self.output_dir,
+            )
 
-        trainer = pl.Trainer(
-            max_epochs=n_epochs,
-            devices=-1,
-            accelerator='auto',
-            logger=logger,
-            precision=16,
-        )
+            emb_dm = EmbDataModule(
+                folder_path,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                emb_label=gp,
+                meta_labels=meta_labels,
+                data_type=data_type,
+                continuous_cov=continuous_cov,
+            )
 
-        trainer.fit(emb_evaluator, emb_dm)
-        trainer.test(emb_evaluator, emb_dm)
+            logger = CSVLogger(
+                os.path.join(self.output_dir, 'evaluation_logs'),
+                name=f'{gp}_{y_label.replace("_id", "")}',
+            )
+
+            trainer = pl.Trainer(
+                max_epochs=n_epochs,
+                devices=-1,
+                accelerator='auto',
+                logger=logger,
+                precision=16,
+            )
+
+            trainer.fit(emb_evaluator, emb_dm)
+            trainer.test(emb_evaluator, emb_dm)
 
     def visualize(
         self,

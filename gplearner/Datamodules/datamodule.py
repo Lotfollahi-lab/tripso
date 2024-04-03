@@ -162,6 +162,7 @@ class txDataModule(LightningDataModule):
         batch_size=3,
         num_workers=1,
         shuffle=False,
+        continuous_cov=[],
         # development only:
         frac_for_training=1,
         data_split_to_pass_to_val_step='val',
@@ -326,6 +327,8 @@ class txDataModule(LightningDataModule):
                 output_dict[m] = torch.tensor(
                     [d[m] for d in tokenized_batch], dtype=torch.long
                 )
+            if m in self.continuous_cov:
+                output_dict[m] = torch.tensor([d[m] for d in tokenized_batch])
             else:
                 output_dict[m] = [d[m] for d in tokenized_batch]
 
@@ -356,6 +359,7 @@ class EmbDataModule(LightningDataModule):
         emb_label=None,
         meta_labels=None,
         data_type='dataset',
+        continuous_cov=[],
     ):
         super().__init__()
         self.folder_path = folder_path
@@ -364,6 +368,7 @@ class EmbDataModule(LightningDataModule):
         self.emb_to_keep = emb_label
         self.meta_labels = meta_labels
         self.data_type = data_type
+        self.continuous_cov = continuous_cov
 
     def prepare_data(self):
         folder_path = Path(self.folder_path)
@@ -422,6 +427,8 @@ class EmbDataModule(LightningDataModule):
                     output_dict[m] = torch.tensor(
                         [d[m] for d in batch], dtype=torch.long
                     )
+                elif m in self.continous_cov:
+                    output_dict[m] = torch.tensor([d[m] for d in batch])
                 else:
                     output_dict[m] = [d[m] for d in batch]
 
