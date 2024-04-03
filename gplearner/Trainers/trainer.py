@@ -426,12 +426,6 @@ class scGPL(pl.LightningModule):
 
             emb_dict = {}
 
-            if 'Cell92781' in batch['idx']:
-                # get index
-                idx = batch['idx'].index('Cell92781')
-                print('Cell92781 found in batch')
-                print('Embedding for GP1', output['z'][idx, 0, :].detach().cpu())
-
             for i, gp in enumerate(self.model.gp_inputs):
                 emb_dict[gp] = output['z'][:, i, :].detach().cpu()
 
