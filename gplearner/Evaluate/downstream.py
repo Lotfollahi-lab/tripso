@@ -1,11 +1,10 @@
 import os
 import random
-import warnings
+import shutil
 from typing import (
     Dict,
     List,
     Optional,
-    Union,
 )
 
 import matplotlib
@@ -16,11 +15,7 @@ import scanpy as sc
 import torch
 from datasets import load_from_disk
 from pytorch_lightning.loggers import CSVLogger
-from sklearn.metrics import (
-    adjusted_rand_score,
-    davies_bouldin_score,
-    silhouette_score,
-)
+from scib_metrics.benchmark import Benchmarker
 
 from ..Datamodules.datamodule import EmbDataModule, txDataModule
 from ..Models.gp_model import (
@@ -47,7 +42,6 @@ torch.set_float32_matmul_precision('medium')
 
 
 class gpEval:
-
     """
     Main class for running downstream evaluation tasks on trained models
     Parameters
@@ -284,42 +278,78 @@ class gpEval:
 
         return gp_transformer
 
-    def generate_embeddings(self):
-        """
-        Generate embeddings for each cell
-        """
-        os.chdir(self.output_dir)
-        txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
+    def generate_embeddings(self, split='train'):
+        '''
+        Save embeddings as Dataset
+        '''
 
-        if os.path.exists('adata_gp_embedding.h5ad'):
-            print(f'{self.output_dir}/adata_gp_embedding.h5ad already exists')
-        else:
-            trainer = pl.Trainer(
-                max_epochs=1, devices=-1, accelerator='auto', precision=16
-            )
-            trainer.test(self.gp_transformer, txdata)
+        gp_transformer = self._init_trainer(save_emb=True, split_label=split)
 
-    def load_anndata(self, use_cell_token=False):
-        """
-        Check that adata object exists
-        """
-        os.chdir(self.output_dir)
-        if use_cell_token:
-            if os.path.exists('adata_cell_embedding.h5ad'):
-                print(f'Loading adata from {self.output_dir}/adata_cell_embedding.h5ad')
-                adata = sc.read_h5ad('adata_cell_embedding.h5ad')
-            else:
-                raise ValueError(
-                    f'No adata found in {self.output_dir}. '
-                    'Please run generate_embeddings() first'
-                )
-        elif os.path.exists('adata_gp_embedding.h5ad'):
-            print(f'Loading adata from {self.output_dir}/adata_gp_embedding.h5ad')
-            adata = sc.read_h5ad('adata_gp_embedding.h5ad')
-        else:
-            raise ValueError('No adata found. Please run generate_embeddings() first')
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_val_step=split,
+        )
 
-        return adata
+        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+
+        trainer.validate(gp_transformer, txdata)
+
+    def evaluate_embeddings(
+        self,
+        n_classes,
+        emb_dim,
+        task,
+        lr,
+        emb_label,
+        y_label,
+        folder_path,
+        batch_size,
+        num_workers,
+        meta_labels=None,
+        data_type='dataset',
+        n_epochs=30,
+    ):
+        '''
+        Train nn.Linear layer based on embeddings
+        '''
+
+        os.makedirs(os.path.join(self.output_dir, 'cell_metrics'), exist_ok=True)
+
+        emb_evaluator = EmbEvaluator(
+            n_classes=n_classes,
+            emb_dim=emb_dim,
+            task=task,
+            lr=lr,
+            emb_label=emb_label,
+            y_label=y_label,
+            output_dir=self.output_dir,
+        )
+
+        emb_dm = EmbDataModule(
+            folder_path,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            emb_label=emb_label,
+            meta_labels=meta_labels,
+            data_type=data_type,
+        )
+
+        logger = CSVLogger(
+            os.path.join(self.output_dir, 'evaluation_logs'),
+            name=f'{emb_label}_{y_label.replace("_id", "")}',
+        )
+
+        trainer = pl.Trainer(
+            max_epochs=n_epochs,
+            devices=-1,
+            accelerator='auto',
+            logger=logger,
+            precision=16,
+        )
+
+        trainer.fit(emb_evaluator, emb_dm)
+        trainer.test(emb_evaluator, emb_dm)
 
     def visualize(
         self,
@@ -366,139 +396,113 @@ class gpEval:
                     frameon=False,
                 )
 
-    def _evaluate_clustering_cells(self, odata, cluster_labels, recompute_umap=False):
-        adata = odata.copy()
+    def _load_and_save_latent(self, adata, new, model_name):
+        if new.shape[0] != adata.shape[0]:
+            idx_union = set(new.obs['idx']).union(set(adata.obs['idx']))
+            new = new[new.obs['idx'].isin(idx_union)]
+            adata = adata[adata.obs['idx'].isin(idx_union)]
 
-        if recompute_umap:
-            sc.pp.neighbors(adata, use_rep='X')
-            sc.tl.umap(adata)
+        adata.obsm[model_name] = new.X
 
-        if 'leiden' not in adata.obs.columns:
-            sc.tl.leiden(adata)
+        return adata
 
-        print('Running cluster evaluation metrics...')
-        if cluster_labels is not None:
-            if isinstance(cluster_labels, str):
-                cluster_labels = [cluster_labels]
+    def benchmarking_with_scib(
+        self,
+        adata_path: str,
+        batch_key: str,
+        label_key: str,
+        embs_to_benchmark: List,
+        model_labels: List,
+        emb_label: str,
+    ):
+        '''
+        Run scIB benchmarking
+        Based on https://github.com/YosefLab/scib-metrics/
 
-            ari_holder = []
-            ari_labels = []
-            for c in cluster_labels:
-                adata = remove_single_data_points(adata, c)
-                ari_x = adjusted_rand_score(adata.obs['leiden'], adata.obs[c])
-                ari_holder.append(ari_x)
-                ari_labels.append(f'ari_{c}')
+        Parameters
+        ----------
+        adata_path : str
+            Path to original adata
+        embs_to_benchmark : list
+            List of paths to embeddings to benchmark
+            eg ['../output_different_hparam/embeddings/test_set',
+                '../expimap/adata_expimap.h5ad']
+        model_labels : list
+            List of labels for each model
+            eg ['gpTransformer', 'Expimap']
+        emb_label : str
+            Label for embeddings
+            eg 'GEP_1'
+            eg 'cell_token'
 
-        sil = silhouette_score(adata.obsm['X_umap'], adata.obs['leiden'])
-        db = davies_bouldin_score(adata.obsm['X_umap'], adata.obs['leiden'])
+        '''
+        # Load original gene expression data
+        adata = sc.read_h5ad(adata_path)
+        sc.pp.highly_variable_genes(
+            adata, n_top_genes=2000, flavor='seurat_v3', batch_key='batch_key'
+        )
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.tl.pca(adata, n_comps=30, use_highly_variable=True)
+        adata.obsm['Unintegrated'] = adata.obsm['X_pca']
 
-        output_df = pd.DataFrame(
-            {
-                'metric': [
-                    'Silhouette_leiden',
-                    'Davies_Bouldain_leiden',
-                ],
-                'value': [sil, db],
-            }
+        if isinstance(embs_to_benchmark, str):
+            embs_to_benchmark = [embs_to_benchmark]
+
+        if isinstance(model_labels, str):
+            model_labels = [model_labels]
+
+        for emb_path, model_name in zip(embs_to_benchmark, model_labels):
+            if emb_path.endswith('.h5ad'):
+                embx = sc.read_h5ad(emb_path)
+
+                if emb_label != 'cell_token':
+                    embx = embx[:, embx.var.str.contains(emb_label)]
+
+            else:
+                embx = load_from_disk(emb_path)
+                x = np.array(embx[emb_label])
+                y = pd.DataFrame(embx[[batch_key, label_key, 'idx']])
+                embx = sc.AnnData(X=x, obs=y)
+
+            adata = self._load_and_save_latent(adata, embx, model_name)
+
+        bm = Benchmarker(
+            adata,
+            batch_key=batch_key,
+            label_key=label_key,
+            embedding_obsm_keys=model_labels,
+            n_jobs=-1,
+        )
+        bm.benchmark()
+
+        bm.plot_results_table(show=False, savedir=self.output_dir)
+
+        shutil.move(
+            os.path.join(self.output_dir, 'scib_results.svg'),
+            os.path.join(self.output_dir, 'scib_results_minmax_scaling.svg'),
         )
 
-        if cluster_labels is not None:
-            output_df = pd.concat(
-                [
-                    output_df,
-                    pd.DataFrame({'metric': ari_labels, 'value': ari_holder}),
-                ]
-            )
+        bm.plot_results_table(min_max_scale=False, show=False, savedir=self.output_dir)
 
-        return output_df
-
-    def feature_analysis(
-        self, label_to_plot, use_cell_token=False, rank_genes=True, cluster_latent=True
-    ):
-        os.chdir(self.output_dir)
-
-        if isinstance(label_to_plot, str):
-            label_to_plot = [label_to_plot]
-
-        if use_cell_token:
-            adata = self.load_anndata(use_cell_token=True)
-            token_tag = '_global_token'
-        else:
-            adata = self.load_anndata()
-            token_tag = ''
-
-        if rank_genes:
-            if use_cell_token:
-                warnings.warn(
-                    'Rank genes operation not meaningful for cell token'
-                    'Skipping rank genes'
-                )
-            else:
-                for c in label_to_plot:
-                    sc.tl.rank_genes_groups(adata, c)
-                    sc.pl.rank_genes_groups(
-                        adata,
-                        n_genes=25,
-                        sharey=False,
-                        save=f'_{self.tissue}{token_tag}_by_{c}.pdf',
-                    )
-
-        if cluster_latent:
-            # make cluster metrics directory
-            if not os.path.exists('cluster_metrics'):
-                os.makedirs('cluster_metrics')
-
-            df = self._evaluate_clustering_cells(adata, cluster_labels=label_to_plot)
-            df.to_csv(
-                os.path.join(
-                    'cluster_metrics', 'latent_space_clustering_metrics{token_tag}.csv'
-                ),
-                index=False,
-            )
-
-            # now for each gp:
-            # (skip if focusing on cell token)
-            if use_cell_token is False:
-                for gp in self.gp_inputs:
-                    df = self._evaluate_clustering_cells(
-                        adata[:, adata.var['gp_idx'].str.startswith(gp)],
-                        recompute_umap=True,
-                        cluster_labels=label_to_plot,
-                    )
-                    df.to_csv(
-                        os.path.join(
-                            'cluster_metrics',
-                            f'{gp}_latent_space_clustering_metrics.csv',
-                        ),
-                        index=False,
-                    )
-
-    def logistic_regression(
+    def evaluate_gene_embeddings(
         self,
-        use_cell_token=False,
-        gp_features: Union[List, str] = 'all',
         labels=['cell_type', 'condition'],
-        data_to_model='cell',  # "cell", "gene_singleGP" or "gene_multiGP"
+        data_to_model='gene_singleGP',  # or "gene_multiGP"
         min_cells=500,
         downsample_to_n_genes=50,
     ):
         """
-        Run logistic regression to predict labels from features
+        Run logistic regression to predict gene labels from embeddings
 
         Parameters
         ----------
-        use_cell_token : bool
-            If True, will use cell token
-            If False, will use GP tokens
         gp_features : list
             List of GP to use as features
             If "all", will use all GP
             If "concat", will concatenate all GP
         labels : list
             List of labels to predict
-        model_cells : bool
-            If True, will model cells
-            If False, will model genes
+
         min_cells : int
             Genes present in multiple GP must be included in at least min_cells
 
@@ -624,101 +628,15 @@ class gpEval:
                 f'not {self.model_type}, {self.model.global_loss}'
             )
 
-        # Load data
-        adata = sc.read_h5ad(adata_path)
-
-        if self.reconstruction_loss == 'mse':
-            transform_adata = True
-        else:
-            transform_adata = False
-
         # Initialize trainer
         os.chdir(self.output_dir)
 
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
-            adata=adata,
-            transform_adata=transform_adata,
+            adata_path=adata_path,
         )
 
         gp_transformer = self._init_trainer(test_random_baseline=True)
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
         trainer.test(gp_transformer, txdata)
-
-    def save_embeddings(self, split='train'):
-        '''
-        Save embeddings as Dataset
-        '''
-
-        gp_transformer = self._init_trainer(save_emb=True, split_label=split)
-
-        # Turn off gradients
-        for n, p in gp_transformer.named_parameters():
-            p.requires_grad = False
-
-        txdata = txDataModule(
-            folder=self.dataset_path,
-            batch_size=self.batch_size,
-            data_split_to_pass_to_val_step=split,
-        )
-
-        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
-
-        trainer.validate(gp_transformer, txdata)
-
-    def evaluate_embeddings(
-        self,
-        n_classes,
-        emb_dim,
-        task,
-        lr,
-        emb_label,
-        y_label,
-        folder_path,
-        batch_size,
-        num_workers,
-        meta_labels=None,
-        data_type='dataset',
-        n_epochs=30,
-    ):
-        '''
-        Train nn.Linear layer based on embeddings
-        '''
-
-        os.makedirs(os.path.join(self.output_dir, 'cell_metrics'), exist_ok=True)
-
-        emb_evaluator = EmbEvaluator(
-            n_classes=n_classes,
-            emb_dim=emb_dim,
-            task=task,
-            lr=lr,
-            emb_label=emb_label,
-            y_label=y_label,
-            output_dir=self.output_dir,
-        )
-
-        emb_dm = EmbDataModule(
-            folder_path,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            emb_label=emb_label,
-            meta_labels=meta_labels,
-            data_type=data_type,
-        )
-
-        logger = CSVLogger(
-            os.path.join(self.output_dir, 'evaluation_logs'),
-            name=f'{emb_label}_{y_label.replace("_id", "")}',
-        )
-
-        trainer = pl.Trainer(
-            max_epochs=n_epochs,
-            devices=-1,
-            accelerator='auto',
-            logger=logger,
-            precision=16,
-        )
-
-        trainer.fit(emb_evaluator, emb_dm)
-        trainer.test(emb_evaluator, emb_dm)
