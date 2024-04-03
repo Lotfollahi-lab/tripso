@@ -295,11 +295,13 @@ class gpEval:
 
         trainer.validate(gp_transformer, txdata)
 
+    @staticmethod
     def evaluate_embeddings(
         self,
         n_classes,
         y_label,
         folder_path,
+        output_dir=None,
         emb_label=None,
         task='classification',
         emb_dim=256,
@@ -315,7 +317,10 @@ class gpEval:
         Train nn.Linear layer based on embeddings
         '''
 
-        os.makedirs(os.path.join(self.output_dir, 'cell_metrics'), exist_ok=True)
+        if output_dir is None:
+            output_dir = self.output_dir
+
+        os.makedirs(os.path.join(output_dir, 'cell_metrics'), exist_ok=True)
 
         if emb_label is None:
             emb_label = list(self.gp_inputs)
@@ -406,6 +411,7 @@ class gpEval:
                     frameon=False,
                 )
 
+    @staticmethod
     def _load_and_save_latent(self, adata, new, model_name):
         if new.shape[0] != adata.shape[0]:
             idx_union = set(new.obs['idx']).union(set(adata.obs['idx']))
@@ -416,6 +422,7 @@ class gpEval:
 
         return adata
 
+    @staticmethod
     def benchmarking_with_scib(
         self,
         adata_path: str,

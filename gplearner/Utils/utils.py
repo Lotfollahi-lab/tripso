@@ -235,6 +235,92 @@ def label_encoder(adata, encoder, condition_key=None):
 
 
 ###################################
+# Gene expression transformation
+###################################
+
+
+def _digitize(x: np.ndarray, bins: np.ndarray, side='both') -> np.ndarray:
+    """
+    Digitize the data into bins. This method spreads data uniformly when bins
+    have same values.
+
+    Args:
+
+    x (:class:`np.ndarray`):
+        The data to digitize.
+    bins (:class:`np.ndarray`):
+        The bins to use for digitization, in increasing order.
+    side (:class:`str`, optional):
+        The side to use for digitization. If "one", the left side is used. If
+        "both", the left and right side are used. Default to "one".
+
+    Returns:
+
+    :class:`np.ndarray`:
+        The digitized data.
+
+
+    from https://github.com/bowang-lab/scGPT/blob/main/scgpt/preprocess.py#L13
+
+    accessed 03.04.2024
+    """
+    assert x.ndim == 1 and bins.ndim == 1
+
+    left_digits = np.digitize(x, bins)
+    if side == 'one':
+        return left_digits
+
+    right_difits = np.digitize(x, bins, right=True)
+
+    rands = np.random.rand(len(x))  # uniform random numbers
+
+    digits = rands * (right_difits - left_digits) + left_digits
+    digits = np.ceil(digits).astype(np.int64)
+    return digits
+
+
+def bin_gene_expression(x, n_bins=10, log1p=False):
+    '''
+    Based on scGPT preprocessor
+    https://github.com/bowang-lab/scGPT/blob/main/scgpt/preprocess.py#L13
+    Accessed 03.04.2024
+    '''
+    if isinstance(x, torch.Tensor):
+        x = x.cpu().numpy()
+
+    adata = sc.AnnData(X=x)
+    sc.pp.normalize_total(adata, target_sum=1e4)
+    if log1p:
+        sc.pp.log1p(adata)
+
+    binned_rows = []
+    bin_edges = []
+
+    if x.min() < 0:
+        raise ValueError(f'Assuming non-negative data, but got min value {x.min()}.')
+    for row in x:
+        if row.max() == 0:
+            binned_rows.append(np.zeros_like(row, dtype=np.int64))
+            bin_edges.append(np.array([0] * n_bins))
+            continue
+        non_zero_ids = row.nonzero()
+        non_zero_row = row[non_zero_ids]
+        bins = np.quantile(non_zero_row, np.linspace(0, 1, n_bins - 1))
+        # bins = np.sort(np.unique(bins))
+        # NOTE: comment this line for now, since this will make the each category
+        # has different relative meaning across datasets
+        non_zero_digits = _digitize(non_zero_row, bins)
+        assert non_zero_digits.min() >= 1
+        assert non_zero_digits.max() <= n_bins - 1
+        binned_row = np.zeros_like(row, dtype=np.int64)
+        binned_row[non_zero_ids] = non_zero_digits
+        binned_rows.append(binned_row)
+        bin_edges.append(np.concatenate([[0], bins]))
+
+    return np.stack(binned_rows)
+
+
+###################################
 # Padding
 ###################################
 

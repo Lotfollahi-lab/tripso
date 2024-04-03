@@ -457,15 +457,22 @@ class scGPL(pl.LightningModule):
 
             elif self.global_loss == 'reconstruction':
                 output = self.forward(batch)
-                self.val_true_counts_list.append(batch['counts'])
+
                 if self.model.reconstruction_loss in ['mse']:
                     self.val_pred_counts_list.append(
                         output['count_output']['count_lognorm']
                     )
+                    self.val_true_counts_list.append(batch['counts'])
+
                 if self.model.reconstruction_loss in ['nb', 'zinb']:
                     self.val_pred_counts_list.append(
                         output['count_output']['count_mean']
                     )
+                    self.val_true_counts_list.append(batch['counts'])
+
+                if self.model.reconstruction_loss == 'binning':
+                    self.val_pred_counts_list.append(output['count_output'])
+                    self.val_true_counts_list.append(output['true_bins'])
 
     def on_validation_epoch_end(self):
         if self.save_emb:
@@ -1006,16 +1013,21 @@ class scGPL(pl.LightningModule):
                 holder['reconstruction_loss'] = reconstruction_loss
                 loss += reconstruction_loss
 
-                self.train_true_counts_list.append(batch['counts'])
-
                 if self.model.reconstruction_loss in ['mse']:
                     self.train_pred_counts_list.append(
                         output['count_output']['count_lognorm']
                     )
+                    self.train_true_counts_list.append(batch['counts'])
+
                 if self.model.reconstruction_loss in ['nb', 'zinb']:
                     self.train_pred_counts_list.append(
                         output['count_output']['count_mean']
                     )
+                    self.train_true_counts_list.append(batch['counts'])
+
+                if self.model.reconstruction_loss in ['binning']:
+                    self.train_pred_counts_list.append(output['count_output'])
+                    self.train_true_counts_list.append(output['true_bins'])
 
         holder['total_loss'] = loss
 
@@ -1045,9 +1057,7 @@ class scGPL(pl.LightningModule):
         batch: Dict[str, torch.Tensor],
     ):
         true_counts = batch['counts']
-        batch_size_factor = np.array(batch['size_factor'])
-        batch_size_factor = torch.tensor(batch_size_factor)
-        batch_size_factor = batch_size_factor.to(true_counts.device)
+        batch_size_factor = torch.tensor(batch['size_factor']).to(true_counts.device)
 
         if self.model.reconstruction_loss == 'mse':
             loss = (
@@ -1092,6 +1102,15 @@ class scGPL(pl.LightningModule):
             )
             dispersion = torch.exp(dispersion)
             loss = -nb(x=true_counts, mu=dec_mean, theta=dispersion).sum(dim=-1).mean()
+            return loss
+
+        elif self.reconstruction_loss == 'binning':
+            pred = outputs['count_output']
+            true = outputs['true_bins'].float()
+
+            # calcualte mse loss
+            loss = F.mse_loss(pred, true)
+
             return loss
 
         else:

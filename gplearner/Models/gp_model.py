@@ -17,7 +17,11 @@ from transformers import BertForMaskedLM
 
 from ..Modules.modules import Mlp, gpTransformerEncoder
 from ..Utils.geneformer_utils import EmbExtractor
-from ..Utils.utils import get_gp_tokens, pad_array
+from ..Utils.utils import (
+    bin_gene_expression,
+    get_gp_tokens,
+    pad_array,
+)
 
 ####################################
 # Geneformer
@@ -749,6 +753,36 @@ class CountHead(nn.Module):
         return count_outputs
 
 
+class BinDecoder(nn.Module):
+    '''
+    Adapted from scGPT
+    https://github.com/bowang-lab/scGPT/blob/main/scgpt/model/model.py#L848
+    accessed 03.04.24
+
+    scGPT output has one dimension -> per gene
+    here we need to reconstruct bins for n genes
+
+    '''
+
+    def __init__(
+        self,
+        n_genes: int = 25426,
+        d_model: int = 256,
+    ):
+        super().__init__()
+
+        self.fc = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LeakyReLU(),
+            nn.Linear(d_model, d_model),
+            nn.LeakyReLU(),
+            nn.Linear(d_model, n_genes),
+        )
+
+    def forward(self, x):
+        return self.fc(x)
+
+
 ####################################
 # Define model
 ####################################
@@ -934,6 +968,7 @@ class gpTransformerGlobal(gpTransformerBase):
         global_masking_rate=0,
         global_n_blocks=1,
         use_flash=False,
+        n_bins=10,
         **kwargs,
     ):
         super().__init__(use_flash=use_flash, model_type='Global', **kwargs)
@@ -973,9 +1008,16 @@ class gpTransformerGlobal(gpTransformerBase):
         if self.global_loss == 'reconstruction':
             self.reconstruction_loss = reconstruction_loss
 
-            self.count_head = CountHead(
-                loss_mode=reconstruction_loss, n_genes=total_n_genes
-            )
+            if reconstruction_loss == 'binning':
+                self.n_bins = n_bins
+                self.count_head = BinDecoder(
+                    n_genes=total_n_genes, d_model=self.gp_latent_size
+                )
+
+            else:
+                self.count_head = CountHead(
+                    loss_mode=reconstruction_loss, n_genes=total_n_genes
+                )
 
     def forward(
         self,
@@ -1018,6 +1060,13 @@ class gpTransformerGlobal(gpTransformerBase):
         elif self.global_loss == 'reconstruction':
             count_output = self.count_head(cell_output['cell_token'])
             base_output['count_output'] = count_output
+
+            if self.reconstruction_loss == 'binning':
+                binned = bin_gene_expression(
+                    input_dataset['counts'], n_bins=self.n_bins
+                )
+                binned = torch.tensor(binned).to(count_output.device)
+                base_output['true_bins'] = binned
 
         return base_output
 

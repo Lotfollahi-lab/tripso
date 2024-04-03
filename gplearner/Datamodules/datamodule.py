@@ -162,7 +162,6 @@ class txDataModule(LightningDataModule):
         batch_size=3,
         num_workers=1,
         shuffle=False,
-        continuous_cov=[],
         # development only:
         frac_for_training=1,
         data_split_to_pass_to_val_step='val',
@@ -327,8 +326,6 @@ class txDataModule(LightningDataModule):
                 output_dict[m] = torch.tensor(
                     [d[m] for d in tokenized_batch], dtype=torch.long
                 )
-            if m in self.continuous_cov:
-                output_dict[m] = torch.tensor([d[m] for d in tokenized_batch])
             else:
                 output_dict[m] = [d[m] for d in tokenized_batch]
 
@@ -375,14 +372,16 @@ class EmbDataModule(LightningDataModule):
         assert folder_path.exists(), 'folder path does not exist'
 
     def setup(self, stage=None):
+        tag = '.h5ad' if self.data_type == 'h5ad' else ''
+
         self.train_dataset = EmbDataset(
-            os.path.join(self.folder_path, 'train_set'), data_type=self.data_type
+            os.path.join(self.folder_path, f'train_set{tag}'), data_type=self.data_type
         )
         self.val_dataset = EmbDataset(
-            os.path.join(self.folder_path, 'val_set'), data_type=self.data_type
+            os.path.join(self.folder_path, f'val_set{tag}'), data_type=self.data_type
         )
         self.test_dataset = EmbDataset(
-            os.path.join(self.folder_path, 'test_set'), data_type=self.data_type
+            os.path.join(self.folder_path, f'test_set{tag}'), data_type=self.data_type
         )
 
     def train_dataloader(self):
