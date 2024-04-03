@@ -212,7 +212,7 @@ class scgptWrapper(nn.Module):
                 if self.use_batch_labels
                 else None,
             )
-            embeddings = embeddings[:, 1:, :]  # get the <cls> position embedding
+            embeddings = embeddings[:, 1:, :]  # get all the token embeddings except the <cls> (just the corresponding gene positions)
             return embeddings
     
 
