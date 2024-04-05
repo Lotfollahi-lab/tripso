@@ -279,7 +279,7 @@ def _digitize(x: np.ndarray, bins: np.ndarray, side='both') -> np.ndarray:
     return digits
 
 
-def bin_gene_expression(x, n_bins=10, log1p=False):
+def bin_gene_expression(x, n_bins=10, norm=False, log1p=False):
     '''
     Based on scGPT preprocessor
     https://github.com/bowang-lab/scGPT/blob/main/scgpt/preprocess.py#L13
@@ -289,7 +289,9 @@ def bin_gene_expression(x, n_bins=10, log1p=False):
         x = x.cpu().numpy()
 
     adata = sc.AnnData(X=x)
-    sc.pp.normalize_total(adata, target_sum=1e4)
+
+    if norm:
+        sc.pp.normalize_total(adata, target_sum=1e4)
     if log1p:
         sc.pp.log1p(adata)
 

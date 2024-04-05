@@ -65,6 +65,8 @@ def run_training(
     adata_path: Optional[str] = None,
     use_flash: Optional[bool] = False,
     weight_decay: float = 0.0,
+    use_weighted_sampler: Optional[bool] = False,
+    subsample_by: Optional[str] = 'cell_type',
 ):
     """
     Wrapper function for training gpLearner model
@@ -324,6 +326,8 @@ def run_training(
         batch_size=batch_size,
         frac_for_training=frac_for_training,
         adata_path=adata_path,
+        use_weighted_sampler=use_weighted_sampler,
+        label_key=subsample_by,
     )
 
     # Load gpdb

@@ -607,8 +607,7 @@ class scGPL(pl.LightningModule):
             # return Pearson correlation coefficient
             true_counts = torch.cat(self.test_true_counts_list).float()
             pred_counts = torch.cat(self.test_pred_counts_list)
-            print('True counts shape:', true_counts.shape)
-            print('Predicted counts shape:', pred_counts.shape)
+
             print('True counts max value:', true_counts.max())
             print('Predicted counts max value:', pred_counts.max())
 
@@ -660,9 +659,12 @@ class scGPL(pl.LightningModule):
             mse_shuffled = self.metric['mse'](pred_counts, true_counts_shuffled)
             mean_mse_shuffled = torch.mean(mse_shuffled)
 
-            # EMD
             # set up anndata object for subsetting by condition
             meta_dict = self.cell_metadata
+
+            meta_dict.pop('counts', None)
+            meta_dict.pop('size_factor', None)
+
             for k, v in meta_dict.items():
                 if isinstance(v[0], torch.Tensor):
                     meta_dict[k] = torch.cat(v).cpu().numpy().tolist()
@@ -704,6 +706,8 @@ class scGPL(pl.LightningModule):
                         'pred_zeros',
                         'true_prop_zeros',
                         'pred_prop_zeros',
+                        'max true counts',
+                        'max pred counts',
                     ],
                     'value': [
                         mean_pearson.item(),
@@ -715,6 +719,8 @@ class scGPL(pl.LightningModule):
                         pred_zeros,
                         true_prop_zeros,
                         pred_prop_zeros,
+                        true_counts.max().item(),
+                        pred_counts.max().item(),
                     ],
                 }
             )

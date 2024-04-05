@@ -297,12 +297,11 @@ class gpEval:
 
     @staticmethod
     def evaluate_embeddings(
-        self,
         n_classes,
         y_label,
         folder_path,
-        output_dir=None,
-        emb_label=None,
+        output_dir,
+        emb_label,
         task='classification',
         emb_dim=256,
         lr=1e-3,
@@ -317,54 +316,51 @@ class gpEval:
         Train nn.Linear layer based on embeddings
         '''
 
-        if output_dir is None:
-            output_dir = self.output_dir
-
         os.makedirs(os.path.join(output_dir, 'cell_metrics'), exist_ok=True)
 
-        if emb_label is None:
-            emb_label = list(self.gp_inputs)
+        # set seed for reproducibility
+        seed = 0
+        np.random.seed(seed)
+        random.seed(seed)
+        pl.seed_everything(seed)
+        torch.manual_seed(seed)
 
-        elif isinstance(emb_label, str):
-            emb_label = [emb_label]
+        print(f'Evaluating {emb_label} embeddings')
+        emb_evaluator = EmbEvaluator(
+            n_classes=n_classes,
+            emb_dim=emb_dim,
+            task=task,
+            lr=lr,
+            emb_label=emb_label,
+            y_label=y_label,
+            output_dir=output_dir,
+        )
 
-        for gp in emb_label:
-            print(f'Evaluating {gp} embeddings')
-            emb_evaluator = EmbEvaluator(
-                n_classes=n_classes,
-                emb_dim=emb_dim,
-                task=task,
-                lr=lr,
-                emb_label=gp,
-                y_label=y_label,
-                output_dir=self.output_dir,
-            )
+        emb_dm = EmbDataModule(
+            folder_path,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            emb_label=emb_label,
+            meta_labels=meta_labels,
+            data_type=data_type,
+            continuous_cov=continuous_cov,
+        )
 
-            emb_dm = EmbDataModule(
-                folder_path,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                emb_label=gp,
-                meta_labels=meta_labels,
-                data_type=data_type,
-                continuous_cov=continuous_cov,
-            )
+        logger = CSVLogger(
+            os.path.join(output_dir, 'evaluation_logs'),
+            name=f'{emb_label}_{y_label.replace("_id", "")}',
+        )
 
-            logger = CSVLogger(
-                os.path.join(self.output_dir, 'evaluation_logs'),
-                name=f'{gp}_{y_label.replace("_id", "")}',
-            )
+        trainer = pl.Trainer(
+            max_epochs=n_epochs,
+            devices=-1,
+            accelerator='auto',
+            logger=logger,
+            precision=16,
+        )
 
-            trainer = pl.Trainer(
-                max_epochs=n_epochs,
-                devices=-1,
-                accelerator='auto',
-                logger=logger,
-                precision=16,
-            )
-
-            trainer.fit(emb_evaluator, emb_dm)
-            trainer.test(emb_evaluator, emb_dm)
+        trainer.fit(emb_evaluator, emb_dm)
+        trainer.test(emb_evaluator, emb_dm)
 
     def visualize(
         self,
@@ -383,6 +379,7 @@ class gpEval:
 
         if gp_to_plot is None:
             gp_to_plot = list(self.gp_inputs)
+
         if isinstance(gp_to_plot, str):
             gp_to_plot = [gp_to_plot]
 

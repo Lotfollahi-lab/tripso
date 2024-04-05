@@ -1062,6 +1062,7 @@ class gpTransformerGlobal(gpTransformerBase):
             base_output['count_output'] = count_output
 
             if self.reconstruction_loss == 'binning':
+                print('input dataset', input_dataset.keys())
                 binned = bin_gene_expression(
                     input_dataset['counts'], n_bins=self.n_bins
                 )
@@ -1213,6 +1214,9 @@ class gfBaseline(gpTransformerBase):
             gene_name_path=gene_name_path,
             gp_inputs=self.gp_inputs,
             add_remaining_var=add_remaining_var,
+            use_flash=False,
+            model_type='Mean',
+            learn_new_gp=False,
         )
 
     def get_last_self_attn(self, input_dataset, gp):
