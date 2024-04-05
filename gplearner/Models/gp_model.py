@@ -17,7 +17,11 @@ from transformers import BertForMaskedLM
 
 from ..Modules.modules import Mlp, gpTransformerEncoder
 from ..Utils.geneformer_utils import EmbExtractor
-from ..Utils.utils import get_gp_tokens, pad_array
+from ..Utils.utils import (
+    bin_gene_expression,
+    get_gp_tokens,
+    pad_array,
+)
 
 ####################################
 # Geneformer
@@ -78,6 +82,7 @@ class gpWrapper(nn.Module):
         add_remaining_var,
         use_flash,
         model_type,
+        learn_new_gp,
     ):
         super().__init__()
 
@@ -87,6 +92,7 @@ class gpWrapper(nn.Module):
         self.mgm_mask_ratio = mgm_mask_ratio
         self.gp_inputs = gp_inputs
         self.model_type = model_type
+        self.learning_new_gp = learn_new_gp
 
         # Store all genes included in at least one GP
         self.all_gp_tokens = set()
@@ -320,6 +326,8 @@ class gpWrapper(nn.Module):
                 (self.training)
                 & (self.encoder[i].blocks[0].attn.qkv.weight.requires_grad is False)
                 & (self.model_type == 'Base')
+                # & (self.learning_new_gp) # commented out for backwards compatibility
+                # but would be good to have
             ):
                 continue
             else:
@@ -745,6 +753,36 @@ class CountHead(nn.Module):
         return count_outputs
 
 
+class BinDecoder(nn.Module):
+    '''
+    Adapted from scGPT
+    https://github.com/bowang-lab/scGPT/blob/main/scgpt/model/model.py#L848
+    accessed 03.04.24
+
+    scGPT output has one dimension -> per gene
+    here we need to reconstruct bins for n genes
+
+    '''
+
+    def __init__(
+        self,
+        n_genes: int = 25426,
+        d_model: int = 256,
+    ):
+        super().__init__()
+
+        self.fc = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LeakyReLU(),
+            nn.Linear(d_model, d_model),
+            nn.LeakyReLU(),
+            nn.Linear(d_model, n_genes),
+        )
+
+    def forward(self, x):
+        return self.fc(x)
+
+
 ####################################
 # Define model
 ####################################
@@ -774,6 +812,7 @@ class gpTransformerBase(nn.Module):
         gene_token_path=TOKEN_DICTIONARY_FILE,
         gene_name_path=GENE_NAME_FILE,
         model_type='Base',
+        learn_new_gp=False,
     ):
         """
         database :
@@ -866,6 +905,7 @@ class gpTransformerBase(nn.Module):
             add_remaining_var=add_remaining_var,
             use_flash=self.use_flash,
             model_type=model_type,
+            learn_new_gp=learn_new_gp,
         )
 
     def forward(
@@ -928,6 +968,7 @@ class gpTransformerGlobal(gpTransformerBase):
         global_masking_rate=0,
         global_n_blocks=1,
         use_flash=False,
+        n_bins=10,
         **kwargs,
     ):
         super().__init__(use_flash=use_flash, model_type='Global', **kwargs)
@@ -967,9 +1008,16 @@ class gpTransformerGlobal(gpTransformerBase):
         if self.global_loss == 'reconstruction':
             self.reconstruction_loss = reconstruction_loss
 
-            self.count_head = CountHead(
-                loss_mode=reconstruction_loss, n_genes=total_n_genes
-            )
+            if reconstruction_loss == 'binning':
+                self.n_bins = n_bins
+                self.count_head = BinDecoder(
+                    n_genes=total_n_genes, d_model=self.gp_latent_size
+                )
+
+            else:
+                self.count_head = CountHead(
+                    loss_mode=reconstruction_loss, n_genes=total_n_genes
+                )
 
     def forward(
         self,
@@ -1012,6 +1060,14 @@ class gpTransformerGlobal(gpTransformerBase):
         elif self.global_loss == 'reconstruction':
             count_output = self.count_head(cell_output['cell_token'])
             base_output['count_output'] = count_output
+
+            if self.reconstruction_loss == 'binning':
+                print('input dataset', input_dataset.keys())
+                binned = bin_gene_expression(
+                    input_dataset['counts'], n_bins=self.n_bins
+                )
+                binned = torch.tensor(binned).to(count_output.device)
+                base_output['true_bins'] = binned
 
         return base_output
 
@@ -1158,6 +1214,9 @@ class gfBaseline(gpTransformerBase):
             gene_name_path=gene_name_path,
             gp_inputs=self.gp_inputs,
             add_remaining_var=add_remaining_var,
+            use_flash=False,
+            model_type='Mean',
+            learn_new_gp=False,
         )
 
     def get_last_self_attn(self, input_dataset, gp):
@@ -1241,6 +1300,29 @@ class gfGlobal(gpTransformerGlobal):
         }
 
         return output
+
+
+####################################
+# Embedding evaluation
+####################################
+
+
+class EmbEvaluatorHead(nn.Module):
+    '''
+    Evaluate embeddings by training a classifier
+    '''
+
+    def __init__(
+        self,
+        emb_dim: int,
+        n_classes: int,
+    ):
+        super().__init__()
+
+        self.clf_head = nn.Linear(emb_dim, n_classes)
+
+    def forward(self, x):
+        return self.clf_head(x)
 
 
 if __name__ == '__main__':
