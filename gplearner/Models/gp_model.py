@@ -2,6 +2,7 @@
 # Load packages
 ####################################
 
+import pickle
 import warnings
 from typing import Dict, Optional
 
@@ -15,9 +16,9 @@ from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from scipy.sparse import csr_matrix
 from transformers import BertForMaskedLM
 
-from ..Modules.modules import Mlp, gpTransformerEncoder
-from ..Utils.geneformer_utils import EmbExtractor
-from ..Utils.utils import (
+from gplearner.Modules.modules import Mlp, gpTransformerEncoder
+from gplearner.Utils.geneformer_utils import EmbExtractor
+from gplearner.Utils.utils import (
     bin_gene_expression,
     get_gp_tokens,
     pad_array,
@@ -46,14 +47,15 @@ class gfWrapper(nn.Module):
             geneformer_model, output_attentions=False, output_hidden_states=True
         )  # .to("cuda")
 
-        # Freeze weights for geneformer model
-        for name, param in self.gf.named_parameters():
-            param.requires_grad = False
+        # # Freeze weights for geneformer model
+        # for name, param in self.gf.named_parameters():
+        #     param.requires_grad = False
 
         self.gf_emb_extractor = EmbExtractor(emb_layer=gf_layer_to_quant)
 
     def forward(self, input_dataset, inference):
         # input is tokenized dataset
+
         emb_out = self.gf_emb_extractor.extract_embs(
             model=self.gf, input_data=input_dataset, inference=inference
         )
@@ -291,7 +293,6 @@ class gpWrapper(nn.Module):
     def encode_gp_tokens(self, gp_tokens):
         """
         Convert tokens to encoded values inside transformer block
-        goes from 1 to n_gp_genes not starting from 0 so 0 corresponds to missing gene
         """
         return {gene: idx for idx, gene in enumerate(gp_tokens)}
 
@@ -302,6 +303,7 @@ class gpWrapper(nn.Module):
         return_attention,
         return_gene_embeddings=False,
         tokens_to_keep=None,
+        gp_of_interest=None,
     ):
         # randomly mask genes only during training :
         if self.training:
@@ -321,16 +323,7 @@ class gpWrapper(nn.Module):
 
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
-            # when learning new GP, onyl do FW pass on new GP
-            if (
-                (self.training)
-                & (self.encoder[i].blocks[0].attn.qkv.weight.requires_grad is False)
-                & (self.model_type == 'Base')
-                # & (self.learning_new_gp) # commented out for backwards compatibility
-                # but would be good to have
-            ):
-                continue
-            else:
+            if (gp_of_interest is None) | (self.gp_inputs[i] in gp_of_interest):
                 (
                     emb_pad,
                     tokens_pad,
@@ -385,6 +378,8 @@ class gpWrapper(nn.Module):
                     gp_labels_list.append(
                         [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
                     )
+            else:
+                continue
 
         # Concatenate tensors
         z = torch.stack(gp_token_list, dim=1)
@@ -813,6 +808,7 @@ class gpTransformerBase(nn.Module):
         gene_name_path=GENE_NAME_FILE,
         model_type='Base',
         learn_new_gp=False,
+        gp_of_interest=None,
     ):
         """
         database :
@@ -890,6 +886,9 @@ class gpTransformerBase(nn.Module):
         self.n_blocks = n_blocks
         self.attn_dropout = attn_dropout
         self.use_flash = use_flash
+        if isinstance(gp_of_interest, str):
+            gp_of_interest = [gp_of_interest]
+        self.gp_of_interest = gp_of_interest
 
         self.multi_gp_encoder = gpWrapper(
             database=self.gpdb,
@@ -931,6 +930,7 @@ class gpTransformerBase(nn.Module):
             return_gene_embeddings=return_gene_embeddings,
             return_attention=return_attention,
             tokens_to_keep=tokens_to_keep,
+            gp_of_interest=self.gp_of_interest,
         )
 
         # Optionally return geneformer cell embeddings
@@ -1077,6 +1077,105 @@ class gpTransformerGlobal(gpTransformerBase):
         output = self.cell_token_learner.get_attn(base_output)
 
         return output
+
+
+class iGpWrapper(nn.Module):
+    def __init__(
+        self,
+        gp_transformer,
+        gp_of_interest,
+        gene_token_path=TOKEN_DICTIONARY_FILE,
+        gene_name_path=GENE_NAME_FILE,
+    ):
+        super().__init__()
+        # get index of gp of interest
+        self.gp_of_interest = gp_of_interest
+        self.gp_idx = gp_transformer.model.gp_inputs.index(gp_of_interest)
+
+        # select relevant gp block
+        self.gp_block = gp_transformer.model.multi_gp_encoder.encoder[self.gp_idx]
+
+        # store relevant gp tokens as nn.Embedding
+        gp_tokens = getattr(
+            gp_transformer.model.multi_gp_encoder, f'gp{self.gp_idx}_tokens'
+        )
+
+        # self.gp_gene_emb = nn.Embedding(
+        #     num_embeddings = len(gp_tokens) + 1,
+        #     embedding_dim = 1,
+        #     padding_idx = 0)
+
+        # self.gp_gene_emb.weight.data.fill_(1)
+
+        # # Set the padding index (index 0) embedding to 0
+        # self.gp_gene_emb.weight.data[0] = 0
+
+        # table for converting between different gene labels
+        with open(gene_name_path, 'rb') as f:
+            name_dictionary = pickle.load(f)
+        with open(gene_token_path, 'rb') as f:
+            token_dictionary = pickle.load(f)
+
+        ensembl_to_name = {v: k for k, v in name_dictionary.items()}
+        token_to_gene = {v: k for k, v in token_dictionary.items()}
+
+        gene_conversion = {
+            'token_original': list(gp_tokens),
+            'token_encoded': [
+                i + 1 for i in range(len(gp_tokens))
+            ],  # +1 comes from encoded in iTxDatamodule
+            'ensembl': [token_to_gene[t] for t in gp_tokens],
+        }
+
+        gene_conversion['symbol'] = [
+            ensembl_to_name[e] for e in gene_conversion['ensembl']
+        ]
+
+        self.gene_conversion = gene_conversion
+
+    def forward(self, input_tuple):
+        # wrangle input
+        input_dataset = input_tuple[1]
+
+        emb = input_tuple[0]
+        # token_labels = input_tuple[1]['token_labels_unencoded'].long()
+        # multiplier = self.gp_gene_emb(token_labels)
+
+        # # Multiply gene embeddings by 1 for computation graph
+        # emb = emb * multiplier
+
+        output = self.gp_block(
+            emb,
+            attn_mask=input_dataset['attn_mask'],
+            gene_labels=input_dataset['token_labels'],
+            inference=True,
+            return_attention=False,
+            return_gene_embeddings=False,
+        )
+
+        out = output['logits_lm'][:, 0, :]
+
+        return out
+
+
+class iGlobalWrapper(nn.Module):
+    def __init__(
+        self,
+        gp_transformer,
+    ):
+        super().__init__()
+
+        self.global_block = gp_transformer.cell_token_learner
+
+    def forward(self, input_emb):
+        # Step 1 : reorder GP inputs
+
+        # Step 2 :
+        out = self.global_block()
+
+        logits = out['gp_logits_lm']
+
+        return logits
 
 
 ####################################
@@ -1326,46 +1425,211 @@ class EmbEvaluatorHead(nn.Module):
 
 
 if __name__ == '__main__':
-    from gplearner.Datamodules.datamodule import txDataModule
+    import torch.nn as nn
+    from captum.attr import IntegratedGradients
 
-    txdata = txDataModule(
-        folder='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
-        '/scgpl_reproducibility/examples/pbmc_ifn/data/input_dataset',
-        batch_size=32,
-    )
-    txdata.setup()
+    from gplearner.Datamodules.datamodule import iTxDataModule
+    from gplearner.Trainers.trainer import scGPL
 
-    dataloader = txdata.val_dataloader()
-
-    iterator = iter(dataloader)
-
-    batch = next(iterator)
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     gpdb = pd.read_csv(
         '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
-        'scgpl_reproducibility/examples/pbmc_ifn/ifn_db_3gp.csv'
+        'gplearner_reproducibility/24-04-04_synthetic_scramble/gpdb_scramble.csv'
     )
 
-    model = gpTransformerGlobal(
-        database=gpdb,
-        attn_dropout=0,
+    txdata = iTxDataModule(
+        folder='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
+        'gplearner_reproducibility/24-04-03_synthetic_clean/data/input_dataset',
+        batch_size=5,
+        frac_for_training=0.001,
+        return_tuple=True,
+        gp='A',
+        gpdb=gpdb,
+        do_ensembl_conversion=False,
+    )
+
+    txdata.setup()
+
+    train_dataloader = txdata.train_dataloader()
+
+    for b in train_dataloader:
+        # emb = b[0].cuda()
+        # edict = {k: v.cuda() if isinstance(v, torch.Tensor)
+        # else v for k, v in b[1].items()}
+        if 'cell_type_1' in b[1]['cell_type']:
+            emb = b[0].to(device)
+            edict = {
+                k: v.to(device) if isinstance(v, torch.Tensor) else v
+                for k, v in b[1].items()
+            }
+            input_ids = (emb, edict)
+            token_labels = edict['token_labels']
+            break
+        else:
+            continue
+
+    # dummy reference with only 0s
+    edict0 = {
+        k: torch.zeros_like(v).to(device) if isinstance(v, torch.Tensor) else v
+        for k, v in input_ids[1].items()
+    }
+
+    ref_input_ids = (torch.zeros_like(input_ids[0]).to(device), edict0)
+
+    model = gpTransformerBase(
         gene_counts_df=None,
-        do_ensembl_conversion=True,
-        gp_latent_size=256,
-        num_heads=8,
+        database=gpdb,
+        do_ensembl_conversion=False,
         n_blocks=1,
-        mgm_mask_ratio=0.5,
-        geneformer_model='/lustre/scratch126/cellgen/team292/mm58/'
-        'geneformer_endometrium/Geneformer/',
-        gf_layer_to_quant=-1,
-        global_loss='masking',
-        global_attn_heads=1,
-        global_masking_rate=0.3,
+        num_heads=8,
+        gp_latent_size=256,
+        gp_inputs='A',
+        add_remaining_var=False,
     )
 
-    out = model.forward(batch)
+    gp_transformer = scGPL(
+        model,
+        'Base',
+        return_gene_embeddings=False,
+        tokens_to_keep=None,
+        gene_file_tag=None,
+        return_attention=False,
+        gp=None,
+        return_classification_report=False,
+    ).load_from_checkpoint(
+        '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
+        'gplearner_reproducibility/24-04-04_synthetic_scramble/output_base/'
+        'checkpoints/2024-04-04_gp_transformer_synth_Base_317.ckpt',
+        strict=False,
+    )
 
-    for k, v in out.items():
-        print(k, v.shape)
+    imodel = iGpWrapper(gp_transformer, gp_of_interest='A')
 
-    print('done')
+    def gp_forward_func(inputs, input_dict):
+        """
+        adapt to return prediction scores for GP <cls>?
+        """
+        # print('Inputs in pos fw', inputs.shape)
+
+        input_tuple = (inputs, input_dict)
+
+        output = imodel(input_tuple)
+
+        cls_logits = output
+        # print('cls_logits', cls_logits.shape)
+        # print('output values', cls_logits.max(1).values)
+
+        print('')
+
+        return cls_logits.max(1).values
+
+    # lig = LayerIntegratedGradients(gp_squad_pos_forward_func, imodel.gp_gene_emb)
+    ig = IntegratedGradients(gp_forward_func)
+
+    print('imodel number of parameters', sum(p.numel() for p in imodel.parameters()))
+
+    imodel = imodel.to(device)
+
+    attributions, approximation_error = ig.attribute(
+        input_ids[0],
+        baselines=ref_input_ids[0],
+        additional_forward_args=input_ids[1],
+        return_convergence_delta=True,
+    )
+
+    print('Attributions', attributions.shape)
+
+    gene_df = pd.DataFrame(imodel.gene_conversion)
+
+    attribution_df = pd.DataFrame(
+        {
+            'tokens': token_labels.squeeze().cpu().numpy(),
+            'abs_attribution_score': attributions.squeeze()
+            .abs()
+            .sum(dim=-1)
+            .detach()
+            .cpu()
+            .numpy(),
+            'attribution_score': attributions.squeeze()
+            .sum(dim=-1)
+            .detach()
+            .cpu()
+            .numpy(),
+        }
+    )
+
+    # add GP labels
+    gpdb_og = pd.read_csv(
+        '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
+        'gplearner_reproducibility/24-04-03_synthetic_clean/gpdb_synth.csv'
+    )
+
+    gene_df = gene_df.join(attribution_df.set_index('tokens'), on='token_original')
+
+    gene_df['GEP_1'] = np.where(gene_df['ensembl'].isin(gpdb_og['GEP_1']), 1, 0)
+    gene_df['GEP_2'] = np.where(gene_df['ensembl'].isin(gpdb_og['GEP_2']), 1, 0)
+
+    # Add rank in token labels
+    token_labels_list = token_labels.squeeze().cpu().numpy().tolist()
+    print(gene_df.head())
+    gene_df['gene_rank'] = gene_df['token_original'].apply(
+        lambda x: token_labels_list.index(x) if x in token_labels_list else 100
+    )
+    print(gene_df.head())
+
+    print('Cell type', edict['cell_type'])
+    print('Number of GP genes', edict['num_genes_per_cell'])
+
+    print('ABSOLIUTE VALUES')
+    print(gene_df.sort_values(by='abs_attribution_score', ascending=False).head(n=10))
+    print('')
+
+    print('RANKED POSITIONS')
+    print(gene_df.sort_values(by='gene_rank', ascending=True).head(n=10))
+    print('')
+
+    print(
+        'Number of genes with non zero attribution in GEP 1',
+        gene_df[(gene_df['GEP_1'] == 1) & (gene_df['abs_attribution_score'] > 0)].shape[
+            0
+        ],
+    )
+    print(
+        'Number of genes with non zero attribution in GEP 2',
+        gene_df[(gene_df['GEP_2'] == 1) & (gene_df['abs_attribution_score'] > 0)].shape[
+            0
+        ],
+    )
+
+    print(
+        'Number of GEP1 genes in top 20 ranked genes',
+        gene_df[(gene_df['GEP_1'] == 1) & (gene_df['gene_rank'] < 20)].shape[0],
+    )
+
+    print(
+        'Number of GEP2 genes in top 20 ranked genes',
+        gene_df[(gene_df['GEP_2'] == 1) & (gene_df['gene_rank'] < 20)].shape[0],
+    )
+
+    # # FOR GLOBAL MODEL
+    # import numpy as np
+    # import pandas as pd
+
+    # import torch
+    # import torch.nn as nn
+    # from captum.attr import LayerIntegratedGradients, IntegratedGradients
+
+    # from gplearner.Models.gp_model import iGpWrapper
+    # from gplearner.Trainers.trainer import scGPL
+    # from gplearner.Models.gp_model import gpTransformerBase
+    # from gplearner.Datamodules.datamodule import EmbDataModule
+
+    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    # gpdb = pd.read_csv('/lustre/scratch126/cellgen/team292/mm58/'
+    #                    'geneformer_endometrium/gplearner_reproducibility/'
+    #                    '24-04-04_synthetic_scramble/gpdb_scramble.csv')
+
+    # # build the batch based on embedding generation function
+    # # / but add number of genes per cell
