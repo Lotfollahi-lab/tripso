@@ -822,3 +822,48 @@ class EmbDataModule(LightningDataModule):
                     output_dict[m] = [d['obs'][m] for d in batch]
 
         return output_dict
+
+
+class iEmbDataModule(EmbDataModule):
+    def __init__(self, gp_inputs, **kwargs):
+        self.gp_inputs = gp_inputs
+        super().__init__(**kwargs)
+
+    def custom_collate(self, batch):
+        # Prepare data for input into cellwrapper
+        # wants x['z'] and x['num_genes_per_cell_list']
+        # we need to restack in the same order:
+        # 1. embeddings
+
+        # Accumulate embeddings for each gp across the batch
+        gp_embs = [
+            torch.stack([torch.tensor(d[gp]) for d in batch]) for gp in self.gp_inputs
+        ]
+
+        # Stack along a new dimension to get shape (len(gp_inputs), batch, emb)
+        gp_embs_tensor = torch.stack(gp_embs)
+
+        # Transpose to get shape (batch, len(gp_inputs), emb)
+        z = gp_embs_tensor.transpose(0, 1)
+
+        # 2. num_genes_per_cell_list
+
+        genes_per_cell_list = []
+
+        for gp in self.gp_inputs:
+            genes_per_cell_list.append(
+                [torch.tensor(d[f'{gp}_num_genes']) for d in batch]
+            )
+
+        output_dict = {'num_genes_per_cell_list': genes_per_cell_list}
+
+        # And metadata
+        for m in self.meta_labels:
+            if m.endswith('_id'):
+                output_dict[m] = torch.tensor([d[m] for d in batch], dtype=torch.long)
+            elif m in self.continuous_cov:
+                output_dict[m] = torch.tensor([d[m] for d in batch])
+            else:
+                output_dict[m] = [d[m] for d in batch]
+
+        return z, output_dict
