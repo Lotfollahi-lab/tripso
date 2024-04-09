@@ -13,15 +13,24 @@ import pandas as pd
 import pytorch_lightning as pl
 import scanpy as sc
 import torch
+from captum.attr import IntegratedGradients
 from datasets import load_from_disk
 from pytorch_lightning.loggers import CSVLogger
 from scib_metrics.benchmark import Benchmarker
+from tqdm import tqdm
 
-from ..Datamodules.datamodule import EmbDataModule, txDataModule
+from ..Datamodules.datamodule import (
+    EmbDataModule,
+    iEmbDataModule,
+    iTxDataModule,
+    txDataModule,
+)
 from ..Models.gp_model import (
     gfBaseline,
     gpTransformerBase,
     gpTransformerGlobal,
+    iGlobalWrapper,
+    iGpWrapper,
 )
 from ..Trainers.trainer import EmbEvaluator, scGPL
 from ..Utils.utils import (
@@ -29,6 +38,8 @@ from ..Utils.utils import (
     find_genes_in_multiple_gp,
     find_latest_file,
     get_genes_in_single_gp,
+    get_gp_attributions,
+    get_token_attributions,
     remove_single_data_points,
 )
 
@@ -123,6 +134,8 @@ class gpEval:
         random.seed(seed)
         pl.seed_everything(seed)
         torch.manual_seed(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
@@ -324,6 +337,8 @@ class gpEval:
         random.seed(seed)
         pl.seed_everything(seed)
         torch.manual_seed(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
         print(f'Evaluating {emb_label} embeddings')
         emb_evaluator = EmbEvaluator(
@@ -654,3 +669,295 @@ class gpEval:
         gp_transformer = self._init_trainer(test_random_baseline=True)
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
         trainer.test(gp_transformer, txdata)
+
+
+################################
+# For attributions
+################################
+
+
+def calculate_gp_attribution_scores(
+    gpdb_path,
+    dataset_path,
+    gp,
+    data_split,
+    total_n_cells,
+    n_blocks,
+    num_heads,
+    gp_latent_size,
+    model_checkpoint,
+    obs_key,
+    obs_value,
+    output_dir,
+    gpdb_ref_path=None,
+    do_ensembl_conversion=True,
+):
+    '''
+    Calculate attribution scores for each gene program
+    '''
+    # --------------------------
+    # Set seed
+    # --------------------------
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # set seed
+    seed = 0
+    np.random.seed(seed)
+    random.seed(seed)
+    pl.seed_everything(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # --------------------------
+    # Set up dataloader
+    # --------------------------
+
+    gpdb = pd.read_csv(gpdb_path)
+
+    txdata = iTxDataModule(
+        folder=dataset_path,
+        batch_size=1,
+        return_tuple=True,
+        gp=gp,
+        gpdb=gpdb,
+        do_ensembl_conversion=do_ensembl_conversion,
+    )
+
+    txdata.setup()
+    dataloader = getattr(txdata, data_split + '_dataloader')()
+    print('Number of cells', len(dataloader))
+
+    # --------------------------
+    # Set up model
+    # --------------------------
+
+    # TO DO : can we get this as config file?
+    model = gpTransformerBase(
+        gene_counts_df=None,
+        database=gpdb,
+        do_ensembl_conversion=do_ensembl_conversion,
+        n_blocks=n_blocks,
+        num_heads=num_heads,
+        gp_latent_size=gp_latent_size,
+        gp_inputs=gp,
+        add_remaining_var=False,
+    )
+
+    gp_transformer = scGPL(
+        model,
+        'Base',
+        return_gene_embeddings=False,
+        tokens_to_keep=None,
+        gene_file_tag=None,
+        return_attention=False,
+        gp=None,
+        return_classification_report=False,
+    ).load_from_checkpoint(
+        model_checkpoint,
+        strict=False,
+    )
+
+    imodel = iGpWrapper(gp_transformer, gp_of_interest=gp)
+    imodel = imodel.to(device)
+
+    # --------------------------
+    # Run attribution
+    # --------------------------
+
+    # set up attribution
+    ig = IntegratedGradients(imodel)
+
+    attribution_scores = None
+    all_tokens = set()
+    counter = 0
+
+    for batch in tqdm(dataloader):
+        if counter < total_n_cells:
+            if attribution_scores is None:
+                attribution_scores, tokens_set = get_token_attributions(
+                    batch, ig, device, obs_key, obs_value
+                )
+                if tokens_set is not None:
+                    all_tokens.update(tokens_set)
+            else:
+                outx, tokens_set = get_token_attributions(
+                    batch, ig, device, obs_key, obs_value
+                )
+
+                if outx is not None:
+                    for k, v in outx.items():
+                        all_tokens.update(tokens_set)
+                        counter += 1
+
+                        if k in attribution_scores:
+                            attribution_scores[k] += v
+                        else:
+                            attribution_scores[k] = v
+
+        else:
+            break
+
+    # Extracting data
+    data = {'token': [], 'attribution_score': [], 'rank': []}
+
+    for t in list(all_tokens):
+        data['token'].append(t)
+        data['attribution_score'].append(
+            np.nanmean(attribution_scores[f'{t}_attribution_score'])
+        )
+        data['rank'].append(np.nanmean(attribution_scores[f'{t}_rank']))
+
+    attribution_df = pd.DataFrame(data)
+
+    # Add gene conversion
+    gene_df = pd.DataFrame(imodel.gene_conversion)
+    gene_df = gene_df.join(attribution_df.set_index('token'), on='token_original')
+
+    # add GP labels
+    if gpdb_ref_path is None:
+        gpdb_ref_path = gpdb_path
+
+    gpdb_og = pd.read_csv(gpdb_ref_path)
+
+    for ogp in gpdb_og.columns:
+        if do_ensembl_conversion:
+            gene_df[ogp] = np.where(gene_df['symbol'].isin(gpdb_og[ogp]), 1, 0)
+        else:
+            gene_df[ogp] = np.where(gene_df['ensembl'].isin(gpdb_og[ogp]), 1, 0)
+
+    gene_df.to_csv(
+        os.path.join(output_dir, f'{gp}_attribution_scores_{obs_value}.csv'),
+        index=False,
+    )
+
+
+def calculate_cell_token_attribution_scores(
+    gpdb_path,
+    dataset_path,
+    data_split,
+    total_n_cells,
+    n_blocks,
+    num_heads,
+    gp_latent_size,
+    model_checkpoint,
+    obs_key,
+    obs_value,
+    output_dir,
+    global_loss,
+    reconstruction_loss,
+):
+    # --------------------------
+    # Set seed
+    # --------------------------
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # set seed
+    seed = 0
+    np.random.seed(seed)
+    random.seed(seed)
+    pl.seed_everything(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # --------------------------
+    # Set up dataloader
+    # --------------------------
+
+    gpdb = pd.read_csv(gpdb_path)
+
+    emb_dm = iEmbDataModule(
+        folder_path=dataset_path,
+        batch_size=1,
+        gp_inputs=list(gpdb.columns),
+        meta_labels=obs_key,
+    )
+
+    emb_dm.setup()
+
+    dataloader = getattr(emb_dm, data_split + '_dataloader')()
+
+    # --------------------------
+    # Set up model
+    # --------------------------
+
+    model = gpTransformerGlobal(
+        gene_counts_df=None,
+        database=gpdb,
+        do_ensembl_conversion=False,
+        n_blocks=n_blocks,
+        num_heads=num_heads,
+        gp_latent_size=gp_latent_size,
+        gp_inputs=list(gpdb.columns),
+        add_remaining_var=False,
+        global_loss=global_loss,
+        reconstruction_loss=reconstruction_loss,
+    )
+
+    gp_transformer = scGPL(
+        model,
+        'Global',
+        global_loss=reconstruction_loss,
+        return_gene_embeddings=False,
+        tokens_to_keep=None,
+        gene_file_tag=None,
+        return_attention=False,
+        gp=None,
+        return_classification_report=False,
+    ).load_from_checkpoint(
+        model_checkpoint,
+        strict=False,
+    )
+
+    imodel = iGlobalWrapper(gp_transformer)
+    imodel = imodel.to(device)
+
+    # --------------------------
+    # Run attribution
+    # --------------------------
+
+    # set up attribution
+    ig = IntegratedGradients(imodel)
+
+    attribution_scores = None
+    gp_inputs = list(gpdb.columns)
+    counter = 0
+
+    for b in tqdm(dataloader):
+        if counter < total_n_cells:
+            if attribution_scores is None:
+                attribution_scores = get_gp_attributions(
+                    b, gp_inputs, ig, device, obs_key, obs_value
+                )
+            else:
+                outx = get_gp_attributions(b, gp_inputs, ig, device, obs_key, obs_value)
+                if outx is not None:
+                    counter += 1
+                    for k, v in outx.items():
+                        if k in attribution_scores:
+                            attribution_scores[k] += v
+                        else:
+                            attribution_scores[k] = v
+
+        else:
+            break
+
+    # Extracting data
+    data = {'gp': [], 'attribution_score': [], 'prop_genes': []}
+
+    for t in gp_inputs:
+        data['gp'].append(t)
+        data['attribution_score'].append(
+            np.nanmean(attribution_scores[f'{t}_attribution_score'])
+        )
+        data['prop_genes'].append(np.nanmean(attribution_scores[f'{t}_prop_genes']))
+
+    attribution_df = pd.DataFrame(data)
+
+    attribution_df.to_csv(
+        os.path.join(output_dir, f'cell_token_attribution_scores_{obs_value}.csv'),
+        index=False,
+    )

@@ -173,6 +173,8 @@ def run_training(
     random.seed(seed)
     pl.seed_everything(seed)
     torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     wandb.login()
 

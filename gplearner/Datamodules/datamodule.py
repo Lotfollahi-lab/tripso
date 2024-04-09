@@ -697,7 +697,10 @@ class EmbDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.emb_to_keep = emb_label
-        self.meta_labels = meta_labels
+        if isinstance(meta_labels, str):
+            self.meta_labels = [meta_labels]
+        else:
+            self.meta_labels = meta_labels
         self.data_type = data_type
         self.continuous_cov = continuous_cov
         self.use_weighted_sampler = use_weighted_sampler

@@ -15,9 +15,9 @@ from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from scipy.sparse import csr_matrix
 from transformers import BertForMaskedLM
 
-from gplearner.Modules.modules import Mlp, gpTransformerEncoder
-from gplearner.Utils.geneformer_utils import EmbExtractor
-from gplearner.Utils.utils import (
+from ..Modules.modules import Mlp, gpTransformerEncoder
+from ..Utils.geneformer_utils import EmbExtractor
+from ..Utils.utils import (
     bin_gene_expression,
     get_gp_tokens,
     pad_array,
@@ -1137,21 +1137,11 @@ class iGpWrapper(nn.Module):
 
         self.gene_conversion = gene_conversion
 
-    def forward(self, input_tuple):
-        # wrangle input
-        input_dataset = input_tuple[1]
-
-        emb = input_tuple[0]
-        # token_labels = input_tuple[1]['token_labels_unencoded'].long()
-        # multiplier = self.gp_gene_emb(token_labels)
-
-        # # Multiply gene embeddings by 1 for computation graph
-        # emb = emb * multiplier
-
+    def forward(self, emb, additional_input_dict):
         output = self.gp_block(
             emb,
-            attn_mask=input_dataset['attn_mask'],
-            gene_labels=input_dataset['token_labels'],
+            attn_mask=additional_input_dict['attn_mask'],
+            gene_labels=additional_input_dict['token_labels'],
             inference=True,
             return_attention=False,
             return_gene_embeddings=False,
@@ -1159,7 +1149,7 @@ class iGpWrapper(nn.Module):
 
         out = output['logits_lm'][:, 0, :]
 
-        return out
+        return out.max(1).values
 
 
 class iGlobalWrapper(nn.Module):
@@ -1171,16 +1161,20 @@ class iGlobalWrapper(nn.Module):
 
         self.global_block = gp_transformer.model.cell_token_learner
 
-    def forward(self, input_tuple):
+    def forward(self, emb, additional_input_dict):
         input_dataset = {
-            'z': input_tuple[0],
-            'num_genes_per_cell_list': input_tuple[1]['num_genes_per_cell_list'],
+            'z': emb,
+            'num_genes_per_cell_list': additional_input_dict['num_genes_per_cell_list'],
         }
 
         # Step 2 :
         out = self.global_block(input_dataset, inference=False)
+        logits = out['gp_logits_lm']
 
-        return out
+        # get cls logits
+        cls_logits = logits[:, 0, :]
+
+        return cls_logits.max(1).values
 
 
 ####################################
@@ -1431,438 +1425,3 @@ class EmbEvaluatorHead(nn.Module):
 
 if __name__ == '__main__':
     pass
-    # import torch.nn as nn
-    # from captum.attr import IntegratedGradients
-    # from tqdm import tqdm
-
-    # from gplearner.Datamodules.datamodule import iTxDataModule
-    # from gplearner.Trainers.trainer import scGPL
-
-    # device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
-    # gpdb = pd.read_csv(
-    #     '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
-    #     'gplearner_reproducibility/24-04-04_synthetic_scramble/gpdb_scramble.csv'
-    # )
-
-    # txdata = iTxDataModule(
-    #     folder='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
-    #     'gplearner_reproducibility/24-04-03_synthetic_clean/data/input_dataset',
-    #     batch_size=1,
-    #     frac_for_training=0.01,
-    #     return_tuple=True,
-    #     gp='A',
-    #     gpdb=gpdb,
-    #     do_ensembl_conversion=False,
-    # )
-
-    # txdata.setup()
-    # dataloader = txdata.test_dataloader()
-
-    # model = gpTransformerBase(
-    #     gene_counts_df=None,
-    #     database=gpdb,
-    #     do_ensembl_conversion=False,
-    #     n_blocks=1,
-    #     num_heads=8,
-    #     gp_latent_size=256,
-    #     gp_inputs='A',
-    #     add_remaining_var=False,
-    # )
-
-    # gp_transformer = scGPL(
-    #     model,
-    #     'Base',
-    #     return_gene_embeddings=False,
-    #     tokens_to_keep=None,
-    #     gene_file_tag=None,
-    #     return_attention=False,
-    #     gp=None,
-    #     return_classification_report=False,
-    # ).load_from_checkpoint(
-    #     '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
-    #     'gplearner_reproducibility/24-04-04_synthetic_scramble/output_base/'
-    #     'checkpoints/2024-04-04_gp_transformer_synth_Base_317.ckpt',
-    #     strict=False,
-    # )
-
-    # imodel = iGpWrapper(gp_transformer, gp_of_interest='A')
-    # imodel = imodel.to(device)
-
-    # def gp_forward_func(inputs, input_dict):
-    #     """
-    #     adapt to return prediction scores for GP <cls>?
-    #     """
-    #     # print('Inputs in pos fw', inputs.shape)
-
-    #     input_tuple = (inputs, input_dict)
-
-    #     output = imodel(input_tuple)
-
-    #     cls_logits = output
-    #     # print('cls_logits', cls_logits.shape)
-    #     # print('output values', cls_logits.max(1).values)
-
-    #     return cls_logits.max(1).values
-
-    # # lig = LayerIntegratedGradients(gp_squad_pos_forward_func, imodel.gp_gene_emb)
-    # ig = IntegratedGradients(gp_forward_func)
-
-    # def get_token_attributions(b):
-    #     if 'cell_type_1' in b[1]['cell_type']:
-    #         emb = b[0].to(device)
-    #         edict = {
-    #             k: v.to(device) if isinstance(v, torch.Tensor) else v
-    #             for k, v in b[1].items()
-    #         }
-    #         input_ids = (emb, edict)
-    #         token_labels = edict['token_labels']
-
-    #         # dummy reference with only 0s
-    #         edict0 = {
-    #             k: torch.zeros_like(v).to(device)
-    #              if isinstance(v, torch.Tensor) else v
-    #             for k, v in input_ids[1].items()
-    #         }
-
-    #         ref_input_ids = (torch.zeros_like(input_ids[0]).to(device), edict0)
-
-    #         attributions, approximation_error = ig.attribute(
-    #             input_ids[0],
-    #             baselines=ref_input_ids[0],
-    #             additional_forward_args=input_ids[1],
-    #             return_convergence_delta=True,
-    #         )
-
-    #         attribution_df = pd.DataFrame(
-    #             {
-    #                 'token': token_labels.squeeze().cpu().numpy(),
-    #                 'abs_attribution_score': attributions.squeeze()
-    #                 .abs()
-    #                 .sum(dim=-1)
-    #                 .detach()
-    #                 .cpu()
-    #                 .numpy(),
-    #                 'attribution_score': attributions.squeeze()
-    #                 .sum(dim=-1)
-    #                 .detach()
-    #                 .cpu()
-    #                 .numpy(),
-    #             }
-    #         )
-
-    #         # Add rank in token labels
-    #         token_labels_list = token_labels.squeeze().cpu().numpy().tolist()
-
-    #         attribution_df['gene_rank'] = attribution_df['token'].apply(
-    #             lambda x: token_labels_list.index(x)
-    #               if x in token_labels_list else 100
-    #         )
-
-    #         # turn into dictionary
-    #         tracker = {}
-    #         tokens_set = set(token_labels_list)
-
-    #         for token in attribution_df['token']:
-    #             tmp = attribution_df[attribution_df['token'] == token]
-    #             tracker[f'{token}_abs_attr_sum'] =
-    #                    tmp['abs_attribution_score'].values[
-    #                 0
-    #             ]
-    #             tracker[f'{token}_attr_sum'] = tmp['attribution_score'].values[0]
-    #             tracker[f'{token}_rank'] = tmp['gene_rank'].values[0]
-    #         tracker['num_genes_per_cell'] = edict['num_genes_per_cell']
-
-    #         return tracker, tokens_set
-
-    #     else:
-    #         return None, None
-
-    # attribution_scores = None
-    # all_tokens = set()
-
-    # for batch in tqdm(dataloader):
-    #     if attribution_scores is None:
-    #         attribution_scores, tokens_set = get_token_attributions(batch)
-    #         if tokens_set is not None:
-    #             all_tokens.update(tokens_set)
-    #     else:
-    #         outx, tokens_set = get_token_attributions(batch)
-    #         if outx is not None:
-    #             for k, v in outx.items():
-    #                 all_tokens.update(tokens_set)
-
-    #                 if k in attribution_scores:
-    #                     attribution_scores[k] += v
-    #                 else:
-    #                     attribution_scores[k] = v
-
-    # # Extracting data
-    # data: Dict[str, List[float]] = {
-    #     'token': [],
-    #     'abs_attr_sum': [],
-    #     'attr_sum': [],
-    #     'rank': [],
-    # }
-
-    # for t in list(all_tokens):
-    #     abs_attr_sum_key = f'{t}_abs_attr_sum'
-    #     attr_sum_key = f'{t}_attr_sum'
-    #     rank_key = f'{t}_rank'
-
-    #     # Using .get() with a default value of [np.nan]
-    #     # to ensure the operation is always indexable
-    #     data['abs_attr_sum'].append(
-    #         np.nanmean(attribution_scores.get(abs_attr_sum_key, [np.nan]))
-    #     )
-    #     data['attr_sum'].append(
-    #         np.nanmean(attribution_scores.get(attr_sum_key, [np.nan]))
-    #     )
-
-    #     ranks = np.array(
-    #         attribution_scores.get(rank_key, [np.nan])
-    #     )  # Providing a default array containing np.nan
-    #     ranks[ranks == 100] = np.nan
-    #     data['rank'].append(np.nanmean(ranks))
-
-    # attribution_df = pd.DataFrame(data)
-    # # attribution_df['avg_num_genes_per_cell'] =
-    # # attribution_scores['num_genes_per_cell'] / len(train_dataloader)
-    # print(
-    #     'Average number of genes per cell',
-    #     attribution_scores['num_genes_per_cell'] / len(dataloader),
-    # )
-
-    # print(attribution_df.head())
-
-    # gene_df = pd.DataFrame(imodel.gene_conversion)
-
-    # gene_df = gene_df.join(attribution_df.set_index('token'), on='token_original')
-
-    # # add GP labels
-    # gpdb_og = pd.read_csv(
-    #     '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
-    #     'gplearner_reproducibility/24-04-03_synthetic_clean/gpdb_synth.csv'
-    # )
-
-    # gene_df['GEP_1'] = np.where(gene_df['ensembl'].isin(gpdb_og['GEP_1']), 1, 0)
-    # gene_df['GEP_2'] = np.where(gene_df['ensembl'].isin(gpdb_og['GEP_2']), 1, 0)
-
-    # # print('Cell type', edict['cell_type'])
-    # # print('Number of GP genes', edict['num_genes_per_cell'])
-
-    # print('ABSOLIUTE VALUES')
-    # print(gene_df.sort_values(by='abs_attr_sum', ascending=False).head(n=10))
-    # print('')
-
-    # print('RANKED POSITIONS')
-    # print(gene_df.sort_values(by='rank', ascending=True).head(n=10))
-    # print('')
-    # gene_df.to_csv('tmp.csv', index=False)
-
-    # print(
-    #     'Number of genes with non zero attribution in GEP 1',
-    #     gene_df[(gene_df['GEP_1'] == 1) & (gene_df['abs_attr_sum'] > 0)].shape[0],
-    # )
-    # print(
-    #     'Number of genes with non zero attribution in GEP 2',
-    #     gene_df[(gene_df['GEP_2'] == 1) & (gene_df['abs_attr_sum'] > 0)].shape[0],
-    # )
-
-    # print(
-    #     'Number of GEP1 genes in top 20 ranked genes',
-    #     gene_df[(gene_df['GEP_1'] == 1) & (gene_df['rank'] < 20)].shape[0],
-    # )
-
-    # print(
-    #     'Number of GEP2 genes in top 20 ranked genes',
-    #     gene_df[(gene_df['GEP_2'] == 1) & (gene_df['rank'] < 20)].shape[0],
-    # )
-
-    # ##########################
-    # # FOR GLOBAL MODEL
-    # ##########################
-
-    # import numpy as np
-    # import pandas as pd
-    # import torch
-    # import torch.nn as nn
-    # from captum.attr import IntegratedGradients
-
-    # from gplearner.Datamodules.datamodule import iEmbDataModule
-    # from gplearner.Models.gp_model import gpTransformerGlobal, iGpWrapper
-    # from gplearner.Trainers.trainer import scGPL
-
-    # device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
-    # gpdb = pd.read_csv(
-    #     '/lustre/scratch126/cellgen/team292/mm58/'
-    #     'geneformer_endometrium/gplearner_reproducibility/'
-    #     '24-04-04_synthetic_scramble/gpdb_scramble.csv'
-    # )
-
-    # # build the batch based on embedding generation function
-    # # / but add number of genes per cell
-
-    # emb_dm = iEmbDataModule(
-    #     folder_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
-    #     'gplearner_reproducibility/24-04-04_synthetic_scramble/output_global_nb/embeddings',
-    #     batch_size=1,
-    #     gp_inputs=list(gpdb.columns),
-    #     meta_labels=['cell_type', 'idx', 'condition'],
-    # )
-
-    # emb_dm.setup()
-
-    # dataloader = emb_dm.test_dataloader()
-
-    # model = gpTransformerGlobal(
-    #     gene_counts_df=None,
-    #     database=gpdb,
-    #     do_ensembl_conversion=False,
-    #     n_blocks=1,
-    #     num_heads=8,
-    #     gp_latent_size=256,
-    #     gp_inputs=list(gpdb.columns),
-    #     add_remaining_var=False,
-    #     global_loss='reconstruction',
-    #     reconstruction_loss='nb',
-    # )
-
-    # gp_transformer = scGPL(
-    #     model,
-    #     'Global',
-    #     global_loss='reconstruction',
-    #     return_gene_embeddings=False,
-    #     tokens_to_keep=None,
-    #     gene_file_tag=None,
-    #     return_attention=False,
-    #     gp=None,
-    #     return_classification_report=False,
-    # ).load_from_checkpoint(
-    #     '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
-    #     'gplearner_reproducibility/24-04-04_synthetic_scramble/output_global_nb/'
-    #     'checkpoints/2024-04-04_gp_transformer_synth_Global_f4a.ckpt',
-    #     strict=False,
-    # )
-
-    # imodel = iGlobalWrapper(gp_transformer)
-    # imodel = imodel.to(device)
-
-    # def gp_forward_func(inputs, input_dict):
-    #     """
-    #     adapt to return prediction scores for GP <cls>?
-    #     """
-    #     # print('Inputs in pos fw', inputs.shape)
-
-    #     input_tuple = (inputs, input_dict)
-
-    #     output = imodel(input_tuple)
-
-    #     cls_logits = output['gp_logits_lm'].max(1).values
-    #     # print('cls_logits', cls_logits.shape)
-    #     # print('output values', cls_logits.max(1).values)
-
-    #     return cls_logits.max(1).values
-
-    # ig = IntegratedGradients(gp_forward_func)
-
-    # def get_token_attributions(b, gp_inputs):
-    #     if b[1]['cell_type'] == ['cell_type_3']:
-    #         emb = b[0].to(device)
-
-    #         edict = {
-    #             k: v.to(device) if isinstance(v, torch.Tensor) else v
-    #             for k, v in b[1].items()
-    #         }
-
-    #         input_ids = (emb, edict)
-
-    #         # dummy reference with only 0s
-    #         edict0 = {
-    #             k: torch.zeros_like(v).to(device)
-    #               if isinstance(v, torch.Tensor) else v
-    #             for k, v in input_ids[1].items()
-    #         }
-
-    #         ref_input_ids = (torch.zeros_like(input_ids[0]).to(device), edict0)
-
-    #         attributions, approximation_error = ig.attribute(
-    #             input_ids[0],
-    #             baselines=ref_input_ids[0],
-    #             additional_forward_args=input_ids[1],
-    #             return_convergence_delta=True,
-    #         )
-
-    #         attribution_df = pd.DataFrame(
-    #             {
-    #                 'GP': gp_inputs,
-    #                 'abs_attribution_score': attributions.squeeze()
-    #                 .abs()
-    #                 .sum(dim=-1)
-    #                 .detach()
-    #                 .cpu()
-    #                 .numpy(),
-    #                 'attribution_score': attributions.squeeze()
-    #                 .sum(dim=-1)
-    #                 .detach()
-    #                 .cpu()
-    #                 .numpy(),
-    #                 'num_genes_per_cell': edict['num_genes_per_cell_list'],
-    #             }
-    #         )
-
-    #         tracker = {}
-
-    #         for g in attribution_df['GP']:
-    #             tmp = attribution_df[attribution_df['GP'] == g]
-    #             tracker[f'{g}_abs_attr_sum'] = tmp['abs_attribution_score'].values[0]
-    #             tracker[f'{g}_attr_sum'] = tmp['attribution_score'].values[0]
-    #             tracker[f'{g}_num_genes'] = tmp['num_genes_per_cell'].values[0]
-
-    #         return tracker
-
-    #     else:
-    #         return None
-
-    # attribution_scores = None
-    # gp_inputs = list(gpdb.columns)
-    # counter = 0
-
-    # for b in tqdm(dataloader):
-    #     if counter < 100:
-    #         if attribution_scores is None:
-    #             attribution_scores = get_token_attributions(b, gp_inputs)
-    #         else:
-    #             outx = get_token_attributions(b, gp_inputs)
-    #             if outx is not None:
-    #                 counter += 1
-    #                 for k, v in outx.items():
-    #                     if k in attribution_scores:
-    #                         attribution_scores[k] += v
-    #                     else:
-    #                         attribution_scores[k] = v
-
-    #     else:
-    #         break
-
-    # # Extracting data
-    # data = {'gp': [], 'abs_attr_sum': [], 'attr_sum': [], 'num_genes': []}
-
-    # for t in gp_inputs:
-    #     data['gp'].append(t)
-    #     data['abs_attr_sum'].append(np.nanmean(attribution_scores[f'{t}_abs_attr_sum']))
-    #     data['attr_sum'].append(np.nanmean(attribution_scores[f'{t}_attr_sum']))
-    #     data['num_genes'].append(np.nanmean(attribution_scores[f'{t}_num_genes']))
-
-    # attribution_df = pd.DataFrame(data)
-    # print(attribution_df.head())
-
-    # print('ABSOLIUTE VALUES')
-    # print(attribution_df.sort_values(by='abs_attr_sum', ascending=False).head(n=10))
-    # print('')
-
-    # print('RANKED POSITIONS')
-    # print(attribution_df.sort_values(by='num_genes', ascending=True).head(n=10))
-    # print('')
-    # attribution_df.to_csv('output_global_nb/attr_global_celltype3.csv', index=False)
