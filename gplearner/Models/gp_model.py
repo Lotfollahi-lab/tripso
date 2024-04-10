@@ -197,7 +197,7 @@ class scgptWrapper(nn.Module):
         )
         self.use_batch_labels = INPUT_BATCH_LABELS
 
-    def forward(self, data_dict):
+    def forward(self, data_dict, *args, **kwargs):
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
             count = 0
             input_gene_ids = data_dict["gene"].to(self.device)
@@ -357,7 +357,7 @@ class gpWrapper(nn.Module):
 
         # Find max value for padding
         if mode == 'full_model':
-            max_value = 2048
+            max_value = gf.shape[1]
 
             for i in range(len(input_ids)):
                 if len(input_ids[i]) == max_value:
@@ -474,7 +474,7 @@ class gpWrapper(nn.Module):
 
         gene_emb_list = []
         gp_labels_list = []
-
+        
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
             (
@@ -860,6 +860,7 @@ class gpTransformerBase(nn.Module):
     def __init__(
         self,
         database,
+        mode='geneformer',
         attn_dropout=0,
         gp_inputs=None,
         gene_counts_df=None,
@@ -928,9 +929,20 @@ class gpTransformerBase(nn.Module):
         super().__init__()
 
         # Initialize geneformer model for getting geneformer embeddings
-        self.gf_wrapper = gfWrapper(
-            geneformer_model=geneformer_model, gf_layer_to_quant=gf_layer_to_quant
-        )
+        if mode == 'geneformer':
+            self.gf_wrapper = gfWrapper(
+                geneformer_model=geneformer_model, gf_layer_to_quant=gf_layer_to_quant
+            )
+            gene_token_path = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
+            '/Geneformer/geneformer/token_dictionary.pkl',
+            gene_name_path = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
+            '/Geneformer/geneformer/gene_name_id_dict.pkl',
+        elif mode == 'scgpt':
+            self.gf_wrapper = scgptWrapper()
+            gene_token_path = '/lustre/scratch126/cellgen/team205/ha11/scGPT/synthetic_token_dict.pkl'
+            gene_name_path = '/lustre/scratch126/cellgen/team205/ha11/scGPT/gene_name_id_dict.pkl'
+        else:
+            raise NotImplementedError()
 
         # Optionally: extract Geneformer cell embeddings
         self.gf_cell_encoder = AverageNonZero()
@@ -952,7 +964,7 @@ class gpTransformerBase(nn.Module):
         self.do_ensembl_conversion = do_ensembl_conversion
         self.n_blocks = n_blocks
         self.attn_dropout = attn_dropout
-
+        
         self.multi_gp_encoder = gpWrapper(
             database=self.gpdb,
             do_ensembl_conversion=self.do_ensembl_conversion,

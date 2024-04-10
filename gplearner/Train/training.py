@@ -17,7 +17,7 @@ from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 
-from ..Datamodules.datamodule import txDataModule
+from ..Datamodules.datamodule import txDataModule, scgptDataModule
 from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import find_latest_file
@@ -27,6 +27,7 @@ def run_training(
     dataset_path: str,
     gpdb_path: str,
     output_dir: str,
+    mode: Literal['geneformer', 'scgpt'] = 'geneformer',
     gp_similarity_file: Optional[str] = None,
     batch_size: int = 32,
     mgm: float = 0.15,
@@ -77,6 +78,8 @@ def run_training(
         directory where we will dump our experiment's results.
         If not given, then we will use the directory given as
         the 'results_dir' in the config file.
+    mode: str
+        scgpt or geneformer as the backbone feature extractor
     batch_size : int
         batch size
     mgm : float
@@ -274,9 +277,15 @@ def run_training(
     # Instantiate dataset
     # (tokenized dataset should be created already)
     # txdata = DummyDataModule(folder = dataset_path, batch_size=batch_size)
-    txdata = txDataModule(
-        folder=dataset_path, batch_size=batch_size, frac_for_training=frac_for_training
-    )
+    mode = mode.lower()
+    if mode == 'geneformer':
+        txdata = txDataModule(
+            folder=dataset_path, batch_size=batch_size, frac_for_training=frac_for_training
+        )
+    elif mode == 'scgpt':
+        txdata = scgptDataModule()
+    else:
+        raise NotImplementedError()
 
     # Load gpdb
     gpdb = pd.read_csv(gpdb_path)
@@ -309,6 +318,7 @@ def run_training(
 
     if model_type == 'Base':
         model = gpTransformerBase(
+            mode=mode,
             gene_counts_df=gene_counts_df,
             database=gpdb,
             do_ensembl_conversion=do_ensembl_conversion,

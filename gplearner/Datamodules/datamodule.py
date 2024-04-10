@@ -5,6 +5,7 @@ from scanpy import read as sc_read
 import numpy as np
 import os
 import json
+from pandas import read_csv
 
 import torch
 from datasets import load_from_disk
@@ -233,7 +234,7 @@ class scgptDataset(Dataset):
 class scgptDataModule(LightningDataModule):
     def __init__(
         self,
-        adata_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/scgpl_reproducibility/examples/synthetic/data/input_h5ad/synthetic.h5ad',
+        adata_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/gplearner_reproducibility/24-04-03_synthetic_clean/data/input_h5ad/24-04-03_synthetic_clean.h5ad',
         batch_size=3,
         num_workers=1,
         shuffle=False,
@@ -287,23 +288,23 @@ class scgptDataModule(LightningDataModule):
         self.metadata = [c for c in self.adata.obs.columns]
 
     def extract_gene_names(self):
-        with open('/lustre/scratch126/cellgen/team205/ha11/Homo_sapiens.GRCh38.111.gtf') as f:
-            gtf = list(f)
-        gtf = [x for x in gtf if not x.startswith('#')]
-        gtf = [x for x in gtf if 'gene_id "' in x and 'gene_name "' in x]
-        gtf = list(map(lambda x: (x.split('gene_id "')[1].split('"')[0], x.split('gene_name "')[1].split('"')[0]), gtf))
-        gtf = dict(list(set(gtf)))
-        self.adata.var['gene_name'] = self.adata.var['ensembl_id'].map(gtf)
+        df = read_csv('/lustre/scratch126/cellgen/team205/ha11/scGPT/gene_info.csv', index_col=0)
+        ids = df['feature_id'].tolist()
+        names = df['feature_name'].tolist()
+        name_dictionary = {k:v for k, v in zip(ids, names)}
+        self.adata.var['gene_name'] = self.adata.var['ensembl_id'].map(name_dictionary)
         self.adata = self.adata[:, self.adata.var_names.isin(self.adata.var.dropna(how='any').index)]
+        
         pad_token = "<pad>"
         special_tokens = [pad_token, "<cls>", "<eoc>"]
         for s in special_tokens:
             if s not in self.vocab:
                 self.vocab.append_token(s)
+        
         self.adata.var["id_in_vocab"] = [1 if gene in self.vocab else -1 for gene in self.adata.var["gene_name"]]
         self.gene_ids_in_vocab = np.array(self.adata.var["id_in_vocab"])
         self.vocab.set_default_index(self.vocab["<pad>"])
-        
+
         self.genes = self.adata.var["gene_name"].tolist()
         self.gene_ids = np.array(self.vocab(self.genes), dtype=int)
         if self.gene_ids is None:
