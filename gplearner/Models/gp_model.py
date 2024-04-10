@@ -873,10 +873,8 @@ class gpTransformerBase(nn.Module):
         geneformer_model='/lustre/scratch126/cellgen/team292/mm58/'
         'geneformer_endometrium/Geneformer/',
         gf_layer_to_quant=-1,
-        gene_token_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
-        '/Geneformer/geneformer/token_dictionary.pkl',
-        gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
-        '/Geneformer/geneformer/gene_name_id_dict.pkl',
+        gene_token_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/token_dictionary.pkl',
+        gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl',
     ):
         """
         database :
