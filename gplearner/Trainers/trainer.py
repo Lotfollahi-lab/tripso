@@ -1203,6 +1203,7 @@ class scGPL(pl.LightningModule):
 class EmbEvaluator(pl.LightningModule):
     def __init__(self, n_classes, emb_dim, task, lr, emb_label, y_label, output_dir):
         super().__init__()
+        self.save_hyperparameters()
 
         self.evaluator_head = EmbEvaluatorHead(emb_dim, n_classes)
         self.emb_label = emb_label
@@ -1224,6 +1225,9 @@ class EmbEvaluator(pl.LightningModule):
         for stage in ['train', 'val', 'test']:
             setattr(self, f'{stage}_pred', [])
             setattr(self, f'{stage}_true', [])
+
+    def forward(self, x):
+        return self.evaluator_head(x)
 
     def training_step(self, batch, batch_idx):
         x = batch[self.emb_label]

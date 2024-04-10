@@ -15,7 +15,11 @@ from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from scipy.sparse import csr_matrix
 from transformers import BertForMaskedLM
 
-from ..Modules.modules import Mlp, gpTransformerEncoder
+from ..Modules.modules import (
+    Mlp,
+    PretrainedEmbeddings,
+    gpTransformerEncoder,
+)
 from ..Utils.geneformer_utils import EmbExtractor
 from ..Utils.utils import (
     bin_gene_expression,
@@ -1156,25 +1160,45 @@ class iGlobalWrapper(nn.Module):
     def __init__(
         self,
         gp_transformer,
+        clf_layer,
+        use_embedding=False,
+        pretrained_emb=None,
+        vocab_size=None,
+        embedding_dim=None,
     ):
         super().__init__()
 
         self.global_block = gp_transformer.model.cell_token_learner
+        self.clf_layer = clf_layer
+
+        self.use_embedding = use_embedding
+        if self.use_embedding:
+            self.gp_embedding = PretrainedEmbeddings(
+                pretrained_emb=pretrained_emb,
+                pretrained_pos_emb=self.global_block.encoder.pos_embed,
+                vocab_size=vocab_size,
+                embedding_dim=embedding_dim,
+            )
+
+            # turn off positional embeddings
+            self.global_block.encoder.pos_embed = nn.Identity()
 
     def forward(self, emb, additional_input_dict):
+        if self.use_embedding:
+            emb = self.gp_embedding(emb)
+
         input_dataset = {
             'z': emb,
             'num_genes_per_cell_list': additional_input_dict['num_genes_per_cell_list'],
         }
 
-        # Step 2 :
+        # Global cell token learner
         out = self.global_block(input_dataset, inference=False)
-        logits = out['gp_logits_lm']
 
-        # get cls logits
-        cls_logits = logits[:, 0, :]
+        # Pass through linear layer
+        logits = self.clf_layer(out['cell_token'])
 
-        return cls_logits.max(1).values
+        return logits.max(1).values
 
 
 ####################################

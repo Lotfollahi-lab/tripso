@@ -330,6 +330,8 @@ class gpEval:
         '''
 
         os.makedirs(os.path.join(output_dir, 'cell_metrics'), exist_ok=True)
+        ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
+        os.makedirs(ckpt_dir, exist_ok=True)
 
         # set seed for reproducibility
         seed = 0
@@ -366,8 +368,17 @@ class gpEval:
             name=f'{emb_label}_{y_label.replace("_id", "")}',
         )
 
+        checkpoint_callback = pl.callbacks.ModelCheckpoint(
+            monitor='val_loss',
+            dirpath=ckpt_dir,
+            filename=f'{y_label.replace("_id", "")}_{emb_label}_{task}',
+            save_top_k=1,
+            mode='min',
+        )
+
         trainer = pl.Trainer(
             max_epochs=n_epochs,
+            callbacks=[checkpoint_callback],
             devices=-1,
             accelerator='auto',
             logger=logger,
@@ -847,6 +858,15 @@ def calculate_cell_token_attribution_scores(
     output_dir,
     global_loss,
     reconstruction_loss,
+    # for EmbEvaluator
+    n_classes,
+    y_label,
+    emb_label,
+    task,
+    use_embedding=False,
+    pretrained_emb=None,
+    vocab_size=None,
+    embedding_dim=None,
 ):
     # --------------------------
     # Set seed
@@ -880,6 +900,9 @@ def calculate_cell_token_attribution_scores(
 
     dataloader = getattr(emb_dm, data_split + '_dataloader')()
 
+    if total_n_cells is None:
+        total_n_cells = len(dataloader)
+
     # --------------------------
     # Set up model
     # --------------------------
@@ -912,7 +935,60 @@ def calculate_cell_token_attribution_scores(
         strict=False,
     )
 
-    imodel = iGlobalWrapper(gp_transformer)
+    # Load classification layer
+    # or train if not available
+    ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
+    clf_ckpt = f'{y_label.replace("_id", "")}_{emb_label}_{task}'
+    if os.path.exists(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')):
+        clf_layer = EmbEvaluator.load_from_checkpoint(
+            os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
+        )
+        # (
+        #     n_classes=n_classes,
+        #     emb_dim=gp_latent_size,
+        #     task=task,
+        #     lr=1e-3,
+        #     emb_label=emb_label,
+        #     y_label=y_label,
+        #     output_dir=output_dir,
+        # )
+
+    else:
+        gpEval.evaluate_embeddings(
+            n_classes=n_classes,
+            y_label=y_label,
+            folder_path=dataset_path,
+            output_dir=output_dir,
+            emb_label=emb_label,
+            task=task,
+            emb_dim=gp_latent_size,
+            lr=1e-3,
+            batch_size=128,
+            num_workers=1,
+            meta_labels=[y_label, y_label.replace('_id', '')],
+            data_type='dataset',
+            n_epochs=3,
+            continuous_cov=[],
+        )
+
+        clf_layer = EmbEvaluator(
+            n_classes=n_classes,
+            emb_dim=gp_latent_size,
+            task=task,
+            lr=1e-3,
+            emb_label=emb_label,
+            y_label=y_label,
+            output_dir=output_dir,
+        ).load_from_checkpoint(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt'))
+
+    imodel = iGlobalWrapper(
+        gp_transformer,
+        clf_layer,
+        use_embedding=use_embedding,
+        pretrained_emb=pretrained_emb,
+        vocab_size=len(gpdb.columns),
+        embedding_dim=gp_latent_size,
+    )
     imodel = imodel.to(device)
 
     # --------------------------

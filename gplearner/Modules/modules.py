@@ -404,6 +404,31 @@ class gpTransformerEncoder(nn.Module):
         return output
 
 
+class PretrainedEmbeddings(nn.Module):
+    '''
+    BertEmbedding style class for exploring LIG
+    Initialize nn.Embedding directly from embeddings
+    which are output from another part of the model
+    '''
+
+    def __init__(
+        self,
+        pretrained_emb,
+        pretrained_pos_emb,
+        vocab_size,
+        embedding_dim,
+    ):
+        super().__init__()
+        self.word_embeddings = nn.Embedding(vocab_size, embedding_dim).from_pretrained(
+            pretrained_emb
+        )
+        self.position_embeddings = pretrained_pos_emb
+
+    def forward(self):
+        embeddings = self.word_embeddings + self.position_embeddings
+        return embeddings
+
+
 if __name__ == '__main__':
     print('Testing the model')
     model = gpTransformerEncoder(
