@@ -321,7 +321,8 @@ def run_training(
     mode = mode.lower()
     if mode == 'geneformer':
         txdata = txDataModule(
-            folder=dataset_path, batch_size=batch_size, frac_for_training=frac_for_training
+            folder=dataset_path, batch_size=batch_size, frac_for_training=frac_for_training,
+            adata_path=adata_path, use_weighted_sampler=use_weighted_sampler, label_key=subsample_by
         )
     elif mode == 'scgpt':
         txdata = scgptDataModule()
