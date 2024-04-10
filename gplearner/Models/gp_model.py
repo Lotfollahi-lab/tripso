@@ -191,7 +191,7 @@ class scgptWrapper(nn.Module):
             mvc_decoder_style=mvc_decoder_style,
             ecs_threshold=ecs_threshold,
             explicit_zero_prob=explicit_zero_prob,
-            use_fast_transformer=False, # TODO: create new env on farm22 to add flash_transformer. change to True on farm5
+            use_fast_transformer=True, # TODO: create new env on farm22 to add flash_transformer. change to True on farm5
             fast_transformer_backend=fast_transformer_backend,
             pre_norm=config.pre_norm,
         )

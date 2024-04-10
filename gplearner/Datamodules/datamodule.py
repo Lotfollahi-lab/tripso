@@ -234,7 +234,7 @@ class scgptDataset(Dataset):
 class scgptDataModule(LightningDataModule):
     def __init__(
         self,
-        adata_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/gplearner_reproducibility/24-04-03_synthetic_clean/data/input_h5ad/24-04-03_synthetic_clean.h5ad',
+        adata_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/gplearner_reproducibility/24-04-03_synthetic_clean/data/input_h5ad/24-04-03_synthetic_clean_hvg.h5ad',
         batch_size=3,
         num_workers=1,
         shuffle=False,

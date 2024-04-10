@@ -283,7 +283,7 @@ def run_training(
             folder=dataset_path, batch_size=batch_size, frac_for_training=frac_for_training
         )
     elif mode == 'scgpt':
-        txdata = scgptDataModule()
+        txdata = scgptDataModule(batch_size=batch_size, num_workers=15)
     else:
         raise NotImplementedError()
 

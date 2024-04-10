@@ -225,7 +225,7 @@ class gpTransformerEncoder(nn.Module):
         attn_drop_rate=0.0,  # passed to attention module (attn_drop)
         drop_path_rate=0.0,  # no effect if only 1 block
         norm_layer=nn.LayerNorm,
-        use_pos_emb=True,
+        use_pos_emb=False,
         vocab_size=None,
     ):
         super().__init__()
