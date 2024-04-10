@@ -13,18 +13,28 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from scipy.sparse import csr_matrix
 from transformers import BertForMaskedLM
 
-from ..Modules.modules import gpTransformerEncoder
+from ..Modules.modules import Mlp, gpTransformerEncoder
 from ..Utils.geneformer_utils import EmbExtractor
-from ..Utils.utils import get_gp_tokens, pad_array
+from ..Utils.utils import (
+    bin_gene_expression,
+    get_gp_tokens,
+    pad_array,
+)
 
 from scgpt.model import TransformerModel
 from scgpt.tokenizer import GeneVocab
 ####################################
 # Geneformer
 ####################################
+
+GENE_NAME_FILE = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl'  # noqa
+GENEFORMER_MODEL_PATH = (
+    '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/'
+)
 
 
 class gfWrapper(nn.Module):
@@ -235,6 +245,9 @@ class gpWrapper(nn.Module):
         num_heads,
         mgm_mask_ratio,
         add_remaining_var,
+        use_flash,
+        model_type,
+        learn_new_gp,
     ):
         super().__init__()
 
@@ -243,6 +256,8 @@ class gpWrapper(nn.Module):
         self.num_heads = num_heads
         self.mgm_mask_ratio = mgm_mask_ratio
         self.gp_inputs = gp_inputs
+        self.model_type = model_type
+        self.learning_new_gp = learn_new_gp
 
         # Store all genes included in at least one GP
         self.all_gp_tokens = set()
@@ -281,6 +296,7 @@ class gpWrapper(nn.Module):
                     depth=self.n_blocks,
                     num_heads=self.num_heads,
                     mlm_masking_prob=self.mgm_mask_ratio,
+                    use_flash=use_flash,
                 )
                 for i in range(len(gp_inputs))
             ]
@@ -315,13 +331,6 @@ class gpWrapper(nn.Module):
                     num_heads=num_heads,
                     mlm_masking_prob=self.mgm_mask_ratio,
                 )
-            )
-
-        for i in range(len(self.gp_inputs)):
-            print(
-                'Number of genes in GP',
-                self.gp_inputs[i],
-                len(getattr(self, f'gp{i}_tokens')),
             )
 
     def build_input_matrix(
@@ -477,60 +486,70 @@ class gpWrapper(nn.Module):
         
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
-            (
-                emb_pad,
-                tokens_pad,
-                num_genes_per_cell,
-                attn_mask,
-            ) = self.build_input_matrix(
-                gf_emb,  # geneformer embeddings
-                input_dataset['input_ids'],
-                getattr(self, f'gp{i}_tokens'),
-                gp_idx=i,
-            )
-
-            # track number of genes per cell
-            # divide by GP length
-            num_genes_per_cell = num_genes_per_cell / len(
-                getattr(self, f'gp{i}_tokens')
-            )
-            num_genes_per_cell_list += [num_genes_per_cell]
-
-            # Encode tokens for encoding
-            tokens_pad_unencoded = tokens_pad
-
-            tokens_pad = (
-                tokens_pad.cpu()
-                .apply_(
-                    lambda x: getattr(self, f'gp{i}_tokens_encoded')[x]
-                    if x in getattr(self, f'gp{i}_tokens_encoded').keys()
-                    else -100
+            # when learning new GP, onyl do FW pass on new GP
+            if (
+                (self.training)
+                & (self.encoder[i].blocks[0].attn.qkv.weight.requires_grad is False)
+                & (self.model_type == 'Base')
+                # & (self.learning_new_gp) # commented out for backwards compatibility
+                # but would be good to have
+            ):
+                continue
+            else:
+                (
+                    emb_pad,
+                    tokens_pad,
+                    num_genes_per_cell,
+                    attn_mask,
+                ) = self.build_input_matrix(
+                    gf_emb,  # geneformer embeddings
+                    input_dataset['input_ids'],
+                    getattr(self, f'gp{i}_tokens'),
+                    gp_idx=i,
                 )
-                .to(emb_pad.device)
-            )
 
-            # get token GP representation, logits for gene level prediction,
-            # and gene_labels where masked genes = -100
-
-            encoder_output = self.encoder[i](
-                emb_pad,
-                attn_mask=attn_mask,
-                gene_labels=tokens_pad,
-                inference=inference,
-                return_attention=return_attention,
-                return_gene_embeddings=return_gene_embeddings,
-            )
-
-            gp_token_list.append(encoder_output['cls'])
-            logits_lm_list.append(encoder_output['logits_lm'])
-            gene_labels_list.append(encoder_output['gene_labels'])
-
-            if return_gene_embeddings:
-                gene_emb_list.append(encoder_output['gene_embeddings'])
-                gene_original_labels_list.append(tokens_pad_unencoded)
-                gp_labels_list.append(
-                    [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
+                # track number of genes per cell
+                # divide by GP length
+                num_genes_per_cell = num_genes_per_cell / len(
+                    getattr(self, f'gp{i}_tokens')
                 )
+                num_genes_per_cell_list += [num_genes_per_cell]
+
+                # Encode tokens for encoding
+                tokens_pad_unencoded = tokens_pad
+
+                tokens_pad = (
+                    tokens_pad.cpu()
+                    .apply_(
+                        lambda x: getattr(self, f'gp{i}_tokens_encoded')[x]
+                        if x in getattr(self, f'gp{i}_tokens_encoded').keys()
+                        else -100
+                    )
+                    .to(emb_pad.device)
+                )
+
+                # get token GP representation, logits for gene level prediction,
+                # and gene_labels where masked genes = -100
+
+                encoder_output = self.encoder[i](
+                    emb_pad,
+                    attn_mask=attn_mask,
+                    gene_labels=tokens_pad,
+                    inference=inference,
+                    return_attention=return_attention,
+                    return_gene_embeddings=return_gene_embeddings,
+                )
+
+                gp_token_list.append(encoder_output['cls'])
+                logits_lm_list.append(encoder_output['logits_lm'])
+                gene_labels_list.append(encoder_output['gene_labels'])
+
+                if return_gene_embeddings:
+                    gene_emb_list.append(encoder_output['gene_embeddings'])
+                    gene_original_labels_list.append(tokens_pad_unencoded)
+                    gp_labels_list.append(
+                        [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
+                    )
 
         # Concatenate tensors
         z = torch.stack(gp_token_list, dim=1)
@@ -687,7 +706,13 @@ class gpWrapper(nn.Module):
 
 class cellWrapper(nn.Module):
     def __init__(
-        self, gp_inputs, n_blocks, num_heads, gp_latent_size, global_masking_rate
+        self,
+        gp_inputs,
+        n_blocks,
+        num_heads,
+        gp_latent_size,
+        global_masking_rate,
+        use_flash,
     ):
         super().__init__()
 
@@ -702,6 +727,7 @@ class cellWrapper(nn.Module):
             depth=self.n_blocks,
             num_heads=self.num_heads,
             mlm_masking_prob=global_masking_rate,
+            use_flash=use_flash,
         )
 
     def build_input_matrix(self, z, num_genes_per_cell_list):
@@ -847,6 +873,82 @@ class cellWrapper(nn.Module):
 
 
 ####################################
+# Count reconstruction
+####################################
+
+
+class CountHead(nn.Module):
+    def __init__(
+        self,
+        loss_mode: str = 'mse',
+        n_genes: int = 25426,
+        d_model: int = 256,
+    ):
+        super().__init__()
+        self.loss_mode = loss_mode
+
+        self.mlp = Mlp(d_model, d_model)
+
+        if self.loss_mode == 'mse':
+            self.relu_output = nn.Sequential(nn.Linear(d_model, n_genes), nn.ReLU())
+
+        elif self.loss_mode == 'zinb':
+            self.linear_output = nn.Linear(d_model, n_genes)
+            self.softmax_output = nn.Sequential(
+                nn.Linear(d_model, n_genes), nn.Softmax(dim=-1)
+            )
+
+        elif self.loss_mode == 'nb':
+            self.softmax_output = nn.Sequential(
+                nn.Linear(d_model, n_genes), nn.Softmax(dim=-1)
+            )
+
+    def forward(self, x):
+        # use cls token for count prediction
+        count_outputs = {}
+        mlp_output = self.mlp(x)
+        mlp_output = F.normalize(mlp_output, dim=-1, p=2)
+        if self.loss_mode == 'mse':
+            count_outputs['count_lognorm'] = self.relu_output(mlp_output)
+        elif self.loss_mode == 'zinb':
+            count_outputs['count_mean'] = self.softmax_output(mlp_output)
+            count_outputs['count_dropout'] = self.linear_output(mlp_output)
+        elif self.loss_mode == 'nb':
+            count_outputs['count_mean'] = self.softmax_output(mlp_output)
+        return count_outputs
+
+
+class BinDecoder(nn.Module):
+    '''
+    Adapted from scGPT
+    https://github.com/bowang-lab/scGPT/blob/main/scgpt/model/model.py#L848
+    accessed 03.04.24
+
+    scGPT output has one dimension -> per gene
+    here we need to reconstruct bins for n genes
+
+    '''
+
+    def __init__(
+        self,
+        n_genes: int = 25426,
+        d_model: int = 256,
+    ):
+        super().__init__()
+
+        self.fc = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LeakyReLU(),
+            nn.Linear(d_model, d_model),
+            nn.LeakyReLU(),
+            nn.Linear(d_model, n_genes),
+        )
+
+    def forward(self, x):
+        return self.fc(x)
+
+
+####################################
 # Define model
 ####################################
 
@@ -870,11 +972,13 @@ class gpTransformerBase(nn.Module):
         num_heads=1,
         n_blocks=1,
         mgm_mask_ratio=0.5,
-        geneformer_model='/lustre/scratch126/cellgen/team292/mm58/'
-        'geneformer_endometrium/Geneformer/',
+        use_flash=False,
+        geneformer_model=GENEFORMER_MODEL_PATH,
         gf_layer_to_quant=-1,
         gene_token_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/token_dictionary.pkl',
         gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl',
+        model_type='Base',
+        learn_new_gp=False,
     ):
         """
         database :
@@ -960,7 +1064,7 @@ class gpTransformerBase(nn.Module):
         self.do_ensembl_conversion = do_ensembl_conversion
         self.n_blocks = n_blocks
         self.attn_dropout = attn_dropout
-        
+
         self.multi_gp_encoder = gpWrapper(
             database=self.gpdb,
             do_ensembl_conversion=self.do_ensembl_conversion,
@@ -973,6 +1077,9 @@ class gpTransformerBase(nn.Module):
             mgm_mask_ratio=self.mgm_mask_ratio,
             gp_inputs=gp_inputs,
             add_remaining_var=add_remaining_var,
+            use_flash=self.use_flash,
+            model_type=model_type,
+            learn_new_gp=learn_new_gp,
         )
 
     def forward(
@@ -1029,12 +1136,16 @@ class gpTransformerGlobal(gpTransformerBase):
         self,
         global_attn_heads=8,
         global_loss='supervised',
+        total_n_genes=25426,
+        reconstruction_loss='mse',
         supervised_labels: Optional[Dict] = None,
         global_masking_rate=0,
         global_n_blocks=1,
+        use_flash=False,
+        n_bins=10,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(use_flash=use_flash, model_type='Global', **kwargs)
         self.global_attn_heads = global_attn_heads
 
         self.global_loss = global_loss
@@ -1045,6 +1156,7 @@ class gpTransformerGlobal(gpTransformerBase):
             n_blocks=global_n_blocks,
             num_heads=self.global_attn_heads,
             global_masking_rate=global_masking_rate,
+            use_flash=use_flash,
         )
 
         if self.global_loss == 'supervised':
@@ -1067,6 +1179,20 @@ class gpTransformerGlobal(gpTransformerBase):
                 ]
             )
 
+        if self.global_loss == 'reconstruction':
+            self.reconstruction_loss = reconstruction_loss
+
+            if reconstruction_loss == 'binning':
+                self.n_bins = n_bins
+                self.count_head = BinDecoder(
+                    n_genes=total_n_genes, d_model=self.gp_latent_size
+                )
+
+            else:
+                self.count_head = CountHead(
+                    loss_mode=reconstruction_loss, n_genes=total_n_genes
+                )
+
     def forward(
         self,
         input_dataset,
@@ -1077,7 +1203,8 @@ class gpTransformerGlobal(gpTransformerBase):
         return_gf_cell_emb = True if self.global_loss == 'mse' else False
 
         if self.global_loss != 'masking':
-            inference = False
+            # no masking
+            inference = True
         else:
             if self.training:
                 inference = False
@@ -1103,6 +1230,18 @@ class gpTransformerGlobal(gpTransformerBase):
         elif self.global_loss == 'masking':
             base_output['gp_logits_lm'] = cell_output['gp_logits_lm']
             base_output['gp_labels'] = cell_output['gp_labels']
+
+        elif self.global_loss == 'reconstruction':
+            count_output = self.count_head(cell_output['cell_token'])
+            base_output['count_output'] = count_output
+
+            if self.reconstruction_loss == 'binning':
+                print('input dataset', input_dataset.keys())
+                binned = bin_gene_expression(
+                    input_dataset['counts'], n_bins=self.n_bins
+                )
+                binned = torch.tensor(binned).to(count_output.device)
+                base_output['true_bins'] = binned
 
         return base_output
 
@@ -1230,10 +1369,8 @@ class gfBaseline(gpTransformerBase):
         self,
         gene_counts_df,
         num_heads,
-        gene_token_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
-        '/Geneformer/geneformer/token_dictionary.pkl',
-        gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
-        '/Geneformer/geneformer/gene_name_id_dict.pkl',
+        gene_token_path=TOKEN_DICTIONARY_FILE,
+        gene_name_path=GENE_NAME_FILE,
         add_remaining_var=False,
         **kwargs,
     ):
@@ -1251,6 +1388,9 @@ class gfBaseline(gpTransformerBase):
             gene_name_path=gene_name_path,
             gp_inputs=self.gp_inputs,
             add_remaining_var=add_remaining_var,
+            use_flash=False,
+            model_type='Mean',
+            learn_new_gp=False,
         )
 
     def get_last_self_attn(self, input_dataset, gp):
@@ -1334,6 +1474,29 @@ class gfGlobal(gpTransformerGlobal):
         }
 
         return output
+
+
+####################################
+# Embedding evaluation
+####################################
+
+
+class EmbEvaluatorHead(nn.Module):
+    '''
+    Evaluate embeddings by training a classifier
+    '''
+
+    def __init__(
+        self,
+        emb_dim: int,
+        n_classes: int,
+    ):
+        super().__init__()
+
+        self.clf_head = nn.Linear(emb_dim, n_classes)
+
+    def forward(self, x):
+        return self.clf_head(x)
 
 
 if __name__ == '__main__':

@@ -22,6 +22,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..Utils import (
     drop_path,
@@ -51,6 +52,7 @@ class Mlp(nn.Module):
         hidden_features=None,
         out_features=None,
         act_layer=nn.GELU,
+        # act_layer = nn.ReLU,
         drop=0.0,
     ):
         super().__init__()
@@ -80,6 +82,7 @@ class Attention(nn.Module):
         qk_scale=None,
         attn_drop=0.0,
         proj_drop=0.0,
+        use_flash=False,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -90,8 +93,17 @@ class Attention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
+        self.use_flash = use_flash
 
     def forward(self, x, attn_mask, return_attention):
+        # for compatibility with previous versions
+        # if no use_flash attribute, set to false
+        if not hasattr(self, 'use_flash'):
+            self.use_flash = False
+
+        if self.use_flash:
+            return_attention = False
+
         # Attention mask is 0 for padding tokens (no attention)
         B, N, C = x.shape
 
@@ -102,33 +114,37 @@ class Attention(nn.Module):
         )
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
+        if self.use_flash:
+            with torch.backends.cuda.sdp_kernel(enable_flash=True):
+                # from https://discuss.pytorch.org/t/flash-attention/174955/14
+                attn_out = F.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    # attn_mask,
+                    scale=self.scale,
+                    dropout_p=0.0,
+                )
+                # if scale is None, default is 1/sqrt(dim)
 
-        # apply attention mask for padding tokens
-        # Mask rows:
-        attn = attn * attn_mask.unsqueeze(1).unsqueeze(
-            -1
-        )  # unsqueeze to add head dimension
-        # Mask columns:
-        attn = attn * attn_mask.unsqueeze(1).unsqueeze(1)
+            x = attn_out.transpose(1, 2).reshape(B, N, C)
 
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
+        else:
+            attn = (q @ k.transpose(-2, -1)) * self.scale
 
-        # nn.functional.scaled_dot_product_attention returns attn_weight @ value
+            # apply attention mask for padding tokens
+            # Mask rows:
+            attn = attn * attn_mask.unsqueeze(1).unsqueeze(
+                -1
+            )  # unsqueeze to add head dimension
+            # Mask columns:
+            attn = attn * attn_mask.unsqueeze(1).unsqueeze(1)
 
-        # with torch.backends.cuda.sdp_kernel(
-        #     enable_flash=True, enable_math=False, enable_mem_efficient=False
-        # ):
-        #     # from https://discuss.pytorch.org/t/flash-attention/174955/14
-        #     # attn_out = F.scaled_dot_product_attention(q, k, v,
-        #                                                scale = self.scale,
-        #                                                dropout_p=0.0)
-        #     # if scale is None, default is 1/sqrt(dim)
-        # attn_out = F.scaled_dot_product_attention(q, k, v)
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        # x = attn_out.transpose(1, 2).reshape(B, N, C)
+            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+
         x = self.proj(x)
         x = self.proj_drop(x)
 
@@ -136,7 +152,6 @@ class Attention(nn.Module):
             attn = None
 
         return x, attn
-        # return x
 
 
 class Block(nn.Module):
@@ -151,7 +166,9 @@ class Block(nn.Module):
         attn_drop=0.0,
         drop_path=0.0,
         act_layer=nn.GELU,
+        # act_layer=nn.ReLU,
         norm_layer=nn.LayerNorm,
+        use_flash=False,
     ):
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -163,6 +180,7 @@ class Block(nn.Module):
             qk_scale=qk_scale,
             attn_drop=attn_drop,
             proj_drop=drop,
+            use_flash=use_flash,
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -177,8 +195,8 @@ class Block(nn.Module):
     def forward(self, x, attn_mask, return_attention):
         y, attn = self.attn(
             self.norm1(x), attn_mask=attn_mask, return_attention=return_attention
-        )
-        # y = self.attn(self.norm1(x))
+        )  # attn is None when using flash attention
+        # y = self.attn(self.norm1(x), attn_mask=attn_mask)
 
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
@@ -227,6 +245,7 @@ class gpTransformerEncoder(nn.Module):
         norm_layer=nn.LayerNorm,
         use_pos_emb=True,
         vocab_size=None,
+        use_flash=False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -262,6 +281,7 @@ class gpTransformerEncoder(nn.Module):
                     attn_drop=attn_drop_rate,
                     drop_path=dpr[i],
                     norm_layer=norm_layer,
+                    use_flash=use_flash,
                 )
                 for i in range(depth)
             ]

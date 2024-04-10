@@ -34,6 +34,7 @@ def make_gpdb(
     overlap_threshold,
     max_gp_len,
     name_tag,
+    save_intermediate,
 ):
     """
     Main function for building gene program database
@@ -146,6 +147,13 @@ def make_gpdb(
             threshold_value,
             max_gp_len=max_gp_len,
             threshold_rare=10,
+        )
+
+    # Optionally save intermediate list
+    if save_intermediate:
+        gpdb.to_csv(
+            os.path.join(output_path, f'gpdb_{name_tag}_filtered_by_size.csv'),
+            index=False,
         )
 
     # Now remove gene sets with high overlap

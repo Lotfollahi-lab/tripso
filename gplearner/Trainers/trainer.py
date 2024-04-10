@@ -14,16 +14,26 @@ import scanpy as sc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from datasets import Dataset, concatenate_datasets
 from scipy.sparse import vstack
 from sklearn.metrics import classification_report
 
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
 from torch import optim
+from torchmetrics import MeanSquaredError, PearsonCorrCoef
 from torchmetrics.functional import pairwise_cosine_similarity
 
+from ..Metrics.metrics import evaluate_emd, evaluate_mmd
+from ..Models.gp_model import EmbEvaluatorHead
+from ..Utils.losses import (
+    mse_loss,
+    nb,
+    zinb,
+)
 from ..Utils.utils import (
     CosineLRwithWarmUp,
     ensembl_to_name,
+    one_hot_encoder,
     token_to_gene,
     wrangle_classification_report,
 )
@@ -99,7 +109,8 @@ class scGPL(pl.LightningModule):
         optimizer: Union[
             optim.Adam,
             optim.SGD,
-            optim.AdamW,  # DeepSpeedCPUAdam
+            optim.AdamW,
+            # DeepSpeedCPUAdam
         ] = optim.AdamW,
         lr_scheduler='ReduceLROnPlateau',
         total_epochs: int = 100,
@@ -109,6 +120,13 @@ class scGPL(pl.LightningModule):
         return_attention: bool = False,
         gp: Optional[str] = None,
         return_classification_report: bool = False,
+        total_n_genes: int = 20_000,
+        n_condition_combined: int = 1,  # number of batches for zinb and nb
+        test_random_baseline: bool = False,
+        finetune_lr: float = 1e-5,
+        use_finetune_lr: bool = False,
+        save_emb: bool = False,
+        split_label: str = 'train',
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -119,6 +137,7 @@ class scGPL(pl.LightningModule):
         self.model_type = model_type
         self.global_loss = global_loss
         self.return_classification_report = return_classification_report
+        self.test_random_baseline = test_random_baseline
 
         if use_gp_similarity_loss and gp_similarity is None:
             raise ValueError(
@@ -143,12 +162,32 @@ class scGPL(pl.LightningModule):
                     'or a single float value for all tasks'
                 )
 
+        if (self.model_type == 'Global') & (self.global_loss == 'reconstruction'):
+            self.reconstruction_loss = self.model.reconstruction_loss
+            if self.reconstruction_loss in ['nb', 'zinb']:
+                self.n_conditions_combined = n_condition_combined
+                self.theta = torch.nn.Parameter(
+                    torch.randn(total_n_genes, self.n_conditions_combined)
+                )
+            else:
+                self.theta = None
+
+            self.metric = nn.ModuleDict(
+                {
+                    'mse': MeanSquaredError(),
+                }
+            )
+
         # configuring optimizers
         self.lr = lr
         self.lr_scheduler = lr_scheduler
         self.total_epochs = total_epochs
         self.weight_decay = weight_decay
         self.optimizer_class = optimizer
+        self.finetune_lr = finetune_lr
+        self.use_finetune_lr = use_finetune_lr
+        self.save_emb = save_emb
+        self.split_label = split_label
 
         # Initialise list to append loss and accuracy
         for stage in ['train', 'val', 'test']:
@@ -168,6 +207,10 @@ class scGPL(pl.LightningModule):
                         setattr(self, f'{stage}_{t}_loss', [])
                         getattr(self, f'{stage}_clf_pred')[t] = []
                         getattr(self, f'{stage}_clf_true')[t] = []
+
+                if self.global_loss == 'reconstruction':
+                    setattr(self, f'{stage}_true_counts_list', [])
+                    setattr(self, f'{stage}_pred_counts_list', [])
 
             setattr(self, f'{stage}_loss', [])
 
@@ -191,6 +234,9 @@ class scGPL(pl.LightningModule):
         self.return_attention = return_attention
         self.gp = gp
 
+        # for saving embeddings
+        self.emb_dataset = None
+
     def forward(self, x):
         out = self.model(
             x,
@@ -202,6 +248,11 @@ class scGPL(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         loss_output = self.compute_loss(batch)
+
+        # exit function if we've already saved embeddings
+        if loss_output is None:
+            return None
+
         loss_per_gp = loss_output['loss_per_gp']
         loss = loss_output['total_loss']
 
@@ -292,6 +343,18 @@ class scGPL(pl.LightningModule):
                     sync_dist=True,
                 )
 
+            elif self.global_loss == 'reconstruction':
+                reconstruction_loss = loss_output['reconstruction_loss']
+                self.log(
+                    f'train/{self.model.reconstruction_loss}_loss',
+                    reconstruction_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+
         if self.use_gp_similarity_loss:
             gp_similarity_loss = loss_output['gp_similarity_loss']
             self.train_gp_similarity_loss.append(gp_similarity_loss)
@@ -321,41 +384,158 @@ class scGPL(pl.LightningModule):
                 for t in self.model.supervised_tasks:
                     setattr(self, f'{stage}_{t}_loss', [])
 
-        setattr(self, f'{stage}_loss', [])
+            if self.global_loss == 'reconstruction':
+                # return Pearson correlation coefficient
+                true_counts = torch.cat(self.train_true_counts_list).float()
+                pred_counts = torch.cat(self.train_pred_counts_list)
 
-    def validation_step(self, batch, batch_idx):
-        if (self.model_type == 'Global') & (self.global_loss == 'supervised'):
-            output = self.forward(batch)
+                # Pearson correlation coefficient
+                self.metric['pearson_train'] = PearsonCorrCoef(
+                    num_outputs=true_counts.shape[0]
+                ).to(true_counts.device)
 
-            # track true labels and predictions
-            for t in self.model.supervised_tasks:
-                self.val_clf_pred[t] += output[f'logits_{t}']
-                self.val_clf_true[t] += batch[t]
-
-    def on_validation_epoch_end(self):
-        if (self.model_type == 'Global') & (self.global_loss == 'supervised'):
-            for t in self.model.supervised_tasks:
-                # calculate accuracy
-                pred = torch.stack(self.val_clf_pred[t], dim=-1).T
-                true = torch.cat(
-                    [torch.unsqueeze(tensor, 0) for tensor in self.val_clf_true[t]]
-                )
-                acc = (pred.argmax(dim=1) == true).float().mean()
+                pearson = self.metric['pearson_train'](pred_counts.T, true_counts.T)
+                mean_pearson = torch.mean(pearson)
                 self.log(
-                    f'val/{t}_accuracy',
-                    acc,
-                    on_step=False,
+                    'train/pearson',
+                    mean_pearson,
                     on_epoch=True,
                     prog_bar=True,
                     logger=True,
-                    sync_dist=True,
+                )
+                mse = self.metric['mse'](pred_counts, true_counts)
+                mean_mse = torch.mean(mse)
+                self.log(
+                    'train/mse',
+                    mean_mse,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
                 )
 
-            self.val_clf_pred = {t: [] for t in self.model.supervised_tasks}
-            self.val_clf_true = {t: [] for t in self.model.supervised_tasks}
+        # empty lists
+        self.train_true_counts_list = []
+        self.train_pred_counts_list = []
+
+        setattr(self, f'{stage}_loss', [])
+
+    def validation_step(self, batch, batch_idx):
+        # Optionally save embeddings
+        if self.save_emb:
+            output = self.forward(batch)
+
+            emb_dict = {}
+
+            for i, gp in enumerate(self.model.gp_inputs):
+                emb_dict[gp] = output['z'][:, i, :].detach().cpu()
+
+            if self.model_type == 'Global':
+                emb_dict['cell_token'] = output['cell_token'].detach().cpu()
+
+            # metadata
+            for k, v in batch.items():
+                if k != 'input_ids':
+                    emb_dict[k] = v
+
+            emb = Dataset.from_dict(emb_dict)
+
+            if self.emb_dataset is None:
+                self.emb_dataset = emb
+            else:
+                self.emb_dataset = concatenate_datasets([self.emb_dataset, emb])
+
+            return None
+
+        if self.model_type == 'Global':
+            if self.global_loss == 'supervised':
+                output = self.forward(batch)
+
+                # track true labels and predictions
+                for t in self.model.supervised_tasks:
+                    self.val_clf_pred[t] += output[f'logits_{t}']
+                    self.val_clf_true[t] += batch[t]
+
+            elif self.global_loss == 'reconstruction':
+                output = self.forward(batch)
+
+                if self.model.reconstruction_loss in ['mse']:
+                    self.val_pred_counts_list.append(
+                        output['count_output']['count_lognorm']
+                    )
+                    self.val_true_counts_list.append(batch['counts'])
+
+                if self.model.reconstruction_loss in ['nb', 'zinb']:
+                    self.val_pred_counts_list.append(
+                        output['count_output']['count_mean']
+                    )
+                    self.val_true_counts_list.append(batch['counts'])
+
+                if self.model.reconstruction_loss == 'binning':
+                    self.val_pred_counts_list.append(output['count_output'])
+                    self.val_true_counts_list.append(output['true_bins'])
+
+    def on_validation_epoch_end(self):
+        if self.save_emb:
+            output_path = os.path.join(self.output_dir, 'embeddings')
+            os.makedirs(output_path, exist_ok=True)
+            output_name = os.path.join(output_path, f'{self.split_label}_set')
+            self.emb_dataset.save_to_disk(output_name)
+            self.emb_dataset = None
+            return None
+
+        if self.model_type == 'Global':
+            if self.global_loss == 'supervised':
+                for t in self.model.supervised_tasks:
+                    # calculate accuracy
+                    pred = torch.stack(self.val_clf_pred[t], dim=-1).T
+                    true = torch.cat(
+                        [torch.unsqueeze(tensor, 0) for tensor in self.val_clf_true[t]]
+                    )
+                    acc = (pred.argmax(dim=1) == true).float().mean()
+                    self.log(
+                        f'val/{t}_accuracy',
+                        acc,
+                        on_step=False,
+                        on_epoch=True,
+                        prog_bar=True,
+                        logger=True,
+                        sync_dist=True,
+                    )
+
+                self.val_clf_pred = {t: [] for t in self.model.supervised_tasks}
+                self.val_clf_true = {t: [] for t in self.model.supervised_tasks}
+
+            elif self.global_loss == 'reconstruction':
+                # return Pearson correlation coefficient
+                true_counts = torch.cat(self.val_true_counts_list).float()
+                pred_counts = torch.cat(self.val_pred_counts_list)
+
+                self.metric['pearson_val'] = PearsonCorrCoef(
+                    num_outputs=true_counts.shape[0]
+                ).to(true_counts.device)
+
+                pearson = self.metric['pearson_val'](pred_counts.T, true_counts.T)
+
+                mean_pearson = torch.mean(pearson)
+                self.log(
+                    'val/pearson',
+                    mean_pearson,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                )
+
+                mse = self.metric['mse'](pred_counts, true_counts)
+                mean_mse = torch.mean(mse)
+                self.log('val/mse', mean_mse, on_epoch=True, prog_bar=True, logger=True)
+
+                # reset lists
+                self.val_true_counts_list = []
+                self.val_pred_counts_list = []
 
     def _test_step_cell(self, batch, batch_idx):
         output = self.forward(batch)
+
         self.gp_cls.append(output['z'])
 
         for k, v in batch.items():
@@ -372,6 +552,18 @@ class scGPL(pl.LightningModule):
             if self.global_loss == 'supervised':
                 for t in self.model.supervised_tasks:
                     self.test_clf_pred[t].append(output[f'logits_{t}'])
+
+            if self.test_random_baseline:
+                # store predicted counts and true counts
+                self.test_true_counts_list.append(batch['counts'])
+                if self.model.reconstruction_loss in ['mse']:
+                    self.test_pred_counts_list.append(
+                        output['count_output']['count_lognorm']
+                    )
+                if self.model.reconstruction_loss in ['nb', 'zinb']:
+                    self.test_pred_counts_list.append(
+                        output['count_output']['count_mean']
+                    )
 
     def _test_step_genes(self, batch, batch_idx):
         output = self.forward(batch)
@@ -410,6 +602,138 @@ class scGPL(pl.LightningModule):
             self._test_step_cell(batch, batch_idx)
 
     def _end_test_epoch_cell(self):
+        # optionally check count reconstruction metrics
+        if self.test_random_baseline:
+            # return Pearson correlation coefficient
+            true_counts = torch.cat(self.test_true_counts_list).float()
+            pred_counts = torch.cat(self.test_pred_counts_list)
+
+            print('True counts max value:', true_counts.max())
+            print('Predicted counts max value:', pred_counts.max())
+
+            # shuffle the counts
+            true_counts_shuffled = true_counts[torch.randperm(true_counts.size(0))]
+
+            # Pearson
+            self.metric['pearson_val'] = PearsonCorrCoef(
+                num_outputs=true_counts.shape[0]
+            ).to(true_counts.device)
+
+            pearson = self.metric['pearson_val'](pred_counts.T, true_counts.T)
+            mean_pearson = torch.mean(pearson)
+
+            pearson_shuffled = self.metric['pearson_val'](
+                pred_counts.T, true_counts_shuffled.T
+            )
+            mean_pearson_shuffled = torch.mean(pearson_shuffled)
+
+            # Pearson correlation for non zero genes
+            n_cells, n_genes = pred_counts.shape
+            mean_pearson_non_zero = []
+
+            for cell_idx in range(n_cells):
+                # For each cell, identify non-zero genes
+                non_zero_genes = true_counts[cell_idx, :] > 0
+
+                # Filter out zero-expression genes for this cell
+                # in both pred and true counts
+                pred_non_zero = pred_counts[cell_idx, non_zero_genes]
+                true_non_zero = true_counts[cell_idx, non_zero_genes]
+
+                if (
+                    len(pred_non_zero) > 1
+                ):  # Ensure there's more than one gene to calculate Pearson correlation
+                    # Calculate Pearson correlation for the non-zero genes in this cell
+                    pearson_corr = torch.corrcoef(
+                        torch.stack((pred_non_zero, true_non_zero))
+                    )[0, 1]
+                    mean_pearson_non_zero.append(pearson_corr)
+
+            # Compute the mean Pearson correlation across all cells
+            mean_pearson_non_zero = torch.tensor(mean_pearson_non_zero).mean()
+
+            # MSE
+            mse = self.metric['mse'](pred_counts, true_counts)
+            mean_mse = torch.mean(mse)
+
+            mse_shuffled = self.metric['mse'](pred_counts, true_counts_shuffled)
+            mean_mse_shuffled = torch.mean(mse_shuffled)
+
+            # set up anndata object for subsetting by condition
+            meta_dict = self.cell_metadata
+
+            meta_dict.pop('counts', None)
+            meta_dict.pop('size_factor', None)
+
+            for k, v in meta_dict.items():
+                if isinstance(v[0], torch.Tensor):
+                    meta_dict[k] = torch.cat(v).cpu().numpy().tolist()
+                else:
+                    # flatten list of lists
+                    meta_dict[k] = [item for sublist in v for item in sublist]
+
+            meta = pd.DataFrame(meta_dict)
+
+            if 'batch_key' not in meta.columns:
+                meta['batch_key'] = 'single_condition'
+
+            adata_true = sc.AnnData(X=true_counts.cpu().numpy(), obs=meta)
+            adata_pred = sc.AnnData(X=pred_counts.cpu().numpy(), obs=meta)
+
+            mmd = evaluate_mmd(adata_true, adata_pred, condition_key='batch_key')
+
+            mmd.to_csv(os.path.join(self.output_dir, 'global_recon_mmd.csv'))
+
+            emd = evaluate_emd(adata_true, adata_pred, condition_key='batch_key')
+            emd.to_csv(os.path.join(self.output_dir, 'global_recon_emd.csv'))
+
+            # count zero values in true and predicted
+            true_zeros = torch.sum(true_counts == 0).item()
+            pred_zeros = torch.sum(pred_counts == 0).item()
+            true_prop_zeros = true_zeros / true_counts.numel()
+            pred_prop_zeros = pred_zeros / pred_counts.numel()
+
+            # write to disk
+            metrics_df = pd.DataFrame(
+                {
+                    'metric': [
+                        'pearson',
+                        'pearson_shuffled',
+                        'pearson_non_zero',
+                        'mse',
+                        'mse_shuffled',
+                        'true_zeros',
+                        'pred_zeros',
+                        'true_prop_zeros',
+                        'pred_prop_zeros',
+                        'max true counts',
+                        'max pred counts',
+                    ],
+                    'value': [
+                        mean_pearson.item(),
+                        mean_pearson_shuffled.item(),
+                        mean_pearson_non_zero.item(),
+                        mean_mse.item(),
+                        mean_mse_shuffled.item(),
+                        true_zeros,
+                        pred_zeros,
+                        true_prop_zeros,
+                        pred_prop_zeros,
+                        true_counts.max().item(),
+                        pred_counts.max().item(),
+                    ],
+                }
+            )
+
+            metrics_df.to_csv(
+                os.path.join(self.output_dir, 'random_baseline_metrics.csv'),
+                index=False,
+            )
+
+            return metrics_df
+
+        # Main function: saving GP embeddings
+
         gp_emb = torch.concat(self.gp_cls, dim=0).cpu().numpy()
 
         # make 2D for annData input
@@ -475,6 +799,13 @@ class scGPL(pl.LightningModule):
 
         adata.var_names = gp_labels
         adata.var['gp_idx'] = adata.var_names
+
+        # change back missing values
+        for column in adata.obs.columns:
+            adata.obs[column] = np.where(
+                adata.obs[column] == ' ', np.nan, adata.obs[column]
+            )
+
         adata.write_h5ad(os.path.join(self.output_dir, 'adata_gp_embedding.h5ad'))
 
         sc.pp.neighbors(adata, use_rep='X')
@@ -486,6 +817,12 @@ class scGPL(pl.LightningModule):
             bdata = sc.AnnData(X=cell_token, obs=meta)
             sc.pp.neighbors(bdata, use_rep='X')
             sc.tl.umap(bdata, min_dist=0.4)
+
+            for column in bdata.obs.columns:
+                bdata.obs[column] = np.where(
+                    bdata.obs[column] == ' ', np.nan, bdata.obs[column]
+                )
+
             bdata.write_h5ad(os.path.join(self.output_dir, 'adata_cell_embedding.h5ad'))
 
         # reset
@@ -502,8 +839,6 @@ class scGPL(pl.LightningModule):
         gp_labels = np.array(
             [item for sublist in self.gp_labels for item in sublist]
         ).flatten()
-        # gp_labels = [item for sublist in self.gp_labels for item in sublist]
-        # gp_labels = torch.cat(self.gp_labels, dim=0).cpu().numpy()
 
         # Create anndata object for clustering and visualisation
         adata = sc.AnnData(X=x_scgpl)
@@ -679,6 +1014,27 @@ class scGPL(pl.LightningModule):
                 holder['cell_masking_loss'] = cell_masking_loss
                 loss += cell_masking_loss
 
+            elif self.global_loss == 'reconstruction':
+                reconstruction_loss = self.compute_count_loss(output, batch)
+                holder['reconstruction_loss'] = reconstruction_loss
+                loss += reconstruction_loss
+
+                if self.model.reconstruction_loss in ['mse']:
+                    self.train_pred_counts_list.append(
+                        output['count_output']['count_lognorm']
+                    )
+                    self.train_true_counts_list.append(batch['counts'])
+
+                if self.model.reconstruction_loss in ['nb', 'zinb']:
+                    self.train_pred_counts_list.append(
+                        output['count_output']['count_mean']
+                    )
+                    self.train_true_counts_list.append(batch['counts'])
+
+                if self.model.reconstruction_loss in ['binning']:
+                    self.train_pred_counts_list.append(output['count_output'])
+                    self.train_true_counts_list.append(output['true_bins'])
+
         holder['total_loss'] = loss
 
         return holder
@@ -701,6 +1057,73 @@ class scGPL(pl.LightningModule):
     def compute_clf_loss(self, logits, labels):
         return F.cross_entropy(logits, labels)
 
+    def compute_count_loss(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        batch: Dict[str, torch.Tensor],
+    ):
+        true_counts = batch['counts']
+        batch_size_factor = torch.tensor(batch['size_factor']).to(true_counts.device)
+
+        if self.model.reconstruction_loss == 'mse':
+            loss = (
+                mse_loss(outputs['count_output']['count_lognorm'], true_counts)
+                .sum(dim=-1)
+                .mean()
+                .float()
+            )
+            return loss
+
+        elif self.model.reconstruction_loss == 'zinb':
+            dec_mean_gamma, dec_dropout = (
+                outputs['count_output']['count_mean'],
+                outputs['count_output']['count_dropout'],
+            )
+            size_factor_view = batch_size_factor.unsqueeze(1).expand(
+                dec_mean_gamma.size(0), dec_mean_gamma.size(1)
+            )
+            dec_mean = dec_mean_gamma * size_factor_view
+
+            dispersion = F.linear(
+                one_hot_encoder(batch['batch_key_id'], self.n_conditions_combined),
+                self.theta,
+            )
+            dispersion = torch.exp(dispersion)
+            loss = (
+                -zinb(x=true_counts, mu=dec_mean, theta=dispersion, pi=dec_dropout)
+                .sum(dim=-1)
+                .mean()
+            )
+            return loss
+
+        elif self.model.reconstruction_loss == 'nb':
+            dec_mean_gamma = outputs['count_output']['count_mean']
+            size_factor_view = batch_size_factor.unsqueeze(1).expand(
+                dec_mean_gamma.size(0), dec_mean_gamma.size(1)
+            )
+            dec_mean = dec_mean_gamma * size_factor_view
+            dispersion = F.linear(
+                one_hot_encoder(batch['batch_key_id'], self.n_conditions_combined),
+                self.theta,
+            )
+            dispersion = torch.exp(dispersion)
+            loss = -nb(x=true_counts, mu=dec_mean, theta=dispersion).sum(dim=-1).mean()
+            return loss
+
+        elif self.reconstruction_loss == 'binning':
+            pred = outputs['count_output']
+            true = outputs['true_bins'].float()
+
+            # calcualte mse loss
+            loss = F.mse_loss(pred, true)
+
+            return loss
+
+        else:
+            raise ValueError(
+                'Reconstruction loss not supported' 'Please choose from mse, nb or zinb'
+            )
+
     def configure_optimizers(self):
         # Define optimizer and may be consider weight decay
         # to improve generalization L2 regularization
@@ -709,15 +1132,21 @@ class scGPL(pl.LightningModule):
         params = list(self.model.named_parameters())
 
         def add_custom_lr(n):
-            return 'clf_head' in n
+            return 'multi_gp_encoder' in n
 
-        grouped_parameters = [
-            {'params': [p for n, p in params if not add_custom_lr(n)], 'lr': self.lr},
-            {
-                'params': [p for n, p in params if add_custom_lr(n)],
-                'lr': self.lr * 1e-2,
-            },
-        ]
+        if self.use_finetune_lr:
+            grouped_parameters = [
+                {
+                    'params': [p for n, p in params if add_custom_lr(n)],
+                    'lr': self.lr,
+                },
+                {
+                    'params': [p for n, p in params if not add_custom_lr(n)],
+                    'lr': self.finetune_lr,
+                },
+            ]
+        else:
+            grouped_parameters = [{'params': [p for n, p in params], 'lr': self.lr}]
 
         optimizer = self.optimizer_class(
             grouped_parameters, lr=self.lr, weight_decay=self.weight_decay
@@ -759,6 +1188,246 @@ class scGPL(pl.LightningModule):
                 'name': None,
             },
         }
+
+
+########################################
+# For evaluating learned embeddings
+########################################
+
+
+class EmbEvaluator(pl.LightningModule):
+    def __init__(self, n_classes, emb_dim, task, lr, emb_label, y_label, output_dir):
+        super().__init__()
+
+        self.evaluator_head = EmbEvaluatorHead(emb_dim, n_classes)
+        self.emb_label = emb_label
+        self.y_label = y_label
+        self.task = task
+        self.output_dir = output_dir
+
+        if task == 'classification':
+            self.loss_fn = nn.CrossEntropyLoss()
+        elif task == 'regression':
+            self.loss_fn = nn.MSELoss()
+        else:
+            raise ValueError('Task must be either classification or regression')
+
+        self.lr = lr
+
+        # for tracking
+        self.y_unencoded = []
+        for stage in ['train', 'val', 'test']:
+            setattr(self, f'{stage}_pred', [])
+            setattr(self, f'{stage}_true', [])
+
+    def training_step(self, batch, batch_idx):
+        x = batch[self.emb_label]
+        y = batch[self.y_label]
+
+        y_out = self.evaluator_head(x)
+
+        loss = self.loss_fn(y_out, y)
+
+        self.log(
+            'train_loss',
+            loss,
+            on_step=True,
+            on_epoch=True,
+            logger=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+
+        self.train_pred.append(y_out)
+        self.train_true.append(y)
+
+        return loss
+
+    def on_train_epoch_end(self):
+        # calculate accuracy
+        if self.task == 'classification':
+            pred = torch.cat(self.train_pred)
+            true = torch.cat(self.train_true)
+            acc = (pred.argmax(dim=1) == true).float().mean()
+            self.log(
+                'train_accuracy',
+                acc,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
+
+        elif self.task == 'regression':
+            pred = torch.cat(self.train_pred)
+            true = torch.cat(self.train_true)
+            mse = self.loss_fn(pred, true)
+            self.log('train_mse', mse, on_epoch=True, prog_bar=True, logger=True)
+
+            # calculate pearson correlation
+            pearson = torch.corrcoef(pred, true)[0, 1]
+            self.log(
+                'train_pearson', pearson, on_epoch=True, prog_bar=True, logger=True
+            )
+
+        # reset
+        self.train_pred = []
+        self.train_true = []
+
+    def validation_step(self, batch, batch_idx):
+        x = batch[self.emb_label]
+
+        y = batch[self.y_label]
+
+        y_out = self.evaluator_head(x)
+
+        loss = self.loss_fn(y_out, y)
+        self.log(
+            'val_loss',
+            loss,
+            on_step=True,
+            on_epoch=True,
+            logger=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+
+        self.val_pred.append(y_out)
+        self.val_true.append(y)
+
+        return loss
+
+    def on_validation_epoch_end(self):
+        # calculate accuracy
+        if self.task == 'classification':
+            pred = torch.cat(self.val_pred)
+            true = torch.cat(self.val_true)
+            acc = (pred.argmax(dim=1) == true).float().mean()
+            self.log('val_accuracy', acc, on_epoch=True, prog_bar=True, logger=True)
+
+        elif self.task == 'regression':
+            pred = torch.cat(self.val_pred)
+            true = torch.cat(self.val_true)
+            mse = self.loss_fn(pred, true)
+            self.log('val_mse', mse, on_epoch=True, prog_bar=True, logger=True)
+
+            # calculate pearson correlation
+            pearson = torch.corrcoef(pred, true)[0, 1]
+            self.log('val_pearson', pearson)
+
+        # reset
+        self.val_pred = []
+        self.val_true = []
+
+    def test_step(self, batch, batch_idx):
+        x = batch[self.emb_label]
+        y = batch[self.y_label]
+
+        label_name = self.y_label
+        label_name = label_name.replace('_id', '')
+        y_unencoded = batch[label_name]
+
+        y_out = self.evaluator_head(x)
+
+        loss = self.loss_fn(y_out, y)
+
+        self.log(
+            'test_loss',
+            loss,
+            on_step=True,
+            on_epoch=True,
+            logger=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+
+        self.test_pred.append(y_out)
+        self.test_true.append(y)
+        self.y_unencoded += y_unencoded
+
+        return loss
+
+    def on_test_epoch_end(self):
+        # calculate accuracy
+        if self.task == 'classification':
+            pred = torch.cat(self.test_pred)
+            true = torch.cat(self.test_true)
+            acc = (pred.argmax(dim=1) == true).float().mean()
+            self.log('test_accuracy', acc)
+
+            # output classification report
+            true_classes = true.cpu().numpy()
+            predicted_classes = pred.argmax(dim=1).cpu().numpy()
+            report = classification_report(
+                true_classes, predicted_classes, output_dict=True
+            )
+
+            output_df = wrangle_classification_report(report)
+
+            # convert labels back to original strings
+            original_labels = self.y_unencoded
+            conversion_df = pd.DataFrame(
+                {
+                    'encoded': true_classes,
+                    'original': original_labels,
+                }
+            ).drop_duplicates()
+
+            conversion_dict = {
+                str(k): v
+                for k, v in zip(conversion_df['encoded'], conversion_df['original'])
+            }
+
+            output_df = output_df[
+                ~output_df['output_class'].isin(['macro avg', 'weighted avg'])
+            ]
+            output_df['output_class'] = output_df['output_class'].astype(str)
+            output_df['output_class'] = output_df['output_class'].map(conversion_dict)
+
+            output_df.to_csv(
+                os.path.join(
+                    self.output_dir,
+                    f'cell_metrics/{self.y_label}_from_{self.emb_label}.csv',
+                ),
+                index=False,
+            )
+
+        elif self.task == 'regression':
+            pred = torch.cat(self.test_pred)
+            true = torch.cat(self.test_true)
+            mse = self.loss_fn(pred, true)
+            self.log('test_mse', mse)
+
+            # calculate pearson correlation
+            pearson = torch.corrcoef(pred, true)[0, 1]
+            self.log('test_pearson', pearson)
+
+            # output to csv
+            df = pd.DataFrame(
+                {
+                    'MSE': [mse.item()],
+                    'Pearson': [pearson.item()],
+                    'Max true': [true.max().item()],
+                    'Max pred': [pred.max().item()],
+                    'Min true': [true.min().item()],
+                    'Min pred': [pred.min().item()],
+                }
+            )
+
+            df.to_csv(
+                os.path.join(
+                    self.output_dir,
+                    f'cell_metrics/{self.y_label}_from_{self.emb_label}.csv',
+                ),
+                index=False,
+            )
+
+        # reset
+        self.test_pred = []
+        self.test_true = []
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        return optimizer
 
 
 if __name__ == '__main__':

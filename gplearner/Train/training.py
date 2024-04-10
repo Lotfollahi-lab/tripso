@@ -2,6 +2,7 @@ import datetime
 import os
 import random
 import uuid
+import warnings
 from typing import Literal, Optional
 
 import numpy as np
@@ -17,7 +18,7 @@ from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 
-from ..Datamodules.datamodule import txDataModule, scgptDataModule
+from ..Datamodules.datamodule import AnnDataset, txDataModule, scgptDataModule
 from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import find_latest_file
@@ -44,6 +45,7 @@ def run_training(
     gp_latent_size: int = 256,
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
+    finetune_lr: float = 1e-5,
     resume_training: Optional[bool] = False,
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
@@ -60,6 +62,12 @@ def run_training(
     learn_new_gp: Optional[bool] = False,
     gp_to_learn: list = ['novel_gp'],
     global_n_blocks: int = 1,
+    reconstruction_loss: Optional[str] = 'mse',
+    adata_path: Optional[str] = None,
+    use_flash: Optional[bool] = False,
+    weight_decay: float = 0.0,
+    use_weighted_sampler: Optional[bool] = False,
+    subsample_by: Optional[str] = 'cell_type',
 ):
     """
     Wrapper function for training gpLearner model
@@ -149,11 +157,15 @@ def run_training(
         list of GP to learn if learn_new_gp is True
     global_n_blocks : int
         number of transformer blocks for final transformer block
+    use_flash:
+        whether to use flash attention in transformer block
 
     """
     ##########################################
     # Setup
     ##########################################
+
+    torch.set_float32_matmul_precision('medium')
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -243,6 +255,8 @@ def run_training(
                 'frac_for_training': frac_for_training,
                 'use_gp_similarity_loss': gp_similarity_file is not None,
                 'lambda_gp_similarity': lambda_gp_similarity,
+                'use_flash': use_flash,
+                'weight_decay': weight_decay,
             }
         )
 
@@ -270,9 +284,36 @@ def run_training(
                     }
                 )
 
+            if global_loss == 'reconstruction':
+                wandb_logger.experiment.config.update(
+                    {
+                        'reconstruction_loss': reconstruction_loss,
+                    }
+                )
+
+            if global_training == 'finetune':
+                wandb_logger.experiment.config.update(
+                    {
+                        'finetune_lr': finetune_lr,
+                    }
+                )
+
     ############################################################################
     # Dataset Preparation
     ############################################################################
+
+    # Optionally load anndata object
+    if (model_type == 'Global') & (global_loss == 'reconstruction'):
+        if adata_path is None:
+            raise ValueError('Please provide path to anndata object')
+        else:
+            anndata_dataset = AnnDataset(adata_path)
+            total_n_genes = anndata_dataset.get_n_genes()
+            n_condition_combined = anndata_dataset.n_condition_combined
+
+    else:
+        total_n_genes = 0
+        n_condition_combined = 1
 
     # Instantiate dataset
     # (tokenized dataset should be created already)
@@ -286,6 +327,21 @@ def run_training(
         txdata = scgptDataModule()
     else:
         raise NotImplementedError()
+
+    if reconstruction_loss == 'mse':
+        warnings.warn(
+            'Using MSE loss for reconstruction'
+            '\nMake sure you pass anndata object with normalized counts'
+        )
+
+    txdata = txDataModule(
+        folder=dataset_path,
+        batch_size=batch_size,
+        frac_for_training=frac_for_training,
+        adata_path=adata_path,
+        use_weighted_sampler=use_weighted_sampler,
+        label_key=subsample_by,
+    )
 
     # Load gpdb
     gpdb = pd.read_csv(gpdb_path)
@@ -329,6 +385,8 @@ def run_training(
             attn_dropout=attn_dropout,
             gp_inputs=gp_inputs,
             add_remaining_var=add_remaining_var,
+            use_flash=use_flash,
+            learn_new_gp=learn_new_gp,
         )
 
     elif model_type == 'Global':
@@ -353,6 +411,9 @@ def run_training(
             global_loss=global_loss,
             global_masking_rate=global_masking_rate,
             global_n_blocks=global_n_blocks,
+            reconstruction_loss=reconstruction_loss,
+            total_n_genes=total_n_genes,
+            use_flash=use_flash,
         )
 
     else:
@@ -369,12 +430,17 @@ def run_training(
             global_loss=global_loss,
             total_epochs=n_epochs,
             lr=lr,
+            finetune_lr=finetune_lr,
+            use_finetune_lr=global_training == 'finetune',
             lr_scheduler=lr_scheduler,
             # optimizer=DeepSpeedCPUAdam,
             use_gp_similarity_loss=use_gp_similarity_loss,
             gp_similarity=gp_similarity,
             output_dir=output_dir,
             lambda_gp_similarity=lambda_gp_similarity,
+            n_condition_combined=n_condition_combined,
+            total_n_genes=total_n_genes,
+            weight_decay=weight_decay,
         )
     else:
         # otherwise defaults to pytorch AdamW
@@ -383,12 +449,17 @@ def run_training(
             model_type,
             global_loss=global_loss,
             lr=lr,
+            finetune_lr=finetune_lr,
+            use_finetune_lr=global_training == 'finetune',
             total_epochs=n_epochs,
             lr_scheduler=lr_scheduler,
             use_gp_similarity_loss=use_gp_similarity_loss,
             gp_similarity=gp_similarity,
             output_dir=output_dir,
             lambda_gp_similarity=lambda_gp_similarity,
+            n_condition_combined=n_condition_combined,
+            total_n_genes=total_n_genes,
+            weight_decay=weight_decay,
         )
 
     # For continuing training from checkpoint
@@ -408,27 +479,46 @@ def run_training(
             )
         # look for Base model to load
         # if not found, this will raise an error
-        print('path to base model', path_to_base_model)
         latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
         checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        print('checkpoint path', checkpoint_path)
+        print('Loading from checkpoint', checkpoint_path)
         checkpoint = torch.load(latest_ckpt)
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-        n_epochs = checkpoint['epoch'] + n_epochs
+        # n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
 
         # reset output directory
         gp_transformer.output_dir = output_dir
 
         # freeze base model
         for name, param in gp_transformer.model.named_parameters():
-            if ('cell_token_learner' in name) | ('clf_head' in name):
+            if (
+                ('cell_token_learner' in name)
+                | ('clf_head' in name)
+                | ('count_head' in name)
+            ):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
 
-        # for name, param in model.named_parameters():
-        #     if param.requires_grad:
-        #         print(f"Parameter {name} has gradients.")
+    # For training global model after base model
+    # but finetuning original GP blocks
+    if global_training == 'finetune':
+        if path_to_base_model is None:
+            raise ValueError(
+                'Please provide path to pre-trained'
+                'gpTransformer Base model for finetuning'
+            )
+        # look for Base model to load
+        # if not found, this will raise an error
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        print('Loading from checkpoint', checkpoint_path)
+        checkpoint = torch.load(latest_ckpt)
+        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
+        # n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
+
+        # reset output directory
+        gp_transformer.output_dir = output_dir
 
     # Learning new GP
     if learn_new_gp:
@@ -443,7 +533,11 @@ def run_training(
         # get indices of GP to learn
         if isinstance(gp_to_learn, str):
             gp_to_learn = [gp_to_learn]
-        gp_idx = [gpdb.columns.get_loc(gp) for gp in gp_to_learn]
+        gp_idx = [
+            gp_transformer.model.gp_inputs.index(gp)
+            for gp in gp_to_learn
+            if gp in gp_transformer.model.gp_inputs
+        ]
 
         # freeze all GP
         for name, param in gp_transformer.model.named_parameters():
@@ -472,7 +566,7 @@ def run_training(
             devices=-1,
             accelerator='auto',  # uses ddp per default for multi-gpu training
             strategy=strategy,
-            precision=16,
+            precision='bf16-mixed',
             profiler='simple',
         )
     else:
@@ -487,8 +581,9 @@ def run_training(
             logger=wandb_logger,
             devices=-1,
             accelerator='auto',
-            precision=16,
+            precision='bf16-mixed',
             profiler='simple',
+            strategy=strategy,
         )
 
     # Ready to train with new learning rate
