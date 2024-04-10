@@ -334,15 +334,6 @@ def run_training(
             '\nMake sure you pass anndata object with normalized counts'
         )
 
-    txdata = txDataModule(
-        folder=dataset_path,
-        batch_size=batch_size,
-        frac_for_training=frac_for_training,
-        adata_path=adata_path,
-        use_weighted_sampler=use_weighted_sampler,
-        label_key=subsample_by,
-    )
-
     # Load gpdb
     gpdb = pd.read_csv(gpdb_path)
 
