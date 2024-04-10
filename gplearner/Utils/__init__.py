@@ -5,6 +5,12 @@ from .gp_curation_utils import (  # noqa: F401
     filter_by_size,
     rm_overlapping_gp,
 )
+from .losses import (  # noqa: F401
+    mse,
+    mse_loss,
+    nb,
+    zinb,
+)
 from .utils import (  # noqa: F401
     CosineLRwithWarmUp,
     bool_flag,
@@ -19,6 +25,7 @@ from .utils import (  # noqa: F401
     get_genes_in_single_gp,
     get_gp_tokens,
     mlm_mask_generator,
+    one_hot_encoder,
     pad_array,
     trunc_normal_,
 )
@@ -44,4 +51,9 @@ __all___ = [
     'scsim',
     'generate_synthetic_sc_dataset' 'do_linear_regression',
     'do_logistic_regression',
+    'mse',
+    'mse_loss',
+    'nb',
+    'zinb',
+    'one_hot_encoder',
 ]
