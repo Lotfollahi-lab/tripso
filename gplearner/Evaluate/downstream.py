@@ -8,12 +8,14 @@ from typing import (
 )
 
 import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import scanpy as sc
+import seaborn as sns
 import torch
-from captum.attr import IntegratedGradients
+from captum.attr import GuidedGradCam
 from datasets import load_from_disk
 from pytorch_lightning.loggers import CSVLogger
 from scib_metrics.benchmark import Benchmarker
@@ -38,9 +40,8 @@ from ..Utils.utils import (
     find_genes_in_multiple_gp,
     find_latest_file,
     get_genes_in_single_gp,
-    get_gp_attributions,
-    get_token_attributions,
     remove_single_data_points,
+    summarize_attributions,
 )
 
 # for exporting pdfs
@@ -692,7 +693,6 @@ def calculate_gp_attribution_scores(
     dataset_path,
     gp,
     data_split,
-    total_n_cells,
     n_blocks,
     num_heads,
     gp_latent_size,
@@ -700,8 +700,11 @@ def calculate_gp_attribution_scores(
     obs_key,
     obs_value,
     output_dir,
+    total_n_cells=None,
+    task='classification',
     gpdb_ref_path=None,
     do_ensembl_conversion=True,
+    emb_dataset_path=None,
 ):
     '''
     Calculate attribution scores for each gene program
@@ -740,6 +743,25 @@ def calculate_gp_attribution_scores(
     dataloader = getattr(txdata, data_split + '_dataloader')()
     print('Number of cells', len(dataloader))
 
+    if total_n_cells is None:
+        total_n_cells = len(dataloader)
+
+    # --------------------------
+    # Build dictionary for class : id conversion
+    # --------------------------
+
+    y_label = obs_key + '_id'
+
+    datax = load_from_disk(dataset_path)
+    cols_to_remove = datax.column_names
+    cols_to_remove.remove(obs_key)
+    cols_to_remove.remove(y_label)
+    datax = datax.remove_columns(cols_to_remove)
+    conversion = datax.to_pandas().drop_duplicates()
+
+    n_classes = len(conversion)
+    conversion_dict = {k: v for k, v in zip(conversion[obs_key], conversion[y_label])}
+
     # --------------------------
     # Set up model
     # --------------------------
@@ -770,7 +792,54 @@ def calculate_gp_attribution_scores(
         strict=False,
     )
 
-    imodel = iGpWrapper(gp_transformer, gp_of_interest=gp)
+    # Load classification layer
+    # or train if not available
+    if gp_transformer.global_loss != 'supervised':
+        ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
+        clf_ckpt = f'{y_label.replace("_id", "")}_{gp}_{task}'
+        if os.path.exists(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')):
+            clf_layer = EmbEvaluator.load_from_checkpoint(
+                os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
+            )
+
+        else:
+            if emb_dataset_path is None:
+                raise ValueError(
+                    'Please provided path to embeddings for training linear layer'
+                )
+            gpEval.evaluate_embeddings(
+                n_classes=n_classes,
+                y_label=y_label,
+                folder_path=emb_dataset_path,
+                output_dir=output_dir,
+                emb_label=gp,
+                task=task,
+                emb_dim=gp_latent_size,
+                lr=1e-3,
+                batch_size=128,
+                num_workers=1,
+                meta_labels=[y_label, y_label.replace('_id', '')],
+                data_type='dataset',
+                n_epochs=3,
+                continuous_cov=[],
+            )
+
+            clf_layer = EmbEvaluator.load_from_checkpoint(
+                os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
+            )
+
+        task_index = None
+    else:
+        clf_layer = None
+
+    imodel = iGpWrapper(
+        gp_transformer,
+        clf_layer,
+        global_loss=gp_transformer.global_loss,
+        task_index=task_index,
+        gp_of_interest=gp,
+    )
+
     imodel = imodel.to(device)
 
     # --------------------------
@@ -778,53 +847,75 @@ def calculate_gp_attribution_scores(
     # --------------------------
 
     # set up attribution
-    ig = IntegratedGradients(imodel)
+    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[0].mlp)
 
-    attribution_scores = None
+    attribution_scores = {}
     all_tokens = set()
     counter = 0
 
-    for batch in tqdm(dataloader):
+    for b in tqdm(dataloader):
         if counter < total_n_cells:
-            if attribution_scores is None:
-                attribution_scores, tokens_set = get_token_attributions(
-                    batch, ig, device, obs_key, obs_value
-                )
-                if tokens_set is not None:
-                    all_tokens.update(tokens_set)
-            else:
-                outx, tokens_set = get_token_attributions(
-                    batch, ig, device, obs_key, obs_value
+            if b[1][obs_key] == [obs_value]:
+                counter += 1
+                emb = b[0].to(device)
+
+                edict = {
+                    k: v.to(device) if isinstance(v, torch.Tensor) else v
+                    for k, v in b[1].items()
+                }
+
+                input_ids = (emb, edict)
+                token_labels = edict['token_labels'].squeeze().cpu().numpy().tolist()
+                for labels in token_labels:
+                    all_tokens.add(labels)
+
+                attributions = gc.attribute(
+                    input_ids[0],
+                    target=conversion_dict[obs_value],
+                    additional_forward_args=input_ids[1],
                 )
 
-                if outx is not None:
-                    for k, v in outx.items():
-                        all_tokens.update(tokens_set)
-                        counter += 1
+                attr_norm = summarize_attributions(attributions).detach().cpu().numpy()
 
-                        if k in attribution_scores:
-                            attribution_scores[k] += v
-                        else:
-                            attribution_scores[k] = v
+                for i, t in enumerate(token_labels):
+                    if t in attribution_scores.keys():
+                        attribution_scores[t] += [attr_norm[i]]
+                        attribution_scores[f'{t}_abs'] += [np.abs(attr_norm[i])]
+                    else:
+                        attribution_scores[t] = [attr_norm[i]]
+                        attribution_scores[f'{t}_abs'] = [np.abs(attr_norm[i])]
 
         else:
             break
 
-    # Extracting data
-    data = {'token': [], 'attribution_score': [], 'rank': []}
+    for t in all_tokens:
+        attribution_scores[t] = np.nanmean(attribution_scores[t])
+        attribution_scores[f'{t}_abs'] = np.nanmean(attribution_scores[f'{t}_abs'])
+        attribution_scores[f'{t}_std'] = np.nanstd(attribution_scores[t])
+        attribution_scores[f'{t}_abs_std'] = np.nanstd(attribution_scores[f'{t}_abs'])
 
-    for t in list(all_tokens):
-        data['token'].append(t)
-        data['attribution_score'].append(
-            np.nanmean(attribution_scores[f'{t}_attribution_score'])
-        )
-        data['rank'].append(np.nanmean(attribution_scores[f'{t}_rank']))
+    rows = []
 
-    attribution_df = pd.DataFrame(data)
+    for t in all_tokens:
+        row = {
+            'token': t,
+            'attribution_score': attribution_scores[t],
+            'abs_attribution_score': attribution_scores[f'{t}_abs'],
+            'std_attribution_score': attribution_scores[f'{t}_std'],
+            'abs_std_attribution_score': attribution_scores[f'{t}_abs_std'],
+        }
+
+        rows.append(row)
+
+    attribution_df = pd.DataFrame(rows)
 
     # Add gene conversion
     gene_df = pd.DataFrame(imodel.gene_conversion)
     gene_df = gene_df.join(attribution_df.set_index('token'), on='token_original')
+
+    # add GP labels
+    if gpdb_ref_path is None:
+        gpdb_ref_path = gpdb_path
 
     # add GP labels
     if gpdb_ref_path is None:
@@ -847,8 +938,8 @@ def calculate_gp_attribution_scores(
 def calculate_cell_token_attribution_scores(
     gpdb_path,
     dataset_path,
+    emb_dataset_path,
     data_split,
-    total_n_cells,
     n_blocks,
     num_heads,
     gp_latent_size,
@@ -859,10 +950,10 @@ def calculate_cell_token_attribution_scores(
     global_loss,
     reconstruction_loss,
     # for EmbEvaluator
-    n_classes,
-    y_label,
     emb_label,
     task,
+    save_plot=False,
+    gp_inputs=None,
     use_embedding=False,
     pretrained_emb=None,
     vocab_size=None,
@@ -888,9 +979,12 @@ def calculate_cell_token_attribution_scores(
     # --------------------------
 
     gpdb = pd.read_csv(gpdb_path)
+    if gp_inputs is None:
+        gp_inputs = list(gpdb.columns)
 
+    print('emb_dataset_path', emb_dataset_path)
     emb_dm = iEmbDataModule(
-        folder_path=dataset_path,
+        folder_path=emb_dataset_path,
         batch_size=1,
         gp_inputs=list(gpdb.columns),
         meta_labels=obs_key,
@@ -900,8 +994,21 @@ def calculate_cell_token_attribution_scores(
 
     dataloader = getattr(emb_dm, data_split + '_dataloader')()
 
-    if total_n_cells is None:
-        total_n_cells = len(dataloader)
+    # --------------------------
+    # Build dictionary for class : id conversion
+    # --------------------------
+
+    y_label = obs_key + '_id'
+
+    datax = load_from_disk(dataset_path)
+    cols_to_remove = datax.column_names
+    cols_to_remove.remove(obs_key)
+    cols_to_remove.remove(y_label)
+    datax = datax.remove_columns(cols_to_remove)
+    conversion = datax.to_pandas().drop_duplicates()
+
+    n_classes = len(conversion)
+    conversion_dict = {k: v for k, v in zip(conversion[obs_key], conversion[y_label])}
 
     # --------------------------
     # Set up model
@@ -943,21 +1050,12 @@ def calculate_cell_token_attribution_scores(
         clf_layer = EmbEvaluator.load_from_checkpoint(
             os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
         )
-        # (
-        #     n_classes=n_classes,
-        #     emb_dim=gp_latent_size,
-        #     task=task,
-        #     lr=1e-3,
-        #     emb_label=emb_label,
-        #     y_label=y_label,
-        #     output_dir=output_dir,
-        # )
 
     else:
         gpEval.evaluate_embeddings(
             n_classes=n_classes,
             y_label=y_label,
-            folder_path=dataset_path,
+            folder_path=emb_dataset_path,
             output_dir=output_dir,
             emb_label=emb_label,
             task=task,
@@ -971,15 +1069,9 @@ def calculate_cell_token_attribution_scores(
             continuous_cov=[],
         )
 
-        clf_layer = EmbEvaluator(
-            n_classes=n_classes,
-            emb_dim=gp_latent_size,
-            task=task,
-            lr=1e-3,
-            emb_label=emb_label,
-            y_label=y_label,
-            output_dir=output_dir,
-        ).load_from_checkpoint(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt'))
+        clf_layer = EmbEvaluator.load_from_checkpoint(
+            os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
+        )
 
     imodel = iGlobalWrapper(
         gp_transformer,
@@ -996,44 +1088,102 @@ def calculate_cell_token_attribution_scores(
     # --------------------------
 
     # set up attribution
-    ig = IntegratedGradients(imodel)
+    gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[0].mlp)
 
-    attribution_scores = None
-    gp_inputs = list(gpdb.columns)
-    counter = 0
+    attribution_scores = {}
+
+    for g in gp_inputs:
+        attribution_scores[g] = []
+        attribution_scores[f'{g}_abs'] = []
 
     for b in tqdm(dataloader):
-        if counter < total_n_cells:
-            if attribution_scores is None:
-                attribution_scores = get_gp_attributions(
-                    b, gp_inputs, ig, device, obs_key, obs_value
-                )
-            else:
-                outx = get_gp_attributions(b, gp_inputs, ig, device, obs_key, obs_value)
-                if outx is not None:
-                    counter += 1
-                    for k, v in outx.items():
-                        if k in attribution_scores:
-                            attribution_scores[k] += v
-                        else:
-                            attribution_scores[k] = v
+        if b[1][obs_key] == [obs_value]:
+            emb = b[0].to(device)
 
-        else:
-            break
+            edict = {
+                k: v.to(device) if isinstance(v, torch.Tensor) else v
+                for k, v in b[1].items()
+            }
 
-    # Extracting data
-    data = {'gp': [], 'attribution_score': [], 'prop_genes': []}
+            input_ids = (emb, edict)
 
-    for t in gp_inputs:
-        data['gp'].append(t)
-        data['attribution_score'].append(
-            np.nanmean(attribution_scores[f'{t}_attribution_score'])
+            attributions = gc.attribute(
+                input_ids[0],
+                target=conversion_dict[obs_value],
+                additional_forward_args=input_ids[1],
+            )
+
+            attr_norm = summarize_attributions(attributions).detach().cpu().numpy()
+
+            for i, g in enumerate(gp_inputs):
+                attribution_scores[g] += [attr_norm[i]]
+                attribution_scores[f'{g}_abs'] += [abs(attr_norm[i])]
+
+    for g in gp_inputs:
+        attribution_scores[g] = np.nanmean(np.array(attribution_scores[g]))
+        attribution_scores[f'{g}_std'] = np.nanstd(np.array(attribution_scores[g]))
+
+        # Absolute values
+        attribution_scores[f'{g}_abs'] = np.nanmean(
+            np.array(attribution_scores[f'{g}_abs'])
         )
-        data['prop_genes'].append(np.nanmean(attribution_scores[f'{t}_prop_genes']))
+        attribution_scores[f'{g}_abs_std'] = np.nanstd(
+            np.array(attribution_scores[f'{g}_abs'])
+        )
 
-    attribution_df = pd.DataFrame(data)
+    rows = []
+    for g in gp_inputs:
+        row = {
+            'GP': g,
+            'scores': attribution_scores[g],
+            'scores_abs': attribution_scores[f'{g}_abs'],
+            'score_std': attribution_scores[f'{g}_std'],
+            'score_abs_std': attribution_scores[f'{g}_abs_std'],
+        }
+        rows.append(row)
+
+    # Convert the list of dictionaries to a DataFrame
+    attribution_df = pd.DataFrame(rows)
 
     attribution_df.to_csv(
         os.path.join(output_dir, f'cell_token_attribution_scores_{obs_value}.csv'),
         index=False,
     )
+
+    if save_plot:
+        plt.figure()
+        ax = sns.barplot(attribution_df, x='GP', y='scores_abs')
+
+        # for i, bar in enumerate(ax.patches):
+        #     x = bar.get_x() + bar.get_width() / 2
+        #     y = bar.get_height()
+        #     error = attribution_df['score_abs_std'].iloc[i]
+        #     plt.errorbar(x, y, yerr=error, fmt='none', capsize=5, color='black')
+
+        ax.set_title(obs_value.capitalize().replace('_', ' '))
+        ax.set_ylabel('Absolute attribution score')
+        ax.set_xlabel('Gene Program')
+        plt.savefig(
+            os.path.join(
+                output_dir, f'cell_token_abs_attribution_scores_{obs_value}.pdf'
+            )
+        )
+        plt.close()
+
+        # Mean normalized values
+        plt.figure()
+        ax = sns.barplot(attribution_df, x='GP', y='scores')
+
+        # for i, bar in enumerate(ax.patches):
+        #     x = bar.get_x() + bar.get_width() / 2
+        #     y = bar.get_height()
+        #     error = attribution_df['score_std'].iloc[i]
+        #     plt.errorbar(x, y, yerr=error, fmt='none', capsize=5, color='black')
+
+        ax.set_title(obs_value.capitalize().replace('_', ' '))
+        ax.set_ylabel('Attribution score')
+        ax.set_xlabel('Gene Program')
+        plt.savefig(
+            os.path.join(output_dir, f'cell_token_attribution_scores_{obs_value}.pdf')
+        )
+        plt.close()

@@ -23,9 +23,7 @@ from .utils import (  # noqa: F401
     find_genes_in_multiple_gp,
     find_latest_file,
     get_genes_in_single_gp,
-    get_gp_attributions,
     get_gp_tokens,
-    get_token_attributions,
     mlm_mask_generator,
     one_hot_encoder,
     pad_array,
@@ -60,6 +58,4 @@ __all___ = [
     'zinb',
     'one_hot_encoder',
     'summarize_attributions',
-    'get_gp_attributions',
-    'get_token_attributions',
 ]

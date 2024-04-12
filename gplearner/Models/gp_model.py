@@ -1091,6 +1091,7 @@ class iGpWrapper(nn.Module):
     def __init__(
         self,
         gp_transformer,
+        clf_layer,
         gp_of_interest,
         gene_token_path=TOKEN_DICTIONARY_FILE,
         gene_name_path=GENE_NAME_FILE,
@@ -1102,21 +1103,12 @@ class iGpWrapper(nn.Module):
 
         # select relevant gp block
         self.gp_block = gp_transformer.model.multi_gp_encoder.encoder[self.gp_idx]
+        self.clf_layer = clf_layer
 
         # store relevant gp tokens as nn.Embedding
         gp_tokens = getattr(
             gp_transformer.model.multi_gp_encoder, f'gp{self.gp_idx}_tokens'
         )
-
-        # self.gp_gene_emb = nn.Embedding(
-        #     num_embeddings = len(gp_tokens) + 1,
-        #     embedding_dim = 1,
-        #     padding_idx = 0)
-
-        # self.gp_gene_emb.weight.data.fill_(1)
-
-        # # Set the padding index (index 0) embedding to 0
-        # self.gp_gene_emb.weight.data[0] = 0
 
         # table for converting between different gene labels
         with open(gene_name_path, 'rb') as f:
@@ -1151,16 +1143,20 @@ class iGpWrapper(nn.Module):
             return_gene_embeddings=False,
         )
 
-        out = output['logits_lm'][:, 0, :]
+        logits = self.clf_layer(output['cls'])
+        return logits
 
-        return out.max(1).values
+        # out = output['logits_lm'][:, 0, :]
+        # return out.max(1).values
 
 
 class iGlobalWrapper(nn.Module):
     def __init__(
         self,
         gp_transformer,
-        clf_layer,
+        clf_layer=None,
+        global_loss='reconstruction',
+        task_index=None,
         use_embedding=False,
         pretrained_emb=None,
         vocab_size=None,
@@ -1169,7 +1165,17 @@ class iGlobalWrapper(nn.Module):
         super().__init__()
 
         self.global_block = gp_transformer.model.cell_token_learner
-        self.clf_layer = clf_layer
+        # set decoder to identiy
+        self.global_block.encoder.decoder = nn.Identity()
+
+        if global_loss != 'supervised':
+            if clf_layer is None:
+                raise ValueError('Please provide a classifier layer')
+            self.clf_layer = clf_layer
+        else:
+            if task_index is None:
+                raise ValueError('Please provide a task index')
+            self.clf_layer = gp_transformer.model.clf_head[task_index]
 
         self.use_embedding = use_embedding
         if self.use_embedding:
@@ -1198,7 +1204,8 @@ class iGlobalWrapper(nn.Module):
         # Pass through linear layer
         logits = self.clf_layer(out['cell_token'])
 
-        return logits.max(1).values
+        # return logits.max(1).values
+        return logits
 
 
 ####################################

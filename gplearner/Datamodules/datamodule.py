@@ -64,7 +64,8 @@ class AnnDataset(Dataset):
         return self.adata.shape[0]
 
     def __getitem__(self, idx):
-        adata_tensor = torch.tensor(self.adata.X[idx, :], dtype=torch.float32)
+        adata_slice = self.adata[idx, :].X.toarray()
+        adata_tensor = torch.tensor(adata_slice, dtype=torch.float32).squeeze()
         obs = self.adata.obs.iloc[idx, :]
         idx = obs['idx']
 
