@@ -325,7 +325,7 @@ def run_training(
             adata_path=adata_path, use_weighted_sampler=use_weighted_sampler, label_key=subsample_by
         )
     elif mode == 'scgpt':
-        txdata = scgptDataModule(batch_size=batch_size, num_workers=15)
+        txdata = scgptDataModule(batch_size=batch_size, num_workers=15, adata_path_global=adata_path)
     else:
         raise NotImplementedError()
 
@@ -388,6 +388,7 @@ def run_training(
         #     supervised_labels = txdata.count_unique_classes(classification_labels)
 
         model = gpTransformerGlobal(
+            mode=mode,
             gene_counts_df=gene_counts_df,
             database=gpdb,
             do_ensembl_conversion=do_ensembl_conversion,
@@ -575,7 +576,7 @@ def run_training(
             accelerator='auto',
             precision='bf16-mixed',
             profiler='simple',
-            strategy=strategy,
+            # strategy=strategy,
         )
 
     # Ready to train with new learning rate

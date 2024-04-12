@@ -882,7 +882,7 @@ class CountHead(nn.Module):
         self,
         loss_mode: str = 'mse',
         n_genes: int = 25426,
-        d_model: int = 256,
+        d_model: int = 128,
     ):
         super().__init__()
         self.loss_mode = loss_mode
@@ -1077,7 +1077,7 @@ class gpTransformerBase(nn.Module):
             mgm_mask_ratio=self.mgm_mask_ratio,
             gp_inputs=gp_inputs,
             add_remaining_var=add_remaining_var,
-            use_flash=self.use_flash,
+            use_flash=True,
             model_type=model_type,
             learn_new_gp=learn_new_gp,
         )

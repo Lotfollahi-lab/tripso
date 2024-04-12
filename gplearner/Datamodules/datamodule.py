@@ -605,17 +605,25 @@ class EmbDataModule(LightningDataModule):
         return output_dict
 
 class scgptDataset(Dataset):
-    def __init__(self, count_matrix, gene_ids, vocab, model_configs, batch_ids=None):
-        self.count_matrix = count_matrix
+    def __init__(self, adata, gene_ids, vocab, model_configs, adata_global, batch_ids=None):
+        self.adata = adata
+        self.metadata = [c for c in self.adata.obs.columns]
         self.gene_ids = gene_ids
         self.batch_ids = batch_ids
         self.vocab = vocab
+        self.adata_global = adata_global
         self.model_configs = model_configs
+        self.count_matrix = self.adata.X
+        self.count_matrix = (self.count_matrix if isinstance(self.count_matrix, np.ndarray) else self.count_matrix.A)
 
     def __len__(self):
         return len(self.count_matrix)
 
     def __getitem__(self, idx):
+        if self.adata_global is not None:
+            adata = self.adata_global[idx]
+        else:
+            adata = None
         row = self.count_matrix[idx]
         nonzero_idx = np.nonzero(row)[0]
         values = row[nonzero_idx]
@@ -629,15 +637,19 @@ class scgptDataset(Dataset):
             "id": idx,
             "genes": genes,
             "expressions": values,
+            "adata": adata
         }
         if self.batch_ids is not None:
             output["batch_labels"] = self.batch_ids[idx]
+        for m in self.metadata:
+            output["metadata_"+m] = self.adata.obs[m].iloc[idx]
         return output
 
 class scgptDataModule(LightningDataModule):
     def __init__(
         self,
-        adata_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/gplearner_reproducibility/24-04-03_synthetic_clean/data/input_h5ad/24-04-03_synthetic_clean_hvg.h5ad',
+        adata_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/gplearner_reproducibility/24-04-03_synthetic_clean/data/input_h5ad/24-04-03_synthetic_clean.h5ad',
+        adata_path_global='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/gplearner_reproducibility/24-04-03_synthetic_clean/data/input_h5ad/24-04-03_synthetic_clean_hvg.h5ad',
         batch_size=3,
         num_workers=1,
         shuffle=False,
@@ -662,6 +674,9 @@ class scgptDataModule(LightningDataModule):
         """
         super().__init__()
         self.adata = sc_read(adata_path)
+        if 'batch_key' in self.adata.obs.columns:
+            self.adata.obs['batch_key_id'] = self.adata.obs['batch_key'].cat.codes
+        self.adata_global = AnnDataset(adata_path_global)
         self.max_length = max_length
         self.n_bins = n_bins
         self.batch_size = batch_size
@@ -688,7 +703,6 @@ class scgptDataModule(LightningDataModule):
                 raise Exception("Either gene_name or ensembl_id should be present in adata.var")
             else:
                 self.extract_gene_names()
-        self.metadata = [c for c in self.adata.obs.columns]
 
     def extract_gene_names(self):
         df = read_csv('/lustre/scratch126/cellgen/team205/ha11/scGPT/gene_info.csv', index_col=0)
@@ -715,9 +729,7 @@ class scgptDataModule(LightningDataModule):
             assert np.all(gene_ids >= 0)
 
     def setup(self, stage=None):
-        count_matrix = self.adata.X
-        count_matrix = (count_matrix if isinstance(count_matrix, np.ndarray) else count_matrix.A)
-        self.dataset = scgptDataset(count_matrix, self.gene_ids, self.vocab, self.model_configs)
+        self.dataset = scgptDataset(self.adata, self.gene_ids, self.vocab, self.model_configs, self.adata_global)
 
         # Calculate lengths for train, validation, and test sets
         dataset_size = len(self.dataset)

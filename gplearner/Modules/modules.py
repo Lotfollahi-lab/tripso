@@ -122,7 +122,7 @@ class Attention(nn.Module):
                     k,
                     v,
                     # attn_mask,
-                    scale=self.scale,
+                    # scale=self.scale,
                     dropout_p=0.0,
                 )
                 # if scale is None, default is 1/sqrt(dim)
