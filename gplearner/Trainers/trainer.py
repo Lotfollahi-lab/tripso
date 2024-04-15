@@ -1201,7 +1201,9 @@ class scGPL(pl.LightningModule):
 
 
 class EmbEvaluator(pl.LightningModule):
-    def __init__(self, n_classes, emb_dim, task, lr, emb_label, y_label, output_dir):
+    def __init__(
+        self, n_classes, emb_dim, task, lr, emb_label, y_label, output_dir, filter_tag
+    ):
         super().__init__()
         self.save_hyperparameters()
 
@@ -1210,6 +1212,7 @@ class EmbEvaluator(pl.LightningModule):
         self.y_label = y_label
         self.task = task
         self.output_dir = output_dir
+        self.filter_tag = filter_tag
 
         if task == 'classification':
             self.loss_fn = nn.CrossEntropyLoss()
@@ -1286,8 +1289,11 @@ class EmbEvaluator(pl.LightningModule):
         x = batch[self.emb_label]
 
         y = batch[self.y_label]
+        print('Number of true classes', y.unique().shape[0])
+        print('Y shape', y.shape)
 
         y_out = self.evaluator_head(x)
+        print('Y out shape', y_out.shape)
 
         loss = self.loss_fn(y_out, y)
         self.log(
@@ -1395,7 +1401,8 @@ class EmbEvaluator(pl.LightningModule):
             output_df.to_csv(
                 os.path.join(
                     self.output_dir,
-                    f'cell_metrics/{self.y_label}_from_{self.emb_label}.csv',
+                    f'cell_metrics/{self.y_label}_from_{self.emb_label}'
+                    f'{self.filter_tag}.csv',
                 ),
                 index=False,
             )

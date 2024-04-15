@@ -311,7 +311,6 @@ class gpEval:
 
     @staticmethod
     def evaluate_embeddings(
-        n_classes,
         y_label,
         folder_path,
         output_dir,
@@ -325,6 +324,10 @@ class gpEval:
         data_type='dataset',
         n_epochs=3,
         continuous_cov=[],
+        use_weighted_sampler=False,
+        sample_by=None,
+        filter_key=None,
+        filter_value=None,
     ):
         '''
         Train nn.Linear layer based on embeddings
@@ -344,15 +347,11 @@ class gpEval:
         torch.backends.cudnn.benchmark = False
 
         print(f'Evaluating {emb_label} embeddings')
-        emb_evaluator = EmbEvaluator(
-            n_classes=n_classes,
-            emb_dim=emb_dim,
-            task=task,
-            lr=lr,
-            emb_label=emb_label,
-            y_label=y_label,
-            output_dir=output_dir,
-        )
+        filter_tag = f'_{filter_key}' if filter_key is not None else ''
+        if task == 'classification':
+            label_to_count = y_label
+        else:
+            label_to_count = None
 
         emb_dm = EmbDataModule(
             folder_path,
@@ -362,17 +361,35 @@ class gpEval:
             meta_labels=meta_labels,
             data_type=data_type,
             continuous_cov=continuous_cov,
+            use_weighted_sampler=use_weighted_sampler,
+            label_key=sample_by,
+            filter_key=filter_key,
+            filter_value=filter_value,
+            count_n_unique=label_to_count,
+        )
+
+        emb_dm.setup()
+
+        emb_evaluator = EmbEvaluator(
+            n_classes=emb_dm.num_classes,
+            emb_dim=emb_dim,
+            task=task,
+            lr=lr,
+            emb_label=emb_label,
+            y_label=y_label,
+            output_dir=output_dir,
+            filter_tag=filter_tag,
         )
 
         logger = CSVLogger(
             os.path.join(output_dir, 'evaluation_logs'),
-            name=f'{emb_label}_{y_label.replace("_id", "")}',
+            name=f'{emb_label}_{y_label.replace("_id", "")}{filter_tag}',
         )
 
         checkpoint_callback = pl.callbacks.ModelCheckpoint(
             monitor='val_loss',
             dirpath=ckpt_dir,
-            filename=f'{y_label.replace("_id", "")}_{emb_label}_{task}',
+            filename=f'{y_label.replace("_id", "")}_{emb_label}_{task}{filter_tag}',
             save_top_k=1,
             mode='min',
         )
@@ -737,6 +754,8 @@ def calculate_gp_attribution_scores(
         gp=gp,
         gpdb=gpdb,
         do_ensembl_conversion=do_ensembl_conversion,
+        filter_key=obs_key,
+        filter_value=obs_value,
     )
 
     txdata.setup()
@@ -855,35 +874,34 @@ def calculate_gp_attribution_scores(
 
     for b in tqdm(dataloader):
         if counter < total_n_cells:
-            if b[1][obs_key] == [obs_value]:
-                counter += 1
-                emb = b[0].to(device)
+            counter += 1
+            emb = b[0].to(device)
 
-                edict = {
-                    k: v.to(device) if isinstance(v, torch.Tensor) else v
-                    for k, v in b[1].items()
-                }
+            edict = {
+                k: v.to(device) if isinstance(v, torch.Tensor) else v
+                for k, v in b[1].items()
+            }
 
-                input_ids = (emb, edict)
-                token_labels = edict['token_labels'].squeeze().cpu().numpy().tolist()
-                for labels in token_labels:
-                    all_tokens.add(labels)
+            input_ids = (emb, edict)
+            token_labels = edict['token_labels'].squeeze().cpu().numpy().tolist()
+            for labels in token_labels:
+                all_tokens.add(labels)
 
-                attributions = gc.attribute(
-                    input_ids[0],
-                    target=conversion_dict[obs_value],
-                    additional_forward_args=input_ids[1],
-                )
+            attributions = gc.attribute(
+                input_ids[0],
+                target=conversion_dict[obs_value],
+                additional_forward_args=input_ids[1],
+            )
 
-                attr_norm = summarize_attributions(attributions).detach().cpu().numpy()
+            attr_norm = summarize_attributions(attributions).detach().cpu().numpy()
 
-                for i, t in enumerate(token_labels):
-                    if t in attribution_scores.keys():
-                        attribution_scores[t] += [attr_norm[i]]
-                        attribution_scores[f'{t}_abs'] += [np.abs(attr_norm[i])]
-                    else:
-                        attribution_scores[t] = [attr_norm[i]]
-                        attribution_scores[f'{t}_abs'] = [np.abs(attr_norm[i])]
+            for i, t in enumerate(token_labels):
+                if t in attribution_scores.keys():
+                    attribution_scores[t] += [attr_norm[i]]
+                    attribution_scores[f'{t}_abs'] += [np.abs(attr_norm[i])]
+                else:
+                    attribution_scores[t] = [attr_norm[i]]
+                    attribution_scores[f'{t}_abs'] = [np.abs(attr_norm[i])]
 
         else:
             break
@@ -948,7 +966,6 @@ def calculate_cell_token_attribution_scores(
     obs_value,
     output_dir,
     global_loss,
-    reconstruction_loss,
     # for EmbEvaluator
     emb_label,
     task,
@@ -956,8 +973,8 @@ def calculate_cell_token_attribution_scores(
     gp_inputs=None,
     use_embedding=False,
     pretrained_emb=None,
-    vocab_size=None,
-    embedding_dim=None,
+    reconstruction_loss=None,
+    supervised_labels=None,
 ):
     # --------------------------
     # Set seed
@@ -1007,7 +1024,6 @@ def calculate_cell_token_attribution_scores(
     datax = datax.remove_columns(cols_to_remove)
     conversion = datax.to_pandas().drop_duplicates()
 
-    n_classes = len(conversion)
     conversion_dict = {k: v for k, v in zip(conversion[obs_key], conversion[y_label])}
 
     # --------------------------
@@ -1025,6 +1041,7 @@ def calculate_cell_token_attribution_scores(
         add_remaining_var=False,
         global_loss=global_loss,
         reconstruction_loss=reconstruction_loss,
+        supervised_labels=supervised_labels,
     )
 
     gp_transformer = scGPL(
@@ -1053,7 +1070,6 @@ def calculate_cell_token_attribution_scores(
 
     else:
         gpEval.evaluate_embeddings(
-            n_classes=n_classes,
             y_label=y_label,
             folder_path=emb_dataset_path,
             output_dir=output_dir,

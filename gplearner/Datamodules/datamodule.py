@@ -90,6 +90,8 @@ class tkDataset(Dataset):
         self,
         folder='./data/tokenized.dataset',
         label_key=None,
+        filter_key=None,
+        filter_value=None,
     ):
         """Create a dataset from a directory with a tokenized Geneformer dataset
 
@@ -99,7 +101,12 @@ class tkDataset(Dataset):
                 path to anndata object
 
         """
-        self.gdata = load_from_disk(folder)
+        gdata = load_from_disk(folder)
+
+        if filter_key is not None:
+            gdata = gdata.filter(lambda x: x[filter_key] == filter_value)
+
+        self.gdata = gdata
 
         # Metadata to keep track of
         # (we assume filtering of obs columns happens at
@@ -179,14 +186,34 @@ class txDataset(Dataset):
 
 
 class EmbDataset(Dataset):
-    def __init__(self, folder_path, data_type, label_key=None):
+    def __init__(
+        self,
+        folder_path,
+        data_type,
+        label_key=None,
+        filter_key=None,
+        filter_value=None,
+        count_n_unique=None,
+    ):
         self.data_type = data_type
         if self.data_type == 'dataset':
-            self.emb = load_from_disk(folder_path)
+            emb = load_from_disk(folder_path)
+            if filter_key is not None:
+                emb = emb.filter(lambda x: x[filter_key] == filter_value)
+            self.emb = emb
+            if count_n_unique is not None:
+                self.num_classes = len(emb.unique(count_n_unique))
+
         elif self.data_type == 'h5ad':
-            self.emb = sc.read_h5ad(folder_path)
+            emb = sc.read_h5ad(folder_path)
+            if filter_key is not None:
+                emb = emb[emb.obs[filter_key] == filter_value]
+            self.emb = emb
+            if count_n_unique is not None:
+                self.num_classes = emb.obs[count_n_unique].nunique()
+
         else:
-            raise ValueError('data_type should be either dataset or h5ad')
+            raise NotImplementedError('Data type not recognized')
 
         if label_key is not None:
             if self.data_type == 'dataset':
@@ -262,6 +289,8 @@ class txDataModule(LightningDataModule):
         use_weighted_sampler=False,
         label_key=None,
         return_tuple=False,
+        filter_key=None,
+        filter_value=None,
         # development only:
         frac_for_training=1,
         data_split_to_pass_to_val_step='val',
@@ -289,6 +318,8 @@ class txDataModule(LightningDataModule):
         self.data_for_validation_step = data_split_to_pass_to_val_step
         self.label_key = label_key
         self.return_tuple = return_tuple
+        self.filter_key = filter_key
+        self.filter_value = filter_value
 
         with open(token_dictionary_file, 'rb') as f:
             self.gene_token_dict = pickle.load(f)
@@ -309,7 +340,12 @@ class txDataModule(LightningDataModule):
 
     def setup(self, stage=None):
         # Load the tokenized dataset
-        tokenized_dataset = tkDataset(self.folder, label_key=self.label_key)
+        tokenized_dataset = tkDataset(
+            self.folder,
+            label_key=self.label_key,
+            filter_key=self.filter_key,
+            filter_value=self.filter_value,
+        )
 
         # Optionally load anndata object
         if self.adata_path is not None:
@@ -692,6 +728,10 @@ class EmbDataModule(LightningDataModule):
         data_type='dataset',
         continuous_cov=[],
         use_weighted_sampler=False,
+        label_key=None,
+        filter_key=None,
+        filter_value=None,
+        count_n_unique=None,
     ):
         super().__init__()
         self.folder_path = folder_path
@@ -705,6 +745,10 @@ class EmbDataModule(LightningDataModule):
         self.data_type = data_type
         self.continuous_cov = continuous_cov
         self.use_weighted_sampler = use_weighted_sampler
+        self.label_key = label_key
+        self.filter_key = filter_key
+        self.filter_value = filter_value
+        self.count_n_unique = count_n_unique
 
     def prepare_data(self):
         folder_path = Path(self.folder_path)
@@ -714,14 +758,29 @@ class EmbDataModule(LightningDataModule):
         tag = '.h5ad' if self.data_type == 'h5ad' else ''
 
         self.train_dataset = EmbDataset(
-            os.path.join(self.folder_path, f'train_set{tag}'), data_type=self.data_type
+            os.path.join(self.folder_path, f'train_set{tag}'),
+            data_type=self.data_type,
+            label_key=self.label_key,
+            filter_key=self.filter_key,
+            filter_value=self.filter_value,
+            count_n_unique=self.count_n_unique,
         )
+
         self.val_dataset = EmbDataset(
-            os.path.join(self.folder_path, f'val_set{tag}'), data_type=self.data_type
+            os.path.join(self.folder_path, f'val_set{tag}'),
+            data_type=self.data_type,
+            filter_key=self.filter_key,
+            filter_value=self.filter_value,
         )
         self.test_dataset = EmbDataset(
-            os.path.join(self.folder_path, f'test_set{tag}'), data_type=self.data_type
+            os.path.join(self.folder_path, f'test_set{tag}'),
+            data_type=self.data_type,
+            filter_key=self.filter_key,
+            filter_value=self.filter_value,
         )
+
+        if self.count_n_unique is not None:
+            self.num_classes = self.train_dataset.num_classes
 
     def train_dataloader(self):
         if self.use_weighted_sampler:
