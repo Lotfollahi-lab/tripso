@@ -349,7 +349,7 @@ class gpTransformerEncoder(nn.Module):
 
         # add positional encoding to each token
         if self.use_pos_emb:
-            x = x + self.pos_embed(x)
+            x = self.pos_embed(x)
 
         return self.pos_drop(x), gene_labels
 
