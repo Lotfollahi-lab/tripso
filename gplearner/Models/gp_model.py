@@ -7,7 +7,6 @@ import warnings
 from typing import Dict, Optional
 
 # imports
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,11 +20,7 @@ from ..Modules.modules import (
     gpTransformerEncoder,
 )
 from ..Utils.geneformer_utils import EmbExtractor
-from ..Utils.utils import (
-    bin_gene_expression,
-    get_gp_tokens,
-    pad_array,
-)
+from ..Utils.utils import bin_gene_expression, get_gp_tokens
 
 ####################################
 # Geneformer
@@ -99,34 +94,41 @@ class gpWrapper(nn.Module):
         self.model_type = model_type
         self.learning_new_gp = learn_new_gp
 
+        # Get vocab size
+        with open(gene_token_path, 'rb') as f:
+            token_dict = pickle.load(f)
+        self.vocab_size = max(token_dict.values())
+
         # Store all genes included in at least one GP
         self.all_gp_tokens = set()
 
         # TO DO : ADD THIS TO A FUNCTION THAT RETURNS TWO DICTIONARIES
         for i, gpi in enumerate(self.gp_inputs):
-            setattr(
-                self,
-                f'gp{i}_tokens',
-                get_gp_tokens(
-                    gpi,
-                    database,
-                    do_ensembl_conversion,
-                    gene_counts_df,
-                    gene_token_path,
-                    gene_name_path,
-                ),
+            gp_tokens = get_gp_tokens(
+                gpi,
+                database,
+                do_ensembl_conversion,
+                gene_counts_df,
+                gene_token_path,
+                gene_name_path,
             )
+
+            gp_tokens_tensor = torch.tensor(list(gp_tokens), dtype=torch.bfloat16)
+
+            self.register_buffer(f'gp{i}_tokens', gp_tokens_tensor)
 
             print('Number of genes in GP', gpi, len(getattr(self, f'gp{i}_tokens')))
-            self.all_gp_tokens.update(getattr(self, f'gp{i}_tokens'))
+            self.all_gp_tokens.update(gp_tokens)
 
-            # within each gene program,
-            # gene tokens need to be re-encoded to avoid having 25_000 classes in each
-            setattr(
-                self,
-                f'gp{i}_tokens_encoded',
-                self.encode_gp_tokens(getattr(self, f'gp{i}_tokens')),
-            )
+            # Set up look up tensor
+            # for converting gene tokens to encoded values inside transformer block
+            lookup_tensor = torch.full((self.vocab_size,), -100, dtype=torch.bfloat16)
+            # Create a tensor of indices corresponding to positions in gp_tokens
+            indices = torch.arange(gp_tokens_tensor.shape[0], dtype=torch.bfloat16)
+
+            # Use tensor indexing to assign valuess
+            lookup_tensor[gp_tokens_tensor.long()] = indices
+            self.register_buffer(f'gp{i}_tokens_lookup', lookup_tensor)
 
         self.encoder = nn.ModuleList(
             [
@@ -173,9 +175,7 @@ class gpWrapper(nn.Module):
                 )
             )
 
-    def build_input_matrix(
-        self, gf, input_ids, gpi_tokens_list, gp_idx, mode='full_model'
-    ):
+    def build_input_matrix(self, gf, input_ids, gp_tokens, gp_idx, mode='full_model'):
         """
         Build a matrix of shape (n_cells, n_gp_tokens, 256)
         where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
@@ -199,87 +199,36 @@ class gpWrapper(nn.Module):
 
         """
         # Get list of gp tokens
-        gp_tokens = np.array(list(gpi_tokens_list)).astype(np.int16)
+        # convert gp_tokens bf16 tensor to integers
+        # gp_tokens = gp_tokens.to(torch.int)
+        gp_tokens = gp_tokens.long()
 
-        # Convert input IDs (list of lists) to array:
-        holder = []
+        # print('gp tokens dtype', gp_tokens.dtype)
+        # print('input_ids', input_ids.dtype)
 
-        # Find max value for padding
-        if mode == 'full_model':
-            max_value = 2048
-
-            for i in range(len(input_ids)):
-                if len(input_ids[i]) == max_value:
-                    holder.append(input_ids[i].cpu().numpy())
-                else:
-                    padded = pad_array(
-                        input_ids[i].cpu().numpy(), desired_length=max_value
-                    )
-                    holder.append(padded)
-
-        else:
-            # when we are filtering gene embeddings,
-            # outputs are already padded to same length
-            holder = input_ids.cpu().numpy()
-
-        # Build an array (n_cells, n_genes) with token IDs at each position
-        tokens_arr = np.array(holder)
-
-        # binary mask (h, i, k)
-        # in cell h, is the gene as position i in our GP at position k?
-        mask = (tokens_arr[:, :, np.newaxis] == gp_tokens[np.newaxis, :]).astype(int)
+        # Create a binary mask (h, i, k)
+        # In cell h, is the gene at position i in our GP at position k?
+        # Using broadcasting to compare tokens_arr with gp_tokens
+        mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0).unsqueeze(0)
+        mask = mask.to(torch.int)
 
         # Now reshape so that we will zero out non GP genes in each cell
-        mask_expanded = torch.tensor(mask.sum(axis=-1)[:, :, np.newaxis]).to(gf.device)
+        # Sum along the last dimension to count how many GP tokens each gene matches
+        mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
         # Apply the mask to the data using broadcasting
-        masked_latent = gf * mask_expanded
-
-        # Now wrangle so that the non zero genes are first
-        # but we maintain the order
-        # loop through the cells to deal with different shapes
-        holder = []
-
-        for i in range(masked_latent.shape[0]):
-            x = masked_latent[i, :, :]
-            c = masked_latent[i, :, 1]  # find which genes have been 0'd out
-            idx = c != 0
-            idx_zero = c == 0
-            z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
-            holder += [z]
-
-        result_matrix = torch.stack(holder).to(gf.device)
+        result_matrix = gf * mask_expanded
 
         # Now do the same for labels
-        masked_labels = mask.sum(axis=-1) * tokens_arr
-
-        holder = []
-        for i in range(masked_labels.shape[0]):
-            x = masked_labels[i, :]
-            nz = x != 0
-            z = np.concatenate((x[nz], x[~nz]))
-            holder += [z]
-
-        masked_labels_output = np.array(holder)
+        masked_labels_output = mask.sum(axis=-1) * input_ids
 
         # count number of genes per cell
         num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
 
         # Make tensor for forward pass
-        masked_labels_output = torch.tensor(masked_labels_output).to(gf.device)
         # comment the line below to leave 0s because they are actually informative
         # (this gene was not in the top 1000 of this cell)
         masked_labels_output[masked_labels_output == 0] = -100
-
-        # We know that at most, the non zero genes is the number of genes in the GP
-        # for known GP we keep all genes
-        # for remaining var we only keep top 100
-        if self.add_remaining_var and gp_idx == len(self.gp_inputs) - 1:
-            n_genes_to_keep = 100
-        else:
-            n_genes_to_keep = len(gpi_tokens_list)
-        result_matrix = result_matrix[:, :n_genes_to_keep, :]
-        masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
 
         # Set up attention mask
         # to avoid attention to padding tokens
@@ -287,17 +236,20 @@ class gpWrapper(nn.Module):
         attn_mask[masked_labels_output != -100] = 1
 
         # never mask cls
-        attn_mask = torch.cat(
-            [torch.ones(attn_mask.shape[0], 1).to(attn_mask.device), attn_mask], dim=1
-        )
+        attn_mask = torch.cat([torch.ones_like(attn_mask), attn_mask], dim=1)
 
         return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
 
-    def encode_gp_tokens(self, gp_tokens):
-        """
-        Convert tokens to encoded values inside transformer block
-        """
-        return {gene: idx for idx, gene in enumerate(gp_tokens)}
+    # def encode_gp_tokens(self, gp_tokens):
+    #     """
+    #     Convert tokens to encoded values inside transformer block
+    #     """
+    #     return {gene: idx for idx, gene in enumerate(gp_tokens)}
+
+    def do_token_mapping(self, tokens_pad, gp_tokens):
+        for i, t in enumerate(gp_tokens.long()):
+            tokens_pad[tokens_pad == t] = i
+        return tokens_pad
 
     def forward(
         self,
@@ -341,27 +293,18 @@ class gpWrapper(nn.Module):
 
                 # track number of genes per cell
                 # divide by GP length
-                num_genes_per_cell = num_genes_per_cell / len(
-                    getattr(self, f'gp{i}_tokens')
+                num_genes_per_cell = num_genes_per_cell / (
+                    getattr(self, f'gp{i}_tokens').shape[0]
                 )
                 num_genes_per_cell_list += [num_genes_per_cell]
 
-                # Encode tokens for encoding
+                # Encode tokens for MLM
                 tokens_pad_unencoded = tokens_pad
 
-                tokens_pad = (
-                    tokens_pad.cpu()
-                    .apply_(
-                        lambda x: getattr(self, f'gp{i}_tokens_encoded')[x]
-                        if x in getattr(self, f'gp{i}_tokens_encoded').keys()
-                        else -100
-                    )
-                    .to(emb_pad.device)
-                )
+                tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
 
                 # get token GP representation, logits for gene level prediction,
                 # and gene_labels where masked genes = -100
-
                 encoder_output = self.encoder[i](
                     emb_pad,
                     attn_mask=attn_mask,
@@ -563,7 +506,7 @@ class cellWrapper(nn.Module):
             use_flash=use_flash,
         )
 
-    def build_input_matrix(self, z, num_genes_per_cell_list):
+    def build_input_matrix(self, z, num_genes_per_cell):
         # Prepare labels
         batch_size = z.shape[0]
         gp_labels = torch.tensor(
@@ -571,9 +514,10 @@ class cellWrapper(nn.Module):
         ).to(z.device)
 
         # reorder gp based on number of genes per cell
-        n_genes_per_cell = torch.tensor(np.array(num_genes_per_cell_list).T).to(
-            z.device
-        )
+        # n_genes_per_cell = torch.tensor(np.array(num_genes_per_cell_list).T).to(
+        #     z.device
+        # )
+        n_genes_per_cell = num_genes_per_cell.T
 
         # Find the indices that would sort each row in descending order
         sorted_indices = torch.argsort(-n_genes_per_cell, dim=1)

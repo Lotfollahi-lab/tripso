@@ -174,19 +174,42 @@ class EmbExtractor:
                 layer_nums += [int(name.split('layer.')[1].split('.')[0])]
         return int(max(layer_nums)) + 1
 
+    # def gen_attention_mask(self, minibatch_encoding, max_len=2048):
+    #     if max_len is None:
+    #         max_len = max(minibatch_encoding['length'])
+
+    #     original_lens = minibatch_encoding['length']
+    #     attention_mask = [
+    #         [1] * original_len + [0] * (max_len - original_len)
+    #         if original_len <= max_len
+    #         else [1] * max_len
+    #         for original_len in original_lens
+    #     ]
+
+    #     return torch.tensor(attention_mask).to(minibatch_encoding['input_ids'].device)
+
     def gen_attention_mask(self, minibatch_encoding, max_len=2048):
         if max_len is None:
             max_len = max(minibatch_encoding['length'])
 
-        original_lens = minibatch_encoding['length']
-        attention_mask = [
-            [1] * original_len + [0] * (max_len - original_len)
-            if original_len <= max_len
-            else [1] * max_len
-            for original_len in original_lens
-        ]
+        # Get device from the 'input_ids' tensor
+        device = minibatch_encoding['input_ids'].device
 
-        return torch.tensor(attention_mask).to(minibatch_encoding['input_ids'].device)
+        # Convert 'original_lens' to a tensor
+        original_lens = minibatch_encoding['length']
+        if not isinstance(original_lens, torch.Tensor):
+            original_lens = torch.tensor(original_lens, device=device)
+
+        # Create a mask for each sequence in the batch
+        # Initialize a tensor of zeros with the shape [batch_size, max_len]
+        attention_mask = torch.zeros((len(original_lens), max_len), device=device)
+
+        seq_range = torch.arange(max_len, device=device).expand(
+            len(original_lens), max_len
+        )
+        attention_mask[seq_range < original_lens.unsqueeze(1)] = 1
+
+        return attention_mask
 
     def extract_embs(self, model, input_data, inference):
         """

@@ -15,10 +15,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
-from scipy.sparse import vstack
-from sklearn.metrics import classification_report
 
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
+from scipy.sparse import vstack
+from sklearn.metrics import classification_report
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 from torchmetrics.functional import pairwise_cosine_similarity
@@ -936,6 +936,10 @@ class scGPL(pl.LightningModule):
 
         # calculate MLM loss for each GP
         gp_loss_dict = {}
+        loss = 0
+
+        # import time
+        # t0 = time.time()
 
         for i in range(len(self.model.gp_inputs)):
             # Loss
@@ -951,26 +955,30 @@ class scGPL(pl.LightningModule):
                     output['gene_labels_list'][i].reshape(-1),
                 )
 
-                if torch.isnan(loss_i):
-                    # usually happens if all labels are masked
-                    print(f'Loss is NaN in {self.model.gp_inputs[i]}')
-                    print('Predictions:')
-                    print(output['logits_lm_list'][i])
-                    print('')
-                    print('True labels:')
-                    print(output['gene_labels_list'][i])
-                    print('')
-                    print('Number of NaNs in predictions:')
-                    print(torch.isnan(output['logits_lm_list'][i]).sum())
-                    print('')
-                    print('Number of NaNs in true labels:')
-                    print(torch.isnan(output['gene_labels_list'][i]).sum())
-                    gp_loss_dict[self.model.gp_inputs[i]] = (
-                        torch.tensor(0).to(loss_i.device).float()
-                    )
+                # if torch.isnan(loss_i):
+                #     # usually happens if all labels are masked
+                #     print(f'Loss is NaN in {self.model.gp_inputs[i]}')
+                #     print('Predictions:')
+                #     print(output['logits_lm_list'][i])
+                #     print('')
+                #     print('True labels:')
+                #     print(output['gene_labels_list'][i])
+                #     print('')
+                #     print('Number of NaNs in predictions:')
+                #     print(torch.isnan(output['logits_lm_list'][i]).sum())
+                #     print('')
+                #     print('Number of NaNs in true labels:')
+                #     print(torch.isnan(output['gene_labels_list'][i]).sum())
+                #     gp_loss_dict[self.model.gp_inputs[i]] = (
+                #         torch.tensor(0).to(loss_i.device).float()
+                #     )
 
-                else:
-                    gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+                # else:
+                gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+                loss += loss_i
+
+                # t2 = time.time()
+                # print(f'Time taken after checking nan', t2 - t0)
 
             else:
                 gp_loss_dict[self.model.gp_inputs[i]] = (
@@ -978,9 +986,11 @@ class scGPL(pl.LightningModule):
                 )
 
             # compute total loss
-            tensor_list = list(gp_loss_dict.values())
+        #     tensor_list = list(gp_loss_dict.values())
 
-        loss = torch.sum(torch.stack(tensor_list))
+        # loss = torch.sum(torch.stack(tensor_list))
+        # t3 = time.time()
+        # print(f'Time taken after loss calculation: {t3 - t0}')
 
         # package outputs to return flexible number of objects
         holder = {
@@ -1040,7 +1050,12 @@ class scGPL(pl.LightningModule):
                     self.train_pred_counts_list.append(output['count_output'])
                     self.train_true_counts_list.append(output['true_bins'])
 
+        # t5 = time.time()
+        # print('Skipped global stuff', t5-t3)
         holder['total_loss'] = loss
+
+        # t6 = time.time()
+        # print(f'Time taken for loss calculation: {t6 - t0}')
 
         return holder
 

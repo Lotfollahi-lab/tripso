@@ -247,14 +247,14 @@ class EmbDataset(Dataset):
         Returns:
             torch.Tensor: Weights for each label.
         """
-        if self.tk_dataset.labels is None:
+        if self.labels is None:
             raise ValueError('Labels are not available.')
 
         # If subsample_indices is provided, use it to filter labels
         if subsample_indices is not None:
-            labels = self.emb.labels[subsample_indices]
+            labels = self.labels[subsample_indices]
         else:
-            labels = self.emb.labels
+            labels = self.labels
 
         # Calculate the frequency of each label
         label_counts = Counter(labels)
@@ -284,7 +284,7 @@ class txDataModule(LightningDataModule):
         folder='./data/tokenized.dataset',
         adata_path=None,  # should be h5ad object that matches tokenized dataset exactly
         batch_size=3,
-        num_workers=1,
+        num_workers=4,
         shuffle=False,
         use_weighted_sampler=False,
         label_key=None,
@@ -412,6 +412,7 @@ class txDataModule(LightningDataModule):
                 shuffle=False,
                 num_workers=self.num_workers,
                 sampler=sampler,
+                pin_memory=True,
             )
 
         else:
@@ -421,6 +422,7 @@ class txDataModule(LightningDataModule):
                 batch_size=self.batch_size,
                 shuffle=True,
                 num_workers=self.num_workers,
+                pin_memory=True,
             )
 
         return dataloader
@@ -433,6 +435,7 @@ class txDataModule(LightningDataModule):
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
+                pin_memory=True,
             )
         elif self.data_for_validation_step == 'test':
             return DataLoader(
@@ -441,6 +444,7 @@ class txDataModule(LightningDataModule):
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
+                pin_memory=True,
             )
         else:
             return DataLoader(
@@ -449,6 +453,7 @@ class txDataModule(LightningDataModule):
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
+                pin_memory=True,
             )
 
     def test_dataloader(self):
@@ -458,6 +463,7 @@ class txDataModule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
+            pin_memory=True,
         )
 
     def custom_collate(self, batch):
@@ -785,9 +791,7 @@ class EmbDataModule(LightningDataModule):
     def train_dataloader(self):
         if self.use_weighted_sampler:
             sampler = WeightedRandomSampler(
-                weights=self.train_dataset.dataset.get_label_weights(
-                    subsample_indices=self.train_dataset.indices
-                ),
+                weights=self.train_dataset.get_label_weights(),
                 num_samples=len(self.train_dataset),
                 replacement=True,
                 generator=torch.Generator().manual_seed(42),
