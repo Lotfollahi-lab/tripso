@@ -121,7 +121,7 @@ class Attention(nn.Module):
                     q,
                     k,
                     v,
-                    # attn_mask,
+                    # pytorch flash attention does not support mask
                     scale=self.scale,
                     dropout_p=0.0,
                 )
@@ -305,6 +305,7 @@ class gpTransformerEncoder(nn.Module):
         self.pos_embed = PositionalEncoding(
             d_model=embed_dim, dropout=drop_rate, max_len=2048
         )
+        # self.pos_embed = nn.Embedding(2048, embed_dim)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -350,6 +351,13 @@ class gpTransformerEncoder(nn.Module):
         # add positional encoding to each token
         if self.use_pos_emb:
             x = self.pos_embed(x)
+        #     position_ids = torch.arange(x.shape[1], device=x.device)
+        #     pos_emb = self.pos_embed(position_ids)
+        #     print('pos_emb shape', pos_emb.shape)
+        #     print('x shape', x.shape)
+        #     x = x + pos_emb
+
+        #     print('x shape after pos emb', x.shape)
 
         return self.pos_drop(x), gene_labels
 

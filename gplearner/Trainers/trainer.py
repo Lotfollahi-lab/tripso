@@ -428,11 +428,9 @@ class scGPL(pl.LightningModule):
 
             for i, gp in enumerate(self.model.gp_inputs):
                 emb_dict[gp] = output['z'][:, i, :].detach().cpu()
-                emb_dict[f'{gp}_num_genes'] = np.array(
-                    output['num_genes_per_cell_list']
-                )[
-                    i, :
-                ]  # .T
+                emb_dict[f'{gp}_num_genes'] = (
+                    output['num_genes_per_cell_list'][i].cpu().numpy().T
+                )
 
             if self.model_type == 'Global':
                 emb_dict['cell_token'] = output['cell_token'].detach().cpu()

@@ -122,7 +122,10 @@ class gpWrapper(nn.Module):
 
             # Set up look up tensor
             # for converting gene tokens to encoded values inside transformer block
-            lookup_tensor = torch.full((self.vocab_size,), -100, dtype=torch.bfloat16)
+            # +2 because in geneformer 0 --> padding and 1 --> mask
+            lookup_tensor = torch.full(
+                (self.vocab_size + 2,), -100, dtype=torch.bfloat16
+            )
             # Create a tensor of indices corresponding to positions in gp_tokens
             indices = torch.arange(gp_tokens_tensor.shape[0], dtype=torch.bfloat16)
 
@@ -203,40 +206,83 @@ class gpWrapper(nn.Module):
         # gp_tokens = gp_tokens.to(torch.int)
         gp_tokens = gp_tokens.long()
 
-        # print('gp tokens dtype', gp_tokens.dtype)
-        # print('input_ids', input_ids.dtype)
-
         # Create a binary mask (h, i, k)
         # In cell h, is the gene at position i in our GP at position k?
         # Using broadcasting to compare tokens_arr with gp_tokens
-        mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0).unsqueeze(0)
+        mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0)  # .unsqueeze(0)
         mask = mask.to(torch.int)
 
         # Now reshape so that we will zero out non GP genes in each cell
         # Sum along the last dimension to count how many GP tokens each gene matches
         mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
+        # # Apply the mask to the data using broadcasting
+        # result_matrix = gf * mask_expanded
+
         # Apply the mask to the data using broadcasting
-        result_matrix = gf * mask_expanded
+        masked_latent = gf * mask_expanded
+
+        # Now wrangle so that the non zero genes are first
+        # but we maintain the order
+        # loop through the cells to deal with different shapes
+        holder = []
+
+        for i in range(masked_latent.shape[0]):
+            x = masked_latent[i, :, :]
+            c = masked_latent[i, :, 1]  # find which genes have been 0'd out
+            idx = c != 0
+            idx_zero = c == 0
+            z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
+            holder += [z]
+
+        result_matrix = torch.stack(holder)
 
         # Now do the same for labels
-        masked_labels_output = mask.sum(axis=-1) * input_ids
+        # masked_labels_output = mask.sum(axis=-1) * input_ids
+        # masked_labels_output = torch.where(mask.sum(axis=-1) == 0,
+        # torch.zeros_like(input_ids), input_ids)
+        masked_labels = torch.where(
+            mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
+        )
+
+        holder = []
+        for i in range(masked_labels.shape[0]):
+            x = masked_labels[i, :]
+            nz = x != 0
+            z = torch.concat((x[nz], x[~nz]), dim=0)
+            holder += [z]
+
+        masked_labels_output = torch.stack(holder)
 
         # count number of genes per cell
         num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
 
+        # crop
+        n_genes_to_keep = gp_tokens.shape[0]
+        result_matrix = result_matrix[:, :n_genes_to_keep, :]
+        masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
+
         # Make tensor for forward pass
         # comment the line below to leave 0s because they are actually informative
         # (this gene was not in the top 1000 of this cell)
-        masked_labels_output[masked_labels_output == 0] = -100
+        # masked_labels_output[masked_labels_output == 0] = -100
+        # happens when do LOOKUP
+
+        # s1 = set(list(gp_tokens.cpu().numpy().flatten()))
+        # s2 = set(list(masked_labels_output.cpu().numpy().flatten()))
+        # if len(s2 - s1) > 1:
+        #     print(f'problem tokens {s2 - s1}')
+        #     raise ValueError
 
         # Set up attention mask
         # to avoid attention to padding tokens
         attn_mask = torch.zeros_like(masked_labels_output)
-        attn_mask[masked_labels_output != -100] = 1
+        attn_mask[masked_labels_output != 0] = 1
 
         # never mask cls
-        attn_mask = torch.cat([torch.ones_like(attn_mask), attn_mask], dim=1)
+        attn_mask = torch.cat(
+            [torch.ones_like(attn_mask)[:, 0].unsqueeze(-1), attn_mask], dim=-1
+        )
 
         return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
 
@@ -300,7 +346,6 @@ class gpWrapper(nn.Module):
 
                 # Encode tokens for MLM
                 tokens_pad_unencoded = tokens_pad
-
                 tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
 
                 # get token GP representation, logits for gene level prediction,
@@ -506,7 +551,7 @@ class cellWrapper(nn.Module):
             use_flash=use_flash,
         )
 
-    def build_input_matrix(self, z, num_genes_per_cell):
+    def build_input_matrix(self, z, num_genes_per_cell_list):
         # Prepare labels
         batch_size = z.shape[0]
         gp_labels = torch.tensor(
@@ -517,7 +562,7 @@ class cellWrapper(nn.Module):
         # n_genes_per_cell = torch.tensor(np.array(num_genes_per_cell_list).T).to(
         #     z.device
         # )
-        n_genes_per_cell = num_genes_per_cell.T
+        n_genes_per_cell = torch.stack(num_genes_per_cell_list).T
 
         # Find the indices that would sort each row in descending order
         sorted_indices = torch.argsort(-n_genes_per_cell, dim=1)
