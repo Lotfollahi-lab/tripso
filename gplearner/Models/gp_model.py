@@ -113,7 +113,7 @@ class gpWrapper(nn.Module):
                 gene_name_path,
             )
 
-            gp_tokens_tensor = torch.tensor(list(gp_tokens), dtype=torch.bfloat16)
+            gp_tokens_tensor = torch.tensor(list(gp_tokens), dtype=torch.int32)
 
             self.register_buffer(f'gp{i}_tokens', gp_tokens_tensor)
 
