@@ -93,6 +93,9 @@ def pp_and_tokenize(
         print('Input anndata object', adata.shape)
 
         if 'idx' not in adata.obs.columns:
+            # make unique
+            if adata.obs.index.duplicated().any():
+                adata.obs_names_make_unique()
             adata.obs['idx'] = adata.obs.index
 
         if batch_keys is not None:

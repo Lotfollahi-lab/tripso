@@ -178,7 +178,9 @@ class gpWrapper(nn.Module):
                 )
             )
 
-    def build_input_matrix(self, gf, input_ids, gp_tokens, gp_idx, mode='full_model'):
+    def build_input_matrix(
+        self, gf, input_ids, gp_tokens, gp_idx, mode='full_model', crop_to_gp_len=True
+    ):
         """
         Build a matrix of shape (n_cells, n_gp_tokens, 256)
         where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
@@ -216,63 +218,61 @@ class gpWrapper(nn.Module):
         # Sum along the last dimension to count how many GP tokens each gene matches
         mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
-        # # Apply the mask to the data using broadcasting
-        # result_matrix = gf * mask_expanded
+        if crop_to_gp_len:
+            # Apply the mask to the data using broadcasting
+            masked_latent = gf * mask_expanded
 
-        # Apply the mask to the data using broadcasting
-        masked_latent = gf * mask_expanded
+            # Now wrangle so that the non zero genes are first
+            # but we maintain the order
+            # loop through the cells to deal with different shapes
+            holder = []
 
-        # Now wrangle so that the non zero genes are first
-        # but we maintain the order
-        # loop through the cells to deal with different shapes
-        holder = []
+            for i in range(masked_latent.shape[0]):
+                x = masked_latent[i, :, :]
+                c = masked_latent[i, :, 1]  # find which genes have been 0'd out
+                idx = c != 0
+                idx_zero = c == 0
+                z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
+                holder += [z]
 
-        for i in range(masked_latent.shape[0]):
-            x = masked_latent[i, :, :]
-            c = masked_latent[i, :, 1]  # find which genes have been 0'd out
-            idx = c != 0
-            idx_zero = c == 0
-            z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
-            holder += [z]
+            result_matrix = torch.stack(holder)
 
-        result_matrix = torch.stack(holder)
+            masked_labels = torch.where(
+                mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
+            )
 
-        # Now do the same for labels
-        # masked_labels_output = mask.sum(axis=-1) * input_ids
-        # masked_labels_output = torch.where(mask.sum(axis=-1) == 0,
-        # torch.zeros_like(input_ids), input_ids)
-        masked_labels = torch.where(
-            mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
-        )
+            holder = []
+            for i in range(masked_labels.shape[0]):
+                x = masked_labels[i, :]
+                nz = x != 0
+                z = torch.concat((x[nz], x[~nz]), dim=0)
+                holder += [z]
 
-        holder = []
-        for i in range(masked_labels.shape[0]):
-            x = masked_labels[i, :]
-            nz = x != 0
-            z = torch.concat((x[nz], x[~nz]), dim=0)
-            holder += [z]
+            masked_labels_output = torch.stack(holder)
 
-        masked_labels_output = torch.stack(holder)
+            # crop
+            n_genes_to_keep = gp_tokens.shape[0]
+            result_matrix = result_matrix[:, :n_genes_to_keep, :]
+            masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
+
+        else:
+            # Apply the mask to the data using broadcasting
+            result_matrix = gf * mask_expanded
+
+            # Now do the same for labels
+            # masked_labels_output = mask.sum(axis=-1) * input_ids
+            masked_labels_output = torch.where(
+                mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
+            )
 
         # count number of genes per cell
         num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
-
-        # crop
-        n_genes_to_keep = gp_tokens.shape[0]
-        result_matrix = result_matrix[:, :n_genes_to_keep, :]
-        masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
 
         # Make tensor for forward pass
         # comment the line below to leave 0s because they are actually informative
         # (this gene was not in the top 1000 of this cell)
         # masked_labels_output[masked_labels_output == 0] = -100
         # happens when do LOOKUP
-
-        # s1 = set(list(gp_tokens.cpu().numpy().flatten()))
-        # s2 = set(list(masked_labels_output.cpu().numpy().flatten()))
-        # if len(s2 - s1) > 1:
-        #     print(f'problem tokens {s2 - s1}')
-        #     raise ValueError
 
         # Set up attention mask
         # to avoid attention to padding tokens
@@ -291,11 +291,6 @@ class gpWrapper(nn.Module):
     #     Convert tokens to encoded values inside transformer block
     #     """
     #     return {gene: idx for idx, gene in enumerate(gp_tokens)}
-
-    def do_token_mapping(self, tokens_pad, gp_tokens):
-        for i, t in enumerate(gp_tokens.long()):
-            tokens_pad[tokens_pad == t] = i
-        return tokens_pad
 
     def forward(
         self,

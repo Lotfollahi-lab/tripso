@@ -103,6 +103,8 @@ class Attention(nn.Module):
 
         if self.use_flash:
             return_attention = False
+            # do masking here
+            x = x * attn_mask.unsqueeze(-1)
 
         # Attention mask is 0 for padding tokens (no attention)
         B, N, C = x.shape

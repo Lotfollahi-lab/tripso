@@ -420,7 +420,7 @@ def run_training(
             finetune_lr=finetune_lr,
             use_finetune_lr=global_training == 'finetune',
             lr_scheduler=lr_scheduler,
-            optimizer=DeepSpeedCPUAdam,
+            optimizer=DeepSpeedCPUAdam,  # FusedAdam
             use_gp_similarity_loss=use_gp_similarity_loss,
             gp_similarity=gp_similarity,
             output_dir=output_dir,
@@ -571,7 +571,7 @@ def run_training(
             devices=-1,
             accelerator='auto',
             precision='bf16-mixed',
-            profiler='simple',
+            profiler='advanced',
             strategy=strategy,
         )
 
