@@ -103,6 +103,8 @@ class Attention(nn.Module):
 
         if self.use_flash:
             return_attention = False
+            # do masking here
+            x = x * attn_mask.unsqueeze(-1)
 
         # Attention mask is 0 for padding tokens (no attention)
         B, N, C = x.shape
@@ -121,7 +123,7 @@ class Attention(nn.Module):
                     q,
                     k,
                     v,
-                    # attn_mask,
+                    # pytorch flash attention does not support mask
                     scale=self.scale,
                     dropout_p=0.0,
                 )
@@ -305,6 +307,7 @@ class gpTransformerEncoder(nn.Module):
         self.pos_embed = PositionalEncoding(
             d_model=embed_dim, dropout=drop_rate, max_len=2048
         )
+        # self.pos_embed = nn.Embedding(2048, embed_dim)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -349,7 +352,14 @@ class gpTransformerEncoder(nn.Module):
 
         # add positional encoding to each token
         if self.use_pos_emb:
-            x = x + self.pos_embed(x)
+            x = self.pos_embed(x)
+        #     position_ids = torch.arange(x.shape[1], device=x.device)
+        #     pos_emb = self.pos_embed(position_ids)
+        #     print('pos_emb shape', pos_emb.shape)
+        #     print('x shape', x.shape)
+        #     x = x + pos_emb
+
+        #     print('x shape after pos emb', x.shape)
 
         return self.pos_drop(x), gene_labels
 
@@ -402,6 +412,31 @@ class gpTransformerEncoder(nn.Module):
             if len(self.blocks) - i <= n:
                 output.append(self.norm(x))
         return output
+
+
+class PretrainedEmbeddings(nn.Module):
+    '''
+    BertEmbedding style class for exploring LIG
+    Initialize nn.Embedding directly from embeddings
+    which are output from another part of the model
+    '''
+
+    def __init__(
+        self,
+        pretrained_emb,
+        pretrained_pos_emb,
+        vocab_size,
+        embedding_dim,
+    ):
+        super().__init__()
+        self.word_embeddings = nn.Embedding(vocab_size, embedding_dim).from_pretrained(
+            pretrained_emb
+        )
+        self.position_embeddings = pretrained_pos_emb
+
+    def forward(self):
+        embeddings = self.word_embeddings + self.position_embeddings
+        return embeddings
 
 
 if __name__ == '__main__':

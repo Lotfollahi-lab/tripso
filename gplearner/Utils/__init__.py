@@ -27,6 +27,7 @@ from .utils import (  # noqa: F401
     mlm_mask_generator,
     one_hot_encoder,
     pad_array,
+    summarize_attributions,
     trunc_normal_,
 )
 
@@ -56,4 +57,5 @@ __all___ = [
     'nb',
     'zinb',
     'one_hot_encoder',
+    'summarize_attributions',
 ]

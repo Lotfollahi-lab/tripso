@@ -18,6 +18,13 @@ from torch.utils.data import (
     random_split,
 )
 
+from ..Models.gp_model import (
+    GENE_NAME_FILE,
+    GENEFORMER_MODEL_PATH,
+    gfWrapper,
+)
+from ..Utils.utils import get_gp_tokens, pad_array
+
 random.seed(0)
 
 
@@ -57,7 +64,8 @@ class AnnDataset(Dataset):
         return self.adata.shape[0]
 
     def __getitem__(self, idx):
-        adata_tensor = torch.tensor(self.adata.X[idx, :], dtype=torch.float32)
+        adata_slice = self.adata[idx, :].X.toarray()
+        adata_tensor = torch.tensor(adata_slice, dtype=torch.float32).squeeze()
         obs = self.adata.obs.iloc[idx, :]
         idx = obs['idx']
 
@@ -82,6 +90,8 @@ class tkDataset(Dataset):
         self,
         folder='./data/tokenized.dataset',
         label_key=None,
+        filter_key=None,
+        filter_value=None,
     ):
         """Create a dataset from a directory with a tokenized Geneformer dataset
 
@@ -91,7 +101,12 @@ class tkDataset(Dataset):
                 path to anndata object
 
         """
-        self.gdata = load_from_disk(folder)
+        gdata = load_from_disk(folder)
+
+        if filter_key is not None:
+            gdata = gdata.filter(lambda x: x[filter_key] == filter_value)
+
+        self.gdata = gdata
 
         # Metadata to keep track of
         # (we assume filtering of obs columns happens at
@@ -171,14 +186,34 @@ class txDataset(Dataset):
 
 
 class EmbDataset(Dataset):
-    def __init__(self, folder_path, data_type, label_key=None):
+    def __init__(
+        self,
+        folder_path,
+        data_type,
+        label_key=None,
+        filter_key=None,
+        filter_value=None,
+        count_n_unique=None,
+    ):
         self.data_type = data_type
         if self.data_type == 'dataset':
-            self.emb = load_from_disk(folder_path)
+            emb = load_from_disk(folder_path)
+            if filter_key is not None:
+                emb = emb.filter(lambda x: x[filter_key] == filter_value)
+            self.emb = emb
+            if count_n_unique is not None:
+                self.num_classes = len(emb.unique(count_n_unique))
+
         elif self.data_type == 'h5ad':
-            self.emb = sc.read_h5ad(folder_path)
+            emb = sc.read_h5ad(folder_path)
+            if filter_key is not None:
+                emb = emb[emb.obs[filter_key] == filter_value]
+            self.emb = emb
+            if count_n_unique is not None:
+                self.num_classes = emb.obs[count_n_unique].nunique()
+
         else:
-            raise ValueError('data_type should be either dataset or h5ad')
+            raise NotImplementedError('Data type not recognized')
 
         if label_key is not None:
             if self.data_type == 'dataset':
@@ -212,14 +247,14 @@ class EmbDataset(Dataset):
         Returns:
             torch.Tensor: Weights for each label.
         """
-        if self.tk_dataset.labels is None:
+        if self.labels is None:
             raise ValueError('Labels are not available.')
 
         # If subsample_indices is provided, use it to filter labels
         if subsample_indices is not None:
-            labels = self.emb.labels[subsample_indices]
+            labels = self.labels[subsample_indices]
         else:
-            labels = self.emb.labels
+            labels = self.labels
 
         # Calculate the frequency of each label
         label_counts = Counter(labels)
@@ -249,10 +284,13 @@ class txDataModule(LightningDataModule):
         folder='./data/tokenized.dataset',
         adata_path=None,  # should be h5ad object that matches tokenized dataset exactly
         batch_size=3,
-        num_workers=1,
+        num_workers=4,
         shuffle=False,
         use_weighted_sampler=False,
         label_key=None,
+        return_tuple=False,
+        filter_key=None,
+        filter_value=None,
         # development only:
         frac_for_training=1,
         data_split_to_pass_to_val_step='val',
@@ -279,6 +317,9 @@ class txDataModule(LightningDataModule):
         self.frac_for_training = frac_for_training
         self.data_for_validation_step = data_split_to_pass_to_val_step
         self.label_key = label_key
+        self.return_tuple = return_tuple
+        self.filter_key = filter_key
+        self.filter_value = filter_value
 
         with open(token_dictionary_file, 'rb') as f:
             self.gene_token_dict = pickle.load(f)
@@ -299,7 +340,12 @@ class txDataModule(LightningDataModule):
 
     def setup(self, stage=None):
         # Load the tokenized dataset
-        tokenized_dataset = tkDataset(self.folder, label_key=self.label_key)
+        tokenized_dataset = tkDataset(
+            self.folder,
+            label_key=self.label_key,
+            filter_key=self.filter_key,
+            filter_value=self.filter_value,
+        )
 
         # Optionally load anndata object
         if self.adata_path is not None:
@@ -366,6 +412,7 @@ class txDataModule(LightningDataModule):
                 shuffle=False,
                 num_workers=self.num_workers,
                 sampler=sampler,
+                pin_memory=True,
             )
 
         else:
@@ -375,6 +422,7 @@ class txDataModule(LightningDataModule):
                 batch_size=self.batch_size,
                 shuffle=True,
                 num_workers=self.num_workers,
+                pin_memory=True,
             )
 
         return dataloader
@@ -387,6 +435,7 @@ class txDataModule(LightningDataModule):
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
+                pin_memory=True,
             )
         elif self.data_for_validation_step == 'test':
             return DataLoader(
@@ -395,6 +444,7 @@ class txDataModule(LightningDataModule):
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
+                pin_memory=True,
             )
         else:
             return DataLoader(
@@ -403,6 +453,7 @@ class txDataModule(LightningDataModule):
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
+                pin_memory=True,
             )
 
     def test_dataloader(self):
@@ -412,6 +463,7 @@ class txDataModule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
+            pin_memory=True,
         )
 
     def custom_collate(self, batch):
@@ -455,7 +507,220 @@ class txDataModule(LightningDataModule):
             output_dict['counts'] = counts
             output_dict['size_factor'] = [d['size_factor'] for d in adata_batch]
 
+        if self.return_tuple:
+            return (
+                output_dict['input_ids'],
+                output_dict['length'].unsqueeze(-1),
+                output_dict['cell_type'],
+            )
+
         return output_dict
+
+
+class iTxDataModule(txDataModule):
+    def __init__(
+        self,
+        gp,
+        gpdb,
+        do_ensembl_conversion,
+        geneformer_model=GENEFORMER_MODEL_PATH,
+        gene_token_path=TOKEN_DICTIONARY_FILE,
+        gene_name_path=GENE_NAME_FILE,
+        gf_layer_to_quant=-1,
+        gene_counts_df=None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        # Initialize geneformer model for getting geneformer embeddings
+        self.gf_wrapper = gfWrapper(
+            geneformer_model=geneformer_model, gf_layer_to_quant=gf_layer_to_quant
+        )
+
+        # Set up encoded GP tokens
+        self.gp_tokens = get_gp_tokens(
+            gp,
+            gpdb,
+            do_ensembl_conversion,
+            gene_counts_df,
+            gene_token_path,
+            gene_name_path,
+        )
+
+        self.gp_tokens_encoded = self.encode_gp_tokens(self.gp_tokens)
+
+    def encode_gp_tokens(self, gp_tokens):
+        return {gene: idx + 1 for idx, gene in enumerate(gp_tokens)}
+
+    def build_input_matrix(self, gf, input_ids, gpi_tokens_list):
+        """
+        Build a matrix of shape (n_cells, n_gp_tokens, 256)
+        where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
+        maintains geneformer order
+
+        Inputs:
+
+        gf :
+            geneformer embeddings (n_cells, 2048, 256)
+
+        input_ids:
+            list of lists with positional information for each token
+
+        gp_tokens_list:
+            list of tokens for each gene program
+
+        model:
+            "full_model" : set for input into geneformer
+            "extract_genes" : when extracting gene embeddings
+                            -> max size is total GP size
+
+        """
+        # Get list of gp tokens
+        gp_tokens = np.array(list(gpi_tokens_list)).astype(np.int16)
+
+        # Convert input IDs (list of lists) to array:
+        holder = []
+
+        # Find max value for padding
+        max_value = 2048
+
+        for i in range(len(input_ids)):
+            if len(input_ids[i]) == max_value:
+                holder.append(input_ids[i].cpu().numpy())
+            else:
+                padded = pad_array(input_ids[i].cpu().numpy(), desired_length=max_value)
+                holder.append(padded)
+
+        # Build an array (n_cells, n_genes) with token IDs at each position
+        tokens_arr = np.array(holder)
+
+        # binary mask (h, i, k)
+        # in cell h, is the gene as position i in our GP at position k?
+        mask = (tokens_arr[:, :, np.newaxis] == gp_tokens[np.newaxis, :]).astype(int)
+
+        # Now reshape so that we will zero out non GP genes in each cell
+        mask_expanded = torch.tensor(mask.sum(axis=-1)[:, :, np.newaxis]).to(gf.device)
+
+        # Apply the mask to the data using broadcasting
+        masked_latent = gf * mask_expanded
+
+        # Now wrangle so that the non zero genes are first
+        # but we maintain the order
+        # loop through the cells to deal with different shapes
+        holder = []
+
+        for i in range(masked_latent.shape[0]):
+            x = masked_latent[i, :, :]
+            c = masked_latent[i, :, 1]  # find which genes have been 0'd out
+            idx = c != 0
+            idx_zero = c == 0
+            z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
+            holder += [z]
+
+        result_matrix = torch.stack(holder).to(gf.device)
+
+        # Now do the same for labels
+        masked_labels = mask.sum(axis=-1) * tokens_arr
+
+        holder = []
+        for i in range(masked_labels.shape[0]):
+            x = masked_labels[i, :]
+            nz = x != 0
+            z = np.concatenate((x[nz], x[~nz]))
+            holder += [z]
+
+        masked_labels_output = np.array(holder)
+
+        # count number of genes per cell
+        num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
+
+        # Make tensor for forward pass
+        masked_labels_output = torch.tensor(masked_labels_output).to(gf.device)
+        # comment the line below to leave 0s because they are actually informative
+        # (this gene was not in the top 1000 of this cell)
+        masked_labels_output[masked_labels_output == 0] = -100
+
+        # We know that at most, the non zero genes is the number of genes in the GP
+        # for known GP we keep all genes
+        # TO DO : ADD OPTION FOR GPFINDER HERE
+        n_genes_to_keep = len(gpi_tokens_list)
+        result_matrix = result_matrix[:, :n_genes_to_keep, :]
+        masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
+
+        # Set up attention mask
+        # to avoid attention to padding tokens
+        attn_mask = torch.zeros_like(masked_labels_output)
+        attn_mask[masked_labels_output != -100] = 1
+
+        # never mask cls
+        attn_mask = torch.cat(
+            [torch.ones(attn_mask.shape[0], 1).to(attn_mask.device), attn_mask], dim=1
+        )
+
+        return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
+
+    def custom_collate(self, batch):
+        # Step 1 : tokenized dataset
+        tokenized_batch = [d['tk'] for d in batch]
+
+        model_input_size = 2048
+        input_batch_id = [torch.tensor(d['input_ids']) for d in tokenized_batch]
+        length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
+
+        input_batch_id = pad_tensor_list(
+            input_batch_id, 2048, self.pad_token_id, model_input_size
+        )
+
+        # Get Geneformer embeddings
+        input_dict = {
+            'input_ids': input_batch_id,
+            'length': length,
+        }
+        gf_emb = self.gf_wrapper(input_dict, inference=False)
+
+        # Wrangle gp genes
+        (
+            emb_pad,
+            tokens_pad,
+            num_genes_per_cell,
+            attn_mask,
+        ) = self.build_input_matrix(
+            gf_emb,  # geneformer embeddings
+            input_batch_id,
+            self.gp_tokens,
+        )
+
+        # # Encode tokens for encoding
+        # tokens_pad_unencoded = tokens_pad.copy()
+
+        # tokens_pad = (
+        #     tokens_pad.cpu()
+        #     .apply_(
+        #         lambda x: self.gp_tokens_encoded[x]
+        #         if x in self.gp_tokens_encoded.keys()
+        #         else 0 # padding token as defined in encode_gp_tokens
+        #     )
+        #     .to(emb_pad.device)
+        # )
+
+        # Set up export
+
+        output_dict = {
+            'token_labels': tokens_pad,
+            'num_genes_per_cell': num_genes_per_cell,
+            'attn_mask': attn_mask,
+        }
+
+        # Keep track of metadata
+        for m in self.metadata:
+            if m.endswith('_id'):
+                output_dict[m] = torch.tensor(
+                    [d[m] for d in tokenized_batch], dtype=torch.long
+                )
+            else:
+                output_dict[m] = [d[m] for d in tokenized_batch]
+
+        return emb_pad, output_dict
 
 
 class EmbDataModule(LightningDataModule):
@@ -469,16 +734,27 @@ class EmbDataModule(LightningDataModule):
         data_type='dataset',
         continuous_cov=[],
         use_weighted_sampler=False,
+        label_key=None,
+        filter_key=None,
+        filter_value=None,
+        count_n_unique=None,
     ):
         super().__init__()
         self.folder_path = folder_path
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.emb_to_keep = emb_label
-        self.meta_labels = meta_labels
+        if isinstance(meta_labels, str):
+            self.meta_labels = [meta_labels]
+        else:
+            self.meta_labels = meta_labels
         self.data_type = data_type
         self.continuous_cov = continuous_cov
         self.use_weighted_sampler = use_weighted_sampler
+        self.label_key = label_key
+        self.filter_key = filter_key
+        self.filter_value = filter_value
+        self.count_n_unique = count_n_unique
 
     def prepare_data(self):
         folder_path = Path(self.folder_path)
@@ -488,21 +764,34 @@ class EmbDataModule(LightningDataModule):
         tag = '.h5ad' if self.data_type == 'h5ad' else ''
 
         self.train_dataset = EmbDataset(
-            os.path.join(self.folder_path, f'train_set{tag}'), data_type=self.data_type
+            os.path.join(self.folder_path, f'train_set{tag}'),
+            data_type=self.data_type,
+            label_key=self.label_key,
+            filter_key=self.filter_key,
+            filter_value=self.filter_value,
+            count_n_unique=self.count_n_unique,
         )
+
         self.val_dataset = EmbDataset(
-            os.path.join(self.folder_path, f'val_set{tag}'), data_type=self.data_type
+            os.path.join(self.folder_path, f'val_set{tag}'),
+            data_type=self.data_type,
+            filter_key=self.filter_key,
+            filter_value=self.filter_value,
         )
         self.test_dataset = EmbDataset(
-            os.path.join(self.folder_path, f'test_set{tag}'), data_type=self.data_type
+            os.path.join(self.folder_path, f'test_set{tag}'),
+            data_type=self.data_type,
+            filter_key=self.filter_key,
+            filter_value=self.filter_value,
         )
+
+        if self.count_n_unique is not None:
+            self.num_classes = self.train_dataset.num_classes
 
     def train_dataloader(self):
         if self.use_weighted_sampler:
             sampler = WeightedRandomSampler(
-                weights=self.train_dataset.dataset.get_label_weights(
-                    subsample_indices=self.train_dataset.indices
-                ),
+                weights=self.train_dataset.get_label_weights(),
                 num_samples=len(self.train_dataset),
                 replacement=True,
                 generator=torch.Generator().manual_seed(42),
@@ -547,11 +836,20 @@ class EmbDataModule(LightningDataModule):
     def custom_collate(self, batch):
         if self.data_type == 'dataset':
             # Step 1 : get relevant embeddings
-            emb = [torch.tensor(d[self.emb_to_keep]) for d in batch]
+            if isinstance(self.emb_to_keep, str):
+                emb = [torch.tensor(d[self.emb_to_keep]) for d in batch]
 
-            output_dict = {
-                self.emb_to_keep: torch.stack(emb),
-            }
+                output_dict = {
+                    self.emb_to_keep: torch.stack(emb),
+                }
+
+            else:
+                for emb_label in self.emb_to_keep:
+                    emb = [torch.tensor(d[emb_label]) for d in batch]
+
+                    output_dict = {
+                        emb_label: torch.stack(emb),
+                    }
 
             # Step 2: get metadata
             for m in self.meta_labels:
@@ -591,3 +889,48 @@ class EmbDataModule(LightningDataModule):
                     output_dict[m] = [d['obs'][m] for d in batch]
 
         return output_dict
+
+
+class iEmbDataModule(EmbDataModule):
+    def __init__(self, gp_inputs, **kwargs):
+        self.gp_inputs = gp_inputs
+        super().__init__(**kwargs)
+
+    def custom_collate(self, batch):
+        # Prepare data for input into cellwrapper
+        # wants x['z'] and x['num_genes_per_cell_list']
+        # we need to restack in the same order:
+        # 1. embeddings
+
+        # Accumulate embeddings for each gp across the batch
+        gp_embs = [
+            torch.stack([torch.tensor(d[gp]) for d in batch]) for gp in self.gp_inputs
+        ]
+
+        # Stack along a new dimension to get shape (len(gp_inputs), batch, emb)
+        gp_embs_tensor = torch.stack(gp_embs)
+
+        # Transpose to get shape (batch, len(gp_inputs), emb)
+        z = gp_embs_tensor.transpose(0, 1)
+
+        # 2. num_genes_per_cell_list
+
+        genes_per_cell_list = []
+
+        for gp in self.gp_inputs:
+            genes_per_cell_list.append(
+                [torch.tensor(d[f'{gp}_num_genes']) for d in batch]
+            )
+
+        output_dict = {'num_genes_per_cell_list': genes_per_cell_list}
+
+        # And metadata
+        for m in self.meta_labels:
+            if m.endswith('_id'):
+                output_dict[m] = torch.tensor([d[m] for d in batch], dtype=torch.long)
+            elif m in self.continuous_cov:
+                output_dict[m] = torch.tensor([d[m] for d in batch])
+            else:
+                output_dict[m] = [d[m] for d in batch]
+
+        return z, output_dict

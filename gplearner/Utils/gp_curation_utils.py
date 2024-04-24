@@ -1,4 +1,4 @@
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 
 from .utils import remove_leading_numbers_and_underscore
 
@@ -203,7 +203,7 @@ class Ontology(object):
         return terms
 
     def add_genes(self, gobp):
-        for p in tqdm(gobp.columns, desc='Adding gene sets', leave=False):
+        for p in tqdm(gobp.columns):
             gp = p.replace('GOBP_', '')
             gp = remove_leading_numbers_and_underscore(gp)
             x = self.get_go_from_name(gp)
@@ -303,7 +303,7 @@ def rm_overlapping_gp(df, token_df, threshold=0.3):
     gp_to_drop = []
 
     # Calculate intersection over length of non-null elements
-    for i in tqdm(df.columns, desc='Calculating GP overlap', leave=False):
+    for i in tqdm(df.columns):
         for j in df.columns:
             if i == j:
                 continue

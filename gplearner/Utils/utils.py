@@ -1142,3 +1142,17 @@ class CosineLRwithWarmUp(torch.optim.lr_scheduler._LRScheduler):
         else:
             for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
                 param_group['lr'] = lr
+
+
+###################################
+# Attributions helper functions
+###################################
+
+
+def summarize_attributions(attributions):
+    '''
+    from https://captum.ai/tutorials/Bert_SQUAD_Interpret
+    '''
+    attributions = attributions.sum(dim=-1).squeeze(0)
+    attributions = attributions / torch.norm(attributions)
+    return attributions

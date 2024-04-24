@@ -15,10 +15,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
-from scipy.sparse import vstack
-from sklearn.metrics import classification_report
 
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
+from scipy.sparse import vstack
+from sklearn.metrics import classification_report
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 from torchmetrics.functional import pairwise_cosine_similarity
@@ -428,6 +428,9 @@ class scGPL(pl.LightningModule):
 
             for i, gp in enumerate(self.model.gp_inputs):
                 emb_dict[gp] = output['z'][:, i, :].detach().cpu()
+                emb_dict[f'{gp}_num_genes'] = (
+                    output['num_genes_per_cell_list'][i].cpu().numpy().T
+                )
 
             if self.model_type == 'Global':
                 emb_dict['cell_token'] = output['cell_token'].detach().cpu()
@@ -931,6 +934,10 @@ class scGPL(pl.LightningModule):
 
         # calculate MLM loss for each GP
         gp_loss_dict = {}
+        loss = 0
+
+        # import time
+        # t0 = time.time()
 
         for i in range(len(self.model.gp_inputs)):
             # Loss
@@ -946,26 +953,30 @@ class scGPL(pl.LightningModule):
                     output['gene_labels_list'][i].reshape(-1),
                 )
 
-                if torch.isnan(loss_i):
-                    # usually happens if all labels are masked
-                    print(f'Loss is NaN in {self.model.gp_inputs[i]}')
-                    print('Predictions:')
-                    print(output['logits_lm_list'][i])
-                    print('')
-                    print('True labels:')
-                    print(output['gene_labels_list'][i])
-                    print('')
-                    print('Number of NaNs in predictions:')
-                    print(torch.isnan(output['logits_lm_list'][i]).sum())
-                    print('')
-                    print('Number of NaNs in true labels:')
-                    print(torch.isnan(output['gene_labels_list'][i]).sum())
-                    gp_loss_dict[self.model.gp_inputs[i]] = (
-                        torch.tensor(0).to(loss_i.device).float()
-                    )
+                # if torch.isnan(loss_i):
+                #     # usually happens if all labels are masked
+                #     print(f'Loss is NaN in {self.model.gp_inputs[i]}')
+                #     print('Predictions:')
+                #     print(output['logits_lm_list'][i])
+                #     print('')
+                #     print('True labels:')
+                #     print(output['gene_labels_list'][i])
+                #     print('')
+                #     print('Number of NaNs in predictions:')
+                #     print(torch.isnan(output['logits_lm_list'][i]).sum())
+                #     print('')
+                #     print('Number of NaNs in true labels:')
+                #     print(torch.isnan(output['gene_labels_list'][i]).sum())
+                #     gp_loss_dict[self.model.gp_inputs[i]] = (
+                #         torch.tensor(0).to(loss_i.device).float()
+                #     )
 
-                else:
-                    gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+                # else:
+                gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+                loss += loss_i
+
+                # t2 = time.time()
+                # print(f'Time taken after checking nan', t2 - t0)
 
             else:
                 gp_loss_dict[self.model.gp_inputs[i]] = (
@@ -973,9 +984,11 @@ class scGPL(pl.LightningModule):
                 )
 
             # compute total loss
-            tensor_list = list(gp_loss_dict.values())
+        #     tensor_list = list(gp_loss_dict.values())
 
-        loss = torch.sum(torch.stack(tensor_list))
+        # loss = torch.sum(torch.stack(tensor_list))
+        # t3 = time.time()
+        # print(f'Time taken after loss calculation: {t3 - t0}')
 
         # package outputs to return flexible number of objects
         holder = {
@@ -1035,7 +1048,12 @@ class scGPL(pl.LightningModule):
                     self.train_pred_counts_list.append(output['count_output'])
                     self.train_true_counts_list.append(output['true_bins'])
 
+        # t5 = time.time()
+        # print('Skipped global stuff', t5-t3)
         holder['total_loss'] = loss
+
+        # t6 = time.time()
+        # print(f'Time taken for loss calculation: {t6 - t0}')
 
         return holder
 
@@ -1196,14 +1214,18 @@ class scGPL(pl.LightningModule):
 
 
 class EmbEvaluator(pl.LightningModule):
-    def __init__(self, n_classes, emb_dim, task, lr, emb_label, y_label, output_dir):
+    def __init__(
+        self, n_classes, emb_dim, task, lr, emb_label, y_label, output_dir, filter_tag
+    ):
         super().__init__()
+        self.save_hyperparameters()
 
         self.evaluator_head = EmbEvaluatorHead(emb_dim, n_classes)
         self.emb_label = emb_label
         self.y_label = y_label
         self.task = task
         self.output_dir = output_dir
+        self.filter_tag = filter_tag
 
         if task == 'classification':
             self.loss_fn = nn.CrossEntropyLoss()
@@ -1219,6 +1241,9 @@ class EmbEvaluator(pl.LightningModule):
         for stage in ['train', 'val', 'test']:
             setattr(self, f'{stage}_pred', [])
             setattr(self, f'{stage}_true', [])
+
+    def forward(self, x):
+        return self.evaluator_head(x)
 
     def training_step(self, batch, batch_idx):
         x = batch[self.emb_label]
@@ -1277,8 +1302,11 @@ class EmbEvaluator(pl.LightningModule):
         x = batch[self.emb_label]
 
         y = batch[self.y_label]
+        print('Number of true classes', y.unique().shape[0])
+        print('Y shape', y.shape)
 
         y_out = self.evaluator_head(x)
+        print('Y out shape', y_out.shape)
 
         loss = self.loss_fn(y_out, y)
         self.log(
@@ -1386,7 +1414,8 @@ class EmbEvaluator(pl.LightningModule):
             output_df.to_csv(
                 os.path.join(
                     self.output_dir,
-                    f'cell_metrics/{self.y_label}_from_{self.emb_label}.csv',
+                    f'cell_metrics/{self.y_label}_from_{self.emb_label}'
+                    f'{self.filter_tag}.csv',
                 ),
                 index=False,
             )

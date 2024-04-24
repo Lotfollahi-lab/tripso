@@ -12,8 +12,7 @@ import torch
 
 # set up wandb
 import wandb
-
-# from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
@@ -66,7 +65,7 @@ def run_training(
     use_flash: Optional[bool] = False,
     weight_decay: float = 0.0,
     use_weighted_sampler: Optional[bool] = False,
-    subsample_by: Optional[str] = 'cell_type',
+    sample_by: Optional[str] = 'cell_type',
 ):
     """
     Wrapper function for training gpLearner model
@@ -162,7 +161,7 @@ def run_training(
     # Setup
     ##########################################
 
-    torch.set_float32_matmul_precision('medium')
+    # torch.set_float32_matmul_precision('medium')
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -173,8 +172,10 @@ def run_training(
     random.seed(seed)
     pl.seed_everything(seed)
     torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-    wandb.login()
+    # wandb.login()
 
     # get date for today in YYYY-MM-DD format
     today = datetime.datetime.today().strftime('%Y-%m-%d')
@@ -327,7 +328,7 @@ def run_training(
         frac_for_training=frac_for_training,
         adata_path=adata_path,
         use_weighted_sampler=use_weighted_sampler,
-        label_key=subsample_by,
+        label_key=sample_by,
     )
 
     # Load gpdb
@@ -419,7 +420,7 @@ def run_training(
             finetune_lr=finetune_lr,
             use_finetune_lr=global_training == 'finetune',
             lr_scheduler=lr_scheduler,
-            # optimizer=DeepSpeedCPUAdam,
+            optimizer=DeepSpeedCPUAdam,  # FusedAdam
             use_gp_similarity_loss=use_gp_similarity_loss,
             gp_similarity=gp_similarity,
             output_dir=output_dir,
@@ -552,8 +553,10 @@ def run_training(
             devices=-1,
             accelerator='auto',  # uses ddp per default for multi-gpu training
             strategy=strategy,
-            precision='bf16-mixed',
-            profiler='simple',
+            precision='bf16-mixed'
+            if strategy == 'ddp_find_unused_parameters_true'
+            else 16,
+            profiler='advanced',
         )
     else:
         trainer = pl.Trainer(
@@ -568,7 +571,7 @@ def run_training(
             devices=-1,
             accelerator='auto',
             precision='bf16-mixed',
-            profiler='simple',
+            profiler='advanced',
             strategy=strategy,
         )
 
