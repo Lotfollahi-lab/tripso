@@ -10,6 +10,7 @@ import torch
 from datasets import load_from_disk
 from geneformer.in_silico_perturber import pad_tensor_list
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from lamindb.core import MappedCollection
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import (
     DataLoader,
@@ -29,60 +30,33 @@ random.seed(0)
 
 
 class AnnDataset(Dataset):
-    def __init__(
-        self,
-        path='/path/to/adata.h5ad',
-    ):
-        """Create a dataset from an anndata object
+    def __init__(self, adata_path):
+        if isinstance(adata_path, str):
+            adata_path = [adata_path]
 
-        Args:
-            folder (str): path to h5ad file
+        self.dataloader = MappedCollection(
+            path_list=adata_path, obs_keys=['idx', 'batch_key'], encode_labels=False
+        )
 
-        """
-
-        # Load the data
-        if path.endswith('.h5ad'):
-            adata = sc.read_h5ad(path)
-        elif path.endswith('.loom'):
-            adata = sc.read_loom(path)
-
-        self.adata = adata
-
-        if 'batch_key' in adata.obs.columns:
-            n_condition_combined = adata.obs['batch_key'].nunique()
-        else:
-            raise ValueError(
-                'No batch_key found'
-                'for ZINB or NB reconstruction loss'
-                'Please provide batch_key in adata.obs'
-                'by passing batch_keys argument to preprocess function'
-            )
-
-        self.n_condition_combined = n_condition_combined
+        self.n_condition_combined = len(
+            np.unique(self.dataloader.get_label_weights('batch_key'))
+        )
 
     def __len__(self):
-        return self.adata.shape[0]
+        return len(self.dataloader)
 
     def __getitem__(self, idx):
-        adata_slice = self.adata[idx, :].X.toarray()
-        adata_tensor = torch.tensor(adata_slice, dtype=torch.float32).squeeze()
-        obs = self.adata.obs.iloc[idx, :]
-        idx = obs['idx']
-
-        # obs = self.adata.obs.iloc[idx, :]
-        # var = self.adata.var.iloc[idx, :]
-
-        output = {
-            'X': adata_tensor,
-            'idx': idx,
-            #  "obs" : obs,
-            #  "var" : var,
-            'size_factor': adata_tensor.sum(axis=-1),
+        data = self.dataloader[idx]
+        return {
+            'X': torch.tensor(data['X'], dtype=torch.float32),
+            'idx': data['idx'],
+            'size_factor': data['X'].sum(axis=-1),
         }
-        return output
 
     def get_n_genes(self):
-        return self.adata.shape[1]
+        # assuming either one anndata object
+        # or all anndata have same number of genes
+        return self.dataloader.original_shapes[0][1]
 
 
 class tkDataset(Dataset):
