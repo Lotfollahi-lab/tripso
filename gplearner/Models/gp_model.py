@@ -123,13 +123,11 @@ class gpWrapper(nn.Module):
             # Set up look up tensor
             # for converting gene tokens to encoded values inside transformer block
             # +2 because in geneformer 0 --> padding and 1 --> mask
-            lookup_tensor = torch.full(
-                (self.vocab_size + 2,), -100, dtype=torch.bfloat16
-            )
+            lookup_tensor = torch.full((self.vocab_size + 2,), -100, dtype=torch.int32)
             # Create a tensor of indices corresponding to positions in gp_tokens
-            indices = torch.arange(gp_tokens_tensor.shape[0], dtype=torch.bfloat16)
+            indices = torch.arange(gp_tokens_tensor.shape[0], dtype=torch.int32)
 
-            # Use tensor indexing to assign valuess
+            # Use tensor indexing to assign values
             lookup_tensor[gp_tokens_tensor.long()] = indices
             self.register_buffer(f'gp{i}_tokens_lookup', lookup_tensor)
 
@@ -557,7 +555,7 @@ class cellWrapper(nn.Module):
         # n_genes_per_cell = torch.tensor(np.array(num_genes_per_cell_list).T).to(
         #     z.device
         # )
-        n_genes_per_cell = torch.stack(num_genes_per_cell_list).T
+        n_genes_per_cell = torch.stack(num_genes_per_cell_list).T.contiguous()
 
         # Find the indices that would sort each row in descending order
         sorted_indices = torch.argsort(-n_genes_per_cell, dim=1)
@@ -724,7 +722,7 @@ class CountHead(nn.Module):
         # use cls token for count prediction
         count_outputs = {}
         mlp_output = self.mlp(x)
-        mlp_output = F.normalize(mlp_output, dim=-1, p=2)
+        # mlp_output = F.normalize(mlp_output, dim=-1, p=2)
         if self.loss_mode == 'mse':
             count_outputs['count_lognorm'] = self.relu_output(mlp_output)
         elif self.loss_mode == 'zinb':
