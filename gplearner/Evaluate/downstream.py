@@ -28,7 +28,7 @@ from ..Datamodules.datamodule import (
     txDataModule,
 )
 from ..Models.gp_model import (
-    gfBaseline,
+    gfGlobal,
     gpTransformerBase,
     gpTransformerGlobal,
     iGlobalWrapper,
@@ -190,7 +190,7 @@ class gpEval:
             self.reconstruction_loss = reconstruction_loss
 
         elif model_type == 'Mean':
-            self.model = gfBaseline(
+            self.model = gfGlobal(
                 gp_inputs=gp_inputs,
                 database=gpdb,
                 do_ensembl_conversion=do_ensembl_conversion,
@@ -204,7 +204,7 @@ class gpEval:
             )
 
         else:
-            raise ValueError('model_type must be one of Base, or Mean')
+            raise ValueError('model_type must be one of Base, Global, or Mean')
 
         if gp_inputs is None:
             gp_inputs = gpdb.columns.tolist()

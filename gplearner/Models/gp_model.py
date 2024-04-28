@@ -154,7 +154,7 @@ class gpWrapper(nn.Module):
             # find non GP genes
             if gene_counts_df is None:
                 raise ValueError(
-                    'Please provide a dataframe'
+                    'Please provide a dataframe '
                     'with counts of gene occurrences in dataset'
                 )
 
@@ -799,7 +799,7 @@ class gpTransformerBase(nn.Module):
         attn_dropout=0,
         gp_inputs=None,
         gene_counts_df=None,
-        add_remaining_var=False,
+        add_remaining_var=None,
         do_ensembl_conversion=True,
         gp_latent_size=256,
         num_heads=1,
@@ -970,9 +970,9 @@ class gpTransformerGlobal(gpTransformerBase):
     def __init__(
         self,
         global_attn_heads=8,
-        global_loss='supervised',
+        global_loss='reconstruction',
         total_n_genes=25426,
-        reconstruction_loss='mse',
+        reconstruction_loss='nb',
         supervised_labels: Optional[Dict] = None,
         global_masking_rate=0,
         global_n_blocks=1,
@@ -1370,8 +1370,33 @@ class gfBaseline(gpTransformerBase):
 
 
 class gfGlobal(gpTransformerGlobal):
-    def __init__(self, **kwargs):
+    def __init__(
+        self,
+        gene_counts_df,
+        num_heads,
+        gene_token_path=TOKEN_DICTIONARY_FILE,
+        gene_name_path=GENE_NAME_FILE,
+        add_remaining_var=False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
+
+        self.multi_gp_encoder = gpAverager(
+            database=self.gpdb,
+            do_ensembl_conversion=self.do_ensembl_conversion,
+            gene_counts_df=gene_counts_df,
+            gp_latent_size=self.gp_latent_size,
+            n_blocks=self.n_blocks,
+            num_heads=num_heads,
+            mgm_mask_ratio=self.mgm_mask_ratio,
+            gene_token_path=gene_token_path,
+            gene_name_path=gene_name_path,
+            gp_inputs=self.gp_inputs,
+            add_remaining_var=add_remaining_var,
+            use_flash=False,
+            model_type='Mean',
+            learn_new_gp=False,
+        )
 
         self.cell_token_learner = AverageNonZero()
 
