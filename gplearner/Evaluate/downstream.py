@@ -90,8 +90,9 @@ class gpEval:
         if None, defaults to all GP
     gene_counts_df : str
         Dataframe with the counts of each gene in the dataset
-    add_remaining_var : bool
+    add_remaining_var : str
         Whether to initalize new transformer block covering non GP genes
+        can be [None, 'top100', 'allgenes']
     supervised_labels : list
         Dict {label : num_classes} for supervised classification
     global_attn_heads : int
@@ -119,7 +120,7 @@ class gpEval:
         gp_latent_size: Optional[int] = 256,
         gp_inputs: Optional[list] = None,
         batch_size: Optional[int] = 128,
-        add_remaining_var: Optional[bool] = False,
+        add_remaining_var: Optional[str] = None,
         supervised_labels: Optional[Dict] = None,
         global_attn_heads: Optional[int] = 1,
         global_n_blocks: Optional[int] = 1,
@@ -171,7 +172,7 @@ class gpEval:
 
         elif model_type == 'Global':
             self.model = gpTransformerGlobal(
-                gene_counts_df=gene_counts_df,
+                gene_counts_df=self.gene_counts_df,
                 database=gpdb,
                 do_ensembl_conversion=do_ensembl_conversion,
                 n_blocks=n_blocks,
@@ -904,9 +905,11 @@ def calculate_gp_attribution_scores(
                 if t in attribution_scores.keys():
                     attribution_scores[t] += [attr_norm[i]]
                     attribution_scores[f'{t}_abs'] += [np.abs(attr_norm[i])]
+                    attribution_scores[f'{t}_rank'] += [i]
                 else:
                     attribution_scores[t] = [attr_norm[i]]
                     attribution_scores[f'{t}_abs'] = [np.abs(attr_norm[i])]
+                    attribution_scores[f'{t}_rank'] = [i]
 
         else:
             break
@@ -916,6 +919,7 @@ def calculate_gp_attribution_scores(
         attribution_scores[f'{t}_abs'] = np.nanmean(attribution_scores[f'{t}_abs'])
         attribution_scores[f'{t}_std'] = np.nanstd(attribution_scores[t])
         attribution_scores[f'{t}_abs_std'] = np.nanstd(attribution_scores[f'{t}_abs'])
+        attribution_scores[f'{t}_rank'] = np.nanmean(attribution_scores[f'{t}_rank'])
 
     rows = []
 
@@ -926,6 +930,7 @@ def calculate_gp_attribution_scores(
             'abs_attribution_score': attribution_scores[f'{t}_abs'],
             'std_attribution_score': attribution_scores[f'{t}_std'],
             'abs_std_attribution_score': attribution_scores[f'{t}_abs_std'],
+            'rank': attribution_scores[f'{t}_rank'],
         }
 
         rows.append(row)

@@ -102,7 +102,6 @@ class gpWrapper(nn.Module):
         # Store all genes included in at least one GP
         self.all_gp_tokens = set()
 
-        # TO DO : ADD THIS TO A FUNCTION THAT RETURNS TWO DICTIONARIES
         for i, gpi in enumerate(self.gp_inputs):
             gp_tokens = get_gp_tokens(
                 gpi,
@@ -146,7 +145,8 @@ class gpWrapper(nn.Module):
         )
 
         self.add_remaining_var = add_remaining_var
-        if self.add_remaining_var:
+
+        if self.add_remaining_var is not None:
             n_gp = len(self.gp_inputs)
             gp_inputs.append('remaining_var')
             self.gp_inputs = gp_inputs
@@ -160,24 +160,37 @@ class gpWrapper(nn.Module):
 
             non_gp_tokens = set(gene_counts_df['token'].tolist()) - self.all_gp_tokens
 
-            setattr(self, f'gp{n_gp}_tokens', non_gp_tokens)
-            setattr(
-                self, f'gp{n_gp}_tokens_encoded', self.encode_gp_tokens(non_gp_tokens)
-            )
+            tokens_tensor = torch.tensor(list(non_gp_tokens), dtype=torch.int32)
+
+            self.register_buffer(f'gp{n_gp}_tokens', tokens_tensor)
+
+            # Set up look up tensor
+            # for converting gene tokens to encoded values inside transformer block
+            # +2 because in geneformer 0 --> padding and 1 --> mask
+            lookup_tensor = torch.full((self.vocab_size + 2,), -100, dtype=torch.int32)
+            # Create a tensor of indices corresponding to positions in gp_tokens
+            indices = torch.arange(tokens_tensor.shape[0], dtype=torch.int32)
+
+            # Use tensor indexing to assign values
+            lookup_tensor[tokens_tensor.long()] = indices
+            self.register_buffer(f'gp{n_gp}_tokens_lookup', lookup_tensor)
 
             self.encoder.append(
                 gpTransformerEncoder(
-                    n_gp_tokens=100,  # we only keep top 100 genes
+                    n_gp_tokens=100
+                    if self.add_remaining_var == 'top100'
+                    else len(non_gp_tokens),  # we only keep top 100 genes
                     vocab_size=len(non_gp_tokens),
                     embed_dim=self.gp_latent_size,
                     depth=self.n_blocks,
                     num_heads=num_heads,
                     mlm_masking_prob=self.mgm_mask_ratio,
+                    use_flash=(self.add_remaining_var == 'allgenes'),
                 )
             )
 
     def build_input_matrix(
-        self, gf, input_ids, gp_tokens, gp_idx, mode='full_model', crop_to_gp_len=True
+        self, gf, input_ids, gp_tokens, crop_to_gp_len=True, is_gpfinder=False
     ):
         """
         Build a matrix of shape (n_cells, n_gp_tokens, 256)
@@ -199,6 +212,7 @@ class gpWrapper(nn.Module):
             "full_model" : set for input into geneformer
             "extract_genes" : when extracting gene embeddings
                             -> max size is total GP size
+            # NEED TO REIMPLEMENT
 
         """
         # Get list of gp tokens
@@ -216,7 +230,11 @@ class gpWrapper(nn.Module):
         # Sum along the last dimension to count how many GP tokens each gene matches
         mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
-        if crop_to_gp_len:
+        if crop_to_gp_len or (
+            is_gpfinder is not None
+            and is_gpfinder
+            and self.add_remaining_var == 'top100'
+        ):
             # Apply the mask to the data using broadcasting
             masked_latent = gf * mask_expanded
 
@@ -249,7 +267,14 @@ class gpWrapper(nn.Module):
             masked_labels_output = torch.stack(holder)
 
             # crop
-            n_genes_to_keep = gp_tokens.shape[0]
+            if (
+                is_gpfinder is not None
+                and is_gpfinder
+                and self.add_remaining_var == 'top100'
+            ):
+                n_genes_to_keep = 100
+            else:
+                n_genes_to_keep = gp_tokens.shape[0]
             result_matrix = result_matrix[:, :n_genes_to_keep, :]
             masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
 
@@ -283,12 +308,6 @@ class gpWrapper(nn.Module):
         )
 
         return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
-
-    # def encode_gp_tokens(self, gp_tokens):
-    #     """
-    #     Convert tokens to encoded values inside transformer block
-    #     """
-    #     return {gene: idx for idx, gene in enumerate(gp_tokens)}
 
     def forward(
         self,
@@ -327,7 +346,7 @@ class gpWrapper(nn.Module):
                     gf_emb,  # geneformer embeddings
                     input_dataset['input_ids'],
                     getattr(self, f'gp{i}_tokens'),
-                    gp_idx=i,
+                    is_gpfinder=(self.gp_inputs[i] == 'remaining_var'),
                 )
 
                 # track number of genes per cell

@@ -47,7 +47,7 @@ def run_training(
     resume_training: Optional[bool] = False,
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
-    add_remaining_var: Optional[bool] = False,
+    add_remaining_var: Optional[str] = None,
     frac_for_training: Optional[float] = 1.0,
     lambda_gp_similarity: Optional[float] = 1e-2,
     global_loss: str = 'supervised',
@@ -315,7 +315,6 @@ def run_training(
 
     # Instantiate dataset
     # (tokenized dataset should be created already)
-    # txdata = DummyDataModule(folder = dataset_path, batch_size=batch_size)
     if reconstruction_loss == 'mse':
         warnings.warn(
             'Using MSE loss for reconstruction'
@@ -510,8 +509,7 @@ def run_training(
     # Learning new GP
     if learn_new_gp:
         # load pretrained model
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type)
-        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        checkpoint_path = find_latest_file(path_to_base_model, tissue, model_type)
         checkpoint = torch.load(checkpoint_path)
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
         n_epochs = checkpoint['epoch'] + n_epochs
