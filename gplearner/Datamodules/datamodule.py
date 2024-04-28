@@ -10,6 +10,7 @@ import torch
 from datasets import load_from_disk
 from geneformer.in_silico_perturber import pad_tensor_list
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from lamindb.core import MappedCollection
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import (
     DataLoader,
@@ -23,66 +24,42 @@ from ..Models.gp_model import (
     GENEFORMER_MODEL_PATH,
     gfWrapper,
 )
-from ..Utils.utils import get_gp_tokens, pad_array
+from ..Utils.utils import get_gp_tokens
 
 random.seed(0)
 
 
 class AnnDataset(Dataset):
-    def __init__(
-        self,
-        path='/path/to/adata.h5ad',
-    ):
-        """Create a dataset from an anndata object
+    def __init__(self, adata_path):
+        if isinstance(adata_path, str):
+            adata_path = [adata_path]
 
-        Args:
-            folder (str): path to h5ad file
+        self.dataloader = MappedCollection(
+            path_list=adata_path,
+            obs_keys=['idx', 'batch_key'],
+            encode_labels=False,
+            parallel=(torch.cuda.device_count() > 1),
+        )
 
-        """
-
-        # Load the data
-        if path.endswith('.h5ad'):
-            adata = sc.read_h5ad(path)
-        elif path.endswith('.loom'):
-            adata = sc.read_loom(path)
-
-        self.adata = adata
-
-        if 'batch_key' in adata.obs.columns:
-            n_condition_combined = adata.obs['batch_key'].nunique()
-        else:
-            raise ValueError(
-                'No batch_key found'
-                'for ZINB or NB reconstruction loss'
-                'Please provide batch_key in adata.obs'
-                'by passing batch_keys argument to preprocess function'
-            )
-
-        self.n_condition_combined = n_condition_combined
+        self.n_condition_combined = len(
+            np.unique(self.dataloader.get_label_weights('batch_key'))
+        )
 
     def __len__(self):
-        return self.adata.shape[0]
+        return len(self.dataloader)
 
     def __getitem__(self, idx):
-        adata_slice = self.adata[idx, :].X.toarray()
-        adata_tensor = torch.tensor(adata_slice, dtype=torch.float32).squeeze()
-        obs = self.adata.obs.iloc[idx, :]
-        idx = obs['idx']
-
-        # obs = self.adata.obs.iloc[idx, :]
-        # var = self.adata.var.iloc[idx, :]
-
-        output = {
-            'X': adata_tensor,
-            'idx': idx,
-            #  "obs" : obs,
-            #  "var" : var,
-            'size_factor': adata_tensor.sum(axis=-1),
+        data = self.dataloader[idx]
+        return {
+            'X': torch.tensor(data['X'], dtype=torch.float32),
+            'idx': data['idx'],
+            'size_factor': data['X'].sum(axis=-1),
         }
-        return output
 
     def get_n_genes(self):
-        return self.adata.shape[1]
+        # assuming either one anndata object
+        # or all anndata have same number of genes
+        return self.dataloader.original_shapes[0][1]
 
 
 class tkDataset(Dataset):
@@ -104,7 +81,10 @@ class tkDataset(Dataset):
         gdata = load_from_disk(folder)
 
         if filter_key is not None:
-            gdata = gdata.filter(lambda x: x[filter_key] == filter_value)
+            if isinstance(filter_value, str):
+                gdata = gdata.filter(lambda x: x[filter_key] == filter_value)
+            else:
+                gdata = gdata.filter(lambda x: x[filter_key] in filter_value)
 
         self.gdata = gdata
 
@@ -190,31 +170,46 @@ class EmbDataset(Dataset):
         self,
         folder_path,
         data_type,
-        label_key=None,
+        label_key=None,  # for weighted sampling
         filter_key=None,
         filter_value=None,
-        count_n_unique=None,
+        clf_label=None,  # classification label
+        encode_covariates=False,
     ):
         self.data_type = data_type
         if self.data_type == 'dataset':
             emb = load_from_disk(folder_path)
             if filter_key is not None:
-                emb = emb.filter(lambda x: x[filter_key] == filter_value)
+                if isinstance(filter_value, str):
+                    emb = emb.filter(lambda x: x[filter_key] == filter_value)
+                elif isinstance(filter_value, list):
+                    emb = emb.filter(lambda x: x[filter_key] in filter_value)
             self.emb = emb
-            if count_n_unique is not None:
-                self.num_classes = len(emb.unique(count_n_unique))
+            if clf_label is not None:
+                unique_labels = emb.unique(clf_label)
+                self.num_classes = len(unique_labels)
+                if encode_covariates:
+                    self.label_dict = {n: i for i, n in enumerate(unique_labels)}
 
         elif self.data_type == 'h5ad':
             emb = sc.read_h5ad(folder_path)
             if filter_key is not None:
-                emb = emb[emb.obs[filter_key] == filter_value]
+                if isinstance(filter_value, str):
+                    emb = emb[emb.obs[filter_key] == filter_value]
+                elif isinstance(filter_value, list):
+                    emb = emb[emb.obs[filter_key].isin(filter_value)]
             self.emb = emb
-            if count_n_unique is not None:
-                self.num_classes = emb.obs[count_n_unique].nunique()
+            if clf_label is not None:
+                self.num_classes = emb.obs[clf_label].nunique()
+                if encode_covariates:
+                    self.label_dict = {
+                        n: i for i, n in enumerate(emb.obs[clf_label].unique())
+                    }
 
         else:
             raise NotImplementedError('Data type not recognized')
 
+        # for weighted sampling
         if label_key is not None:
             if self.data_type == 'dataset':
                 self.labels = np.array(self.emb[label_key])
@@ -576,30 +571,18 @@ class iTxDataModule(txDataModule):
 
         """
         # Get list of gp tokens
-        gp_tokens = np.array(list(gpi_tokens_list)).astype(np.int16)
+        gp_tokens = torch.tensor(gpi_tokens_list)
 
         # Convert input IDs (list of lists) to array:
         holder = []
 
-        # Find max value for padding
-        max_value = 2048
-
-        for i in range(len(input_ids)):
-            if len(input_ids[i]) == max_value:
-                holder.append(input_ids[i].cpu().numpy())
-            else:
-                padded = pad_array(input_ids[i].cpu().numpy(), desired_length=max_value)
-                holder.append(padded)
-
-        # Build an array (n_cells, n_genes) with token IDs at each position
-        tokens_arr = np.array(holder)
-
         # binary mask (h, i, k)
         # in cell h, is the gene as position i in our GP at position k?
-        mask = (tokens_arr[:, :, np.newaxis] == gp_tokens[np.newaxis, :]).astype(int)
+        mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0)
+        mask = mask.to(torch.int)
 
         # Now reshape so that we will zero out non GP genes in each cell
-        mask_expanded = torch.tensor(mask.sum(axis=-1)[:, :, np.newaxis]).to(gf.device)
+        mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
         # Apply the mask to the data using broadcasting
         masked_latent = gf * mask_expanded
@@ -617,10 +600,12 @@ class iTxDataModule(txDataModule):
             z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
             holder += [z]
 
-        result_matrix = torch.stack(holder).to(gf.device)
+        result_matrix = torch.stack(holder)
 
         # Now do the same for labels
-        masked_labels = mask.sum(axis=-1) * tokens_arr
+        masked_labels = torch.where(
+            mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
+        )
 
         holder = []
         for i in range(masked_labels.shape[0]):
@@ -629,7 +614,7 @@ class iTxDataModule(txDataModule):
             z = np.concatenate((x[nz], x[~nz]))
             holder += [z]
 
-        masked_labels_output = np.array(holder)
+        masked_labels_output = torch.stack(holder)
 
         # count number of genes per cell
         num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
@@ -643,18 +628,18 @@ class iTxDataModule(txDataModule):
         # We know that at most, the non zero genes is the number of genes in the GP
         # for known GP we keep all genes
         # TO DO : ADD OPTION FOR GPFINDER HERE
-        n_genes_to_keep = len(gpi_tokens_list)
+        n_genes_to_keep = gp_tokens.shape[0]
         result_matrix = result_matrix[:, :n_genes_to_keep, :]
         masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
 
         # Set up attention mask
         # to avoid attention to padding tokens
         attn_mask = torch.zeros_like(masked_labels_output)
-        attn_mask[masked_labels_output != -100] = 1
+        attn_mask[masked_labels_output != 0] = 1
 
         # never mask cls
         attn_mask = torch.cat(
-            [torch.ones(attn_mask.shape[0], 1).to(attn_mask.device), attn_mask], dim=1
+            [torch.ones_like(attn_mask)[:, 0].unsqueeze(-1), attn_mask], dim=-1
         )
 
         return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
@@ -690,19 +675,6 @@ class iTxDataModule(txDataModule):
             self.gp_tokens,
         )
 
-        # # Encode tokens for encoding
-        # tokens_pad_unencoded = tokens_pad.copy()
-
-        # tokens_pad = (
-        #     tokens_pad.cpu()
-        #     .apply_(
-        #         lambda x: self.gp_tokens_encoded[x]
-        #         if x in self.gp_tokens_encoded.keys()
-        #         else 0 # padding token as defined in encode_gp_tokens
-        #     )
-        #     .to(emb_pad.device)
-        # )
-
         # Set up export
 
         output_dict = {
@@ -737,7 +709,8 @@ class EmbDataModule(LightningDataModule):
         label_key=None,
         filter_key=None,
         filter_value=None,
-        count_n_unique=None,
+        clf_label=None,
+        encode_covariate=False,
     ):
         super().__init__()
         self.folder_path = folder_path
@@ -754,7 +727,8 @@ class EmbDataModule(LightningDataModule):
         self.label_key = label_key
         self.filter_key = filter_key
         self.filter_value = filter_value
-        self.count_n_unique = count_n_unique
+        self.clf_label = clf_label
+        self.encode_covariate = encode_covariate
 
     def prepare_data(self):
         folder_path = Path(self.folder_path)
@@ -769,7 +743,8 @@ class EmbDataModule(LightningDataModule):
             label_key=self.label_key,
             filter_key=self.filter_key,
             filter_value=self.filter_value,
-            count_n_unique=self.count_n_unique,
+            clf_label=self.clf_label,
+            encode_covariates=self.encode_covariate,
         )
 
         self.val_dataset = EmbDataset(
@@ -785,7 +760,7 @@ class EmbDataModule(LightningDataModule):
             filter_value=self.filter_value,
         )
 
-        if self.count_n_unique is not None:
+        if self.clf_label is not None:
             self.num_classes = self.train_dataset.num_classes
 
     def train_dataloader(self):
@@ -853,7 +828,15 @@ class EmbDataModule(LightningDataModule):
 
             # Step 2: get metadata
             for m in self.meta_labels:
-                if m.endswith('_id'):
+                if m == self.clf_label:
+                    if self.encode_covariate:
+                        output_dict[f'{m}_id'] = torch.tensor(
+                            [self.train_dataset.label_dict[d[m]] for d in batch],
+                            dtype=torch.long,
+                        )
+
+                        output_dict[m] = [d[m] for d in batch]
+                elif m.endswith('_id'):
                     output_dict[m] = torch.tensor(
                         [d[m] for d in batch], dtype=torch.long
                     )
@@ -865,12 +848,16 @@ class EmbDataModule(LightningDataModule):
         elif self.data_type == 'h5ad':
             # only keep embedding of interest
             var = batch[0]['var']
-            emb_idx = var.index.get_loc(self.emb_to_keep)
 
-            emb = [torch.tensor(d['X'][emb_idx]) for d in batch]
+            if self.emb_to_keep == 'cell_token':
+                emb = [d['X'] for d in batch]
+                emb = torch.stack(emb)
+            else:
+                emb_idx = var.index.get_loc(self.emb_to_keep)
+                emb = [torch.tensor(d['X'][emb_idx]) for d in batch]
 
-            # prepare for passing to output dict
-            emb = torch.tensor(emb)
+                # prepare for passing to output dict
+                emb = torch.tensor(emb)
 
             if len(emb.shape) == 1:
                 emb = emb.unsqueeze(-1)
@@ -881,10 +868,23 @@ class EmbDataModule(LightningDataModule):
 
             # get metadata
             for m in self.meta_labels:
-                if m.endswith('_id'):
+                if m == self.clf_label:
+                    if self.encode_covariate:
+                        output_dict[f'{m}_id'] = torch.tensor(
+                            [self.train_dataset.label_dict[d['obs'][m]] for d in batch],
+                            dtype=torch.long,
+                        )
+
+                        output_dict[m] = [d['obs'][m] for d in batch]
+
+                elif m.endswith('_id'):
                     output_dict[m] = torch.tensor(
                         [d['obs'][m] for d in batch], dtype=torch.long
                     )
+
+                elif m in self.continuous_cov:
+                    output_dict[m] = torch.tensor([d['obs'][m] for d in batch])
+
                 else:
                     output_dict[m] = [d['obs'][m] for d in batch]
 

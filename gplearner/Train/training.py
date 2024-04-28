@@ -575,6 +575,11 @@ def run_training(
             strategy=strategy,
         )
 
+    print('***** DONE ALL INITIALIZATION *****')
+    print('***** STARTING TRAINING *****')
+    print('***** USING GPU *****', torch.cuda.get_device_name())
+    print('***** USING GPU *****', torch.cuda.get_device_properties(0))
+
     # Ready to train with new learning rate
     trainer.fit(gp_transformer, txdata)
 

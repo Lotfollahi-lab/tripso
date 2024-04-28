@@ -1222,6 +1222,11 @@ class EmbEvaluator(pl.LightningModule):
 
         self.evaluator_head = EmbEvaluatorHead(emb_dim, n_classes)
         self.emb_label = emb_label
+
+        if task == 'classification':
+            # add id tag for encoded covariate
+            if not y_label.endswith('_id'):
+                y_label = f'{y_label}_id'
         self.y_label = y_label
         self.task = task
         self.output_dir = output_dir
@@ -1302,11 +1307,8 @@ class EmbEvaluator(pl.LightningModule):
         x = batch[self.emb_label]
 
         y = batch[self.y_label]
-        print('Number of true classes', y.unique().shape[0])
-        print('Y shape', y.shape)
 
         y_out = self.evaluator_head(x)
-        print('Y out shape', y_out.shape)
 
         loss = self.loss_fn(y_out, y)
         self.log(
@@ -1356,23 +1358,9 @@ class EmbEvaluator(pl.LightningModule):
 
         y_out = self.evaluator_head(x)
 
-        loss = self.loss_fn(y_out, y)
-
-        self.log(
-            'test_loss',
-            loss,
-            on_step=True,
-            on_epoch=True,
-            logger=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
-
         self.test_pred.append(y_out)
         self.test_true.append(y)
         self.y_unencoded += y_unencoded
-
-        return loss
 
     def on_test_epoch_end(self):
         # calculate accuracy

@@ -328,6 +328,8 @@ class gpEval:
         sample_by=None,
         filter_key=None,
         filter_value=None,
+        encode_covariate=False,
+        filter_tag=None,
     ):
         '''
         Train nn.Linear layer based on embeddings
@@ -347,11 +349,19 @@ class gpEval:
         torch.backends.cudnn.benchmark = False
 
         print(f'Evaluating {emb_label} embeddings')
-        filter_tag = f'_{filter_key}' if filter_key is not None else ''
-        if task == 'classification':
-            label_to_count = y_label
+        if filter_tag is None:
+            filter_tag = (
+                f'_{filter_key}_{filter_value}' if filter_value is not None else ''
+            )
         else:
-            label_to_count = None
+            filter_tag = f'_{filter_tag}'
+        if task == 'classification':
+            clf_label = y_label
+        else:
+            clf_label = None
+
+        if meta_labels is None:
+            meta_labels = [y_label]
 
         emb_dm = EmbDataModule(
             folder_path,
@@ -365,7 +375,8 @@ class gpEval:
             label_key=sample_by,
             filter_key=filter_key,
             filter_value=filter_value,
-            count_n_unique=label_to_count,
+            clf_label=clf_label,
+            encode_covariate=encode_covariate,
         )
 
         emb_dm.setup()
