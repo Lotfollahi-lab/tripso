@@ -81,7 +81,10 @@ class tkDataset(Dataset):
         gdata = load_from_disk(folder)
 
         if filter_key is not None:
-            gdata = gdata.filter(lambda x: x[filter_key] == filter_value)
+            if isinstance(filter_value, str):
+                gdata = gdata.filter(lambda x: x[filter_key] == filter_value)
+            else:
+                gdata = gdata.filter(lambda x: x[filter_key] in filter_value)
 
         self.gdata = gdata
 
@@ -177,7 +180,10 @@ class EmbDataset(Dataset):
         if self.data_type == 'dataset':
             emb = load_from_disk(folder_path)
             if filter_key is not None:
-                emb = emb.filter(lambda x: x[filter_key] == filter_value)
+                if isinstance(filter_value, str):
+                    emb = emb.filter(lambda x: x[filter_key] == filter_value)
+                elif isinstance(filter_value, list):
+                    emb = emb.filter(lambda x: x[filter_key] in filter_value)
             self.emb = emb
             if clf_label is not None:
                 unique_labels = emb.unique(clf_label)
@@ -188,7 +194,10 @@ class EmbDataset(Dataset):
         elif self.data_type == 'h5ad':
             emb = sc.read_h5ad(folder_path)
             if filter_key is not None:
-                emb = emb[emb.obs[filter_key] == filter_value]
+                if isinstance(filter_value, str):
+                    emb = emb[emb.obs[filter_key] == filter_value]
+                elif isinstance(filter_value, list):
+                    emb = emb[emb.obs[filter_key].isin(filter_value)]
             self.emb = emb
             if clf_label is not None:
                 self.num_classes = emb.obs[clf_label].nunique()
@@ -841,13 +850,14 @@ class EmbDataModule(LightningDataModule):
             var = batch[0]['var']
 
             if self.emb_to_keep == 'cell_token':
-                emb = [torch.tensor(d['X']) for d in batch]
+                emb = [d['X'] for d in batch]
+                emb = torch.stack(emb)
             else:
                 emb_idx = var.index.get_loc(self.emb_to_keep)
                 emb = [torch.tensor(d['X'][emb_idx]) for d in batch]
 
-            # prepare for passing to output dict
-            emb = torch.tensor(emb)
+                # prepare for passing to output dict
+                emb = torch.tensor(emb)
 
             if len(emb.shape) == 1:
                 emb = emb.unsqueeze(-1)

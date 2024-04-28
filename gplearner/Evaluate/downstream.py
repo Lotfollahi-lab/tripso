@@ -329,6 +329,7 @@ class gpEval:
         filter_key=None,
         filter_value=None,
         encode_covariate=False,
+        filter_tag=None,
     ):
         '''
         Train nn.Linear layer based on embeddings
@@ -348,7 +349,12 @@ class gpEval:
         torch.backends.cudnn.benchmark = False
 
         print(f'Evaluating {emb_label} embeddings')
-        filter_tag = f'_{filter_key}_{filter_value}' if filter_value is not None else ''
+        if filter_tag is None:
+            filter_tag = (
+                f'_{filter_key}_{filter_value}' if filter_value is not None else ''
+            )
+        else:
+            filter_tag = f'_{filter_tag}'
         if task == 'classification':
             clf_label = y_label
         else:
