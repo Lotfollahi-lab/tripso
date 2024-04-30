@@ -47,7 +47,7 @@ def run_training(
     resume_training: Optional[bool] = False,
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
-    add_remaining_var: Optional[bool] = False,
+    add_remaining_var: Optional[str] = None,
     frac_for_training: Optional[float] = 1.0,
     lambda_gp_similarity: Optional[float] = 1e-2,
     global_loss: str = 'supervised',
@@ -315,7 +315,6 @@ def run_training(
 
     # Instantiate dataset
     # (tokenized dataset should be created already)
-    # txdata = DummyDataModule(folder = dataset_path, batch_size=batch_size)
     if reconstruction_loss == 'mse':
         warnings.warn(
             'Using MSE loss for reconstruction'
@@ -507,11 +506,13 @@ def run_training(
         # reset output directory
         gp_transformer.output_dir = output_dir
 
+        # reset supervised labels
+        gp_transformer.model.supervised_labels = supervised_labels
+
     # Learning new GP
     if learn_new_gp:
         # load pretrained model
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type)
-        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        checkpoint_path = find_latest_file(path_to_base_model, tissue, model_type)
         checkpoint = torch.load(checkpoint_path)
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
         n_epochs = checkpoint['epoch'] + n_epochs
@@ -574,11 +575,6 @@ def run_training(
             profiler='advanced',
             strategy=strategy,
         )
-
-    print('***** DONE ALL INITIALIZATION *****')
-    print('***** STARTING TRAINING *****')
-    print('***** USING GPU *****', torch.cuda.get_device_name())
-    print('***** USING GPU *****', torch.cuda.get_device_properties(0))
 
     # Ready to train with new learning rate
     trainer.fit(gp_transformer, txdata)

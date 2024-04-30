@@ -8,7 +8,9 @@ import scanpy as sc
 import torch
 from scipy.sparse import issparse
 from scipy.stats import wasserstein_distance
+from sklearn.metrics import homogeneity_score
 from sklearn.metrics.pairwise import rbf_kernel
+from sklearn_extra.cluster import KMedoids
 from tqdm import tqdm
 
 from ..Utils.utils import do_logistic_regression
@@ -92,66 +94,6 @@ def calc_gp_stats(model, dm):
     df = pd.DataFrame(count_dict)
 
     return df
-
-
-def get_gp_embeddings(model, data_module, cell_mode):
-    """
-    Get embeddings in GP space
-    """
-    model.eval()
-    loader = data_module.dataloader_for_token_extraction()
-
-    cell_mode = cell_mode
-
-    gp_emb = []
-
-    # For extracting metadata
-    meta_dict = {}
-    for m in data_module.metadata:
-        meta_dict[m] = []
-
-    with torch.no_grad():
-        for batch in tqdm(loader, desc='Generating GP embeddings', leave=False):
-            for i in batch:
-                # move tensors to gpu
-                if isinstance(batch[i], torch.Tensor):
-                    batch[i] = batch[i].to(
-                        model.available_device
-                    )  # does this slow things down?
-
-            output = model(batch)
-            z = output['z']
-
-            # Make 2D for anndata input
-            z = z.reshape((-1, len(model.gp_inputs) * model.gp_latent_size))
-
-            gp_emb += [z]
-
-            # Extract metadata
-            for m in data_module.metadata:
-                if isinstance(batch[m], torch.Tensor):
-                    batch[m] = batch[m].cpu().numpy().tolist()
-
-                meta_dict[m] += batch[m]
-
-    gp_emb = torch.concat(gp_emb, dim=0).cpu().numpy()
-
-    meta = pd.DataFrame(meta_dict)
-
-    adata = sc.AnnData(X=gp_emb, obs=meta)
-
-    # Set the var_names attribute of the AnnData object to the GP names
-    # + index for each of the positions in the GP embedding vector
-    gp_labels = [
-        f'{string}_{i}'
-        for string in model.gp_inputs
-        for i in range(1, model.gp_latent_size + 1)
-    ]  # + [f"remaining_var_{i}" for i in range(1, unexp_rep_size + 1)]
-
-    adata.var_names = gp_labels
-    adata.var['gp_idx'] = adata.var_names
-
-    return adata
 
 
 def evaluate_by_gene_singleGP(
@@ -643,3 +585,89 @@ def evaluate_emd(true_data, pred_data, condition_key=None, de_genes_dict=None):
         emd_list.append({'emd': np.mean(wd)})
         emd_df = pd.DataFrame(emd_list).set_index(true_data_.var_names)
     return emd_df
+
+
+#############################################
+# Concept alignment score
+# from https://github.com/mateoespinosa/cem
+#############################################
+
+
+def concept_alignment_score(
+    c_vec,
+    c_test,
+    step,
+    progress_bar=False,
+):
+    """
+    Computes the concept alignment score between learnt concepts and labels.
+
+    :param c_vec: predicted concept representations (can be concept embeddings)
+    :param c_test: concept ground truth labels
+    :param y_test: task ground truth labels
+    :param step: number of integration steps
+    :return: concept alignment AUC, task alignment AUC
+
+    adapted from https://github.com/mateoespinosa/cem/blob/main/cem/metrics/cas.py
+    accessed 27.04.2024
+
+    EDIT : removed option to force alignment
+    """
+
+    # First lets compute an alignment between concept
+    # scores and ground truth concepts
+    # compute the maximum value for the AUC
+    n_clusters = np.linspace(
+        2,
+        c_vec.shape[0],
+        step,
+    ).astype(int)
+
+    max_auc = np.trapz(np.ones(len(n_clusters)))
+
+    # for each concept:
+    #   1. find clusters
+    #   2. compare cluster assignments with ground truth concept/task labels
+    concept_auc = []
+    if progress_bar:
+        bar = tqdm(range(c_test.shape[1]))
+    else:
+        bar = range(c_test.shape[1])
+    for concept_id in bar:
+        concept_homogeneity = []
+        for nc in n_clusters:
+            kmedoids = KMedoids(n_clusters=nc, random_state=0)
+            if c_vec.shape[1] != c_test.shape[1]:
+                c_cluster_labels = kmedoids.fit_predict(
+                    np.hstack(
+                        [
+                            c_vec[:, concept_id][:, np.newaxis],
+                            c_vec[:, c_test.shape[1] :],
+                        ]
+                    )
+                )
+            elif c_vec.shape[1] == c_test.shape[1] and len(c_vec.shape) == 2:
+                c_cluster_labels = kmedoids.fit_predict(
+                    c_vec[:, concept_id].reshape(-1, 1)
+                )
+            else:
+                c_cluster_labels = kmedoids.fit_predict(c_vec[:, concept_id, :])
+
+            # compute alignment with ground truth labels
+            concept_homogeneity.append(
+                homogeneity_score(c_test[:, concept_id], c_cluster_labels)
+            )
+
+            # EDIT ---- here we only have one set of labels
+            # task_homogeneity.append(
+            #     homogeneity_score(y_test, c_cluster_labels)
+            # )
+
+        # compute the area under the curve
+        concept_auc.append(np.trapz(np.array(concept_homogeneity)) / max_auc)
+        # task_auc.append(np.trapz(np.array(task_homogeneity)) / max_auc)
+
+    # return the average alignment across all concepts
+    concept_auc = np.mean(concept_auc)
+
+    return concept_auc

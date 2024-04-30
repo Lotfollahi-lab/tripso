@@ -28,7 +28,7 @@ from ..Datamodules.datamodule import (
     txDataModule,
 )
 from ..Models.gp_model import (
-    gfBaseline,
+    gfGlobal,
     gpTransformerBase,
     gpTransformerGlobal,
     iGlobalWrapper,
@@ -90,8 +90,9 @@ class gpEval:
         if None, defaults to all GP
     gene_counts_df : str
         Dataframe with the counts of each gene in the dataset
-    add_remaining_var : bool
+    add_remaining_var : str
         Whether to initalize new transformer block covering non GP genes
+        can be [None, 'top100', 'allgenes']
     supervised_labels : list
         Dict {label : num_classes} for supervised classification
     global_attn_heads : int
@@ -119,7 +120,7 @@ class gpEval:
         gp_latent_size: Optional[int] = 256,
         gp_inputs: Optional[list] = None,
         batch_size: Optional[int] = 128,
-        add_remaining_var: Optional[bool] = False,
+        add_remaining_var: Optional[str] = None,
         supervised_labels: Optional[Dict] = None,
         global_attn_heads: Optional[int] = 1,
         global_n_blocks: Optional[int] = 1,
@@ -171,7 +172,7 @@ class gpEval:
 
         elif model_type == 'Global':
             self.model = gpTransformerGlobal(
-                gene_counts_df=gene_counts_df,
+                gene_counts_df=self.gene_counts_df,
                 database=gpdb,
                 do_ensembl_conversion=do_ensembl_conversion,
                 n_blocks=n_blocks,
@@ -189,7 +190,7 @@ class gpEval:
             self.reconstruction_loss = reconstruction_loss
 
         elif model_type == 'Mean':
-            self.model = gfBaseline(
+            self.model = gfGlobal(
                 gp_inputs=gp_inputs,
                 database=gpdb,
                 do_ensembl_conversion=do_ensembl_conversion,
@@ -203,7 +204,7 @@ class gpEval:
             )
 
         else:
-            raise ValueError('model_type must be one of Base, or Mean')
+            raise ValueError('model_type must be one of Base, Global, or Mean')
 
         if gp_inputs is None:
             gp_inputs = gpdb.columns.tolist()
@@ -720,7 +721,6 @@ class gpEval:
 def calculate_gp_attribution_scores(
     gpdb_path,
     dataset_path,
-    gp,
     data_split,
     n_blocks,
     num_heads,
@@ -729,15 +729,26 @@ def calculate_gp_attribution_scores(
     obs_key,
     obs_value,
     output_dir,
+    gp=None,
     total_n_cells=None,
     task='classification',
     gpdb_ref_path=None,
-    do_ensembl_conversion=True,
+    gene_format='symbol',
     emb_dataset_path=None,
+    gene_counts_df=None,
+    add_remaining_var=None,
+    gp_inputs=None,
+    supervised_labels=None,
+    model_type='Base',
+    global_loss='supervised',
 ):
     '''
     Calculate attribution scores for each gene program
     '''
+
+    if add_remaining_var is None and gp is None:
+        raise ValueError('Please provide a gene program to evaluate')
+
     # --------------------------
     # Set seed
     # --------------------------
@@ -759,15 +770,26 @@ def calculate_gp_attribution_scores(
 
     gpdb = pd.read_csv(gpdb_path)
 
+    if gp_inputs is None:
+        gp_inputs = list(gpdb.columns)
+    elif isinstance(gp_inputs, str):
+        gp_inputs = [gp]
+
+    if gene_counts_df is not None:
+        gene_counts_df = pd.read_csv(gene_counts_df)
+
     txdata = iTxDataModule(
         folder=dataset_path,
         batch_size=1,
         return_tuple=True,
         gp=gp,
+        gp_inputs=gp_inputs,
+        add_remaining_var=add_remaining_var,
         gpdb=gpdb,
-        do_ensembl_conversion=do_ensembl_conversion,
+        do_ensembl_conversion=(gene_format != 'ensembl'),
         filter_key=obs_key,
         filter_value=obs_value,
+        gene_counts_df=gene_counts_df,
     )
 
     txdata.setup()
@@ -777,46 +799,46 @@ def calculate_gp_attribution_scores(
     if total_n_cells is None:
         total_n_cells = len(dataloader)
 
-    # --------------------------
-    # Build dictionary for class : id conversion
-    # --------------------------
-
-    y_label = obs_key + '_id'
-
-    datax = load_from_disk(dataset_path)
-    cols_to_remove = datax.column_names
-    cols_to_remove.remove(obs_key)
-    cols_to_remove.remove(y_label)
-    datax = datax.remove_columns(cols_to_remove)
-    conversion = datax.to_pandas().drop_duplicates()
-
-    n_classes = len(conversion)
-    conversion_dict = {k: v for k, v in zip(conversion[obs_key], conversion[y_label])}
+    y_label = obs_key
 
     # --------------------------
     # Set up model
     # --------------------------
 
     # TO DO : can we get this as config file?
-    model = gpTransformerBase(
-        gene_counts_df=None,
-        database=gpdb,
-        do_ensembl_conversion=do_ensembl_conversion,
-        n_blocks=n_blocks,
-        num_heads=num_heads,
-        gp_latent_size=gp_latent_size,
-        gp_inputs=gp,
-        add_remaining_var=False,
-    )
+    if model_type == 'Base':
+        model = gpTransformerBase(
+            database=gpdb,
+            do_ensembl_conversion=(gene_format != 'ensembl'),
+            n_blocks=n_blocks,
+            num_heads=num_heads,
+            gp_latent_size=gp_latent_size,
+            gp_inputs=gp_inputs,
+            gene_counts_df=gene_counts_df,
+            add_remaining_var=add_remaining_var,
+        )
+    elif model_type == 'Global':
+        model = gpTransformerGlobal(
+            database=gpdb,
+            do_ensembl_conversion=(gene_format != 'ensembl'),
+            n_blocks=n_blocks,
+            num_heads=num_heads,
+            gp_latent_size=gp_latent_size,
+            gp_inputs=gp_inputs,
+            gene_counts_df=gene_counts_df,
+            add_remaining_var=add_remaining_var,
+            global_loss=global_loss,
+            supervised_labels=supervised_labels,
+        )
 
     gp_transformer = scGPL(
         model,
-        'Base',
+        model_type,
         return_gene_embeddings=False,
         tokens_to_keep=None,
         gene_file_tag=None,
         return_attention=False,
-        gp=None,
+        gp=None,  # (for getting attention matrices)
         return_classification_report=False,
     ).load_from_checkpoint(
         model_checkpoint,
@@ -838,8 +860,8 @@ def calculate_gp_attribution_scores(
                 'Please provided path to embeddings for training linear layer'
             )
         gpEval.evaluate_embeddings(
-            n_classes=n_classes,
             y_label=y_label,
+            encode_covariate=True,
             folder_path=emb_dataset_path,
             output_dir=output_dir,
             emb_label=gp,
@@ -848,7 +870,6 @@ def calculate_gp_attribution_scores(
             lr=1e-3,
             batch_size=128,
             num_workers=1,
-            meta_labels=[y_label, y_label.replace('_id', '')],
             data_type='dataset',
             n_epochs=3,
             continuous_cov=[],
@@ -894,7 +915,7 @@ def calculate_gp_attribution_scores(
 
             attributions = gc.attribute(
                 input_ids[0],
-                target=conversion_dict[obs_value],
+                target=edict[f'{obs_key}_id'],
                 additional_forward_args=input_ids[1],
             )
 
@@ -904,9 +925,11 @@ def calculate_gp_attribution_scores(
                 if t in attribution_scores.keys():
                     attribution_scores[t] += [attr_norm[i]]
                     attribution_scores[f'{t}_abs'] += [np.abs(attr_norm[i])]
+                    attribution_scores[f'{t}_rank'] += [i]
                 else:
                     attribution_scores[t] = [attr_norm[i]]
                     attribution_scores[f'{t}_abs'] = [np.abs(attr_norm[i])]
+                    attribution_scores[f'{t}_rank'] = [i]
 
         else:
             break
@@ -916,6 +939,7 @@ def calculate_gp_attribution_scores(
         attribution_scores[f'{t}_abs'] = np.nanmean(attribution_scores[f'{t}_abs'])
         attribution_scores[f'{t}_std'] = np.nanstd(attribution_scores[t])
         attribution_scores[f'{t}_abs_std'] = np.nanstd(attribution_scores[f'{t}_abs'])
+        attribution_scores[f'{t}_rank'] = np.nanmean(attribution_scores[f'{t}_rank'])
 
     rows = []
 
@@ -926,6 +950,7 @@ def calculate_gp_attribution_scores(
             'abs_attribution_score': attribution_scores[f'{t}_abs'],
             'std_attribution_score': attribution_scores[f'{t}_std'],
             'abs_std_attribution_score': attribution_scores[f'{t}_abs_std'],
+            'rank': attribution_scores[f'{t}_rank'],
         }
 
         rows.append(row)
@@ -934,7 +959,7 @@ def calculate_gp_attribution_scores(
 
     # Add gene conversion
     gene_df = pd.DataFrame(imodel.gene_conversion)
-    gene_df = gene_df.join(attribution_df.set_index('token'), on='token_original')
+    gene_df = gene_df.join(attribution_df.set_index('token'), on='token')
 
     # add GP labels
     if gpdb_ref_path is None:
@@ -947,7 +972,7 @@ def calculate_gp_attribution_scores(
     gpdb_og = pd.read_csv(gpdb_ref_path)
 
     for ogp in gpdb_og.columns:
-        if do_ensembl_conversion:
+        if gene_format == 'symbol':
             gene_df[ogp] = np.where(gene_df['symbol'].isin(gpdb_og[ogp]), 1, 0)
         else:
             gene_df[ogp] = np.where(gene_df['ensembl'].isin(gpdb_og[ogp]), 1, 0)
@@ -980,6 +1005,8 @@ def calculate_cell_token_attribution_scores(
     pretrained_emb=None,
     reconstruction_loss=None,
     supervised_labels=None,
+    gene_counts_df=None,
+    add_remaining_var=None,
 ):
     # --------------------------
     # Set seed
@@ -1001,15 +1028,19 @@ def calculate_cell_token_attribution_scores(
     # --------------------------
 
     gpdb = pd.read_csv(gpdb_path)
+
     if gp_inputs is None:
         gp_inputs = list(gpdb.columns)
 
-    print('emb_dataset_path', emb_dataset_path)
+    if gene_counts_df is not None:
+        gene_counts_df = pd.read_csv(gene_counts_df)
+
     emb_dm = iEmbDataModule(
         folder_path=emb_dataset_path,
         batch_size=1,
-        gp_inputs=list(gpdb.columns),
+        gp_inputs=gp_inputs,
         meta_labels=obs_key,
+        add_remaining_var=add_remaining_var,
     )
 
     emb_dm.setup()
@@ -1036,17 +1067,17 @@ def calculate_cell_token_attribution_scores(
     # --------------------------
 
     model = gpTransformerGlobal(
-        gene_counts_df=None,
         database=gpdb,
         do_ensembl_conversion=False,
         n_blocks=n_blocks,
         num_heads=num_heads,
         gp_latent_size=gp_latent_size,
-        gp_inputs=list(gpdb.columns),
-        add_remaining_var=False,
+        gp_inputs=gp_inputs,
+        add_remaining_var=add_remaining_var,
         global_loss=global_loss,
         reconstruction_loss=reconstruction_loss,
         supervised_labels=supervised_labels,
+        gene_counts_df=gene_counts_df,
     )
 
     gp_transformer = scGPL(
@@ -1099,11 +1130,16 @@ def calculate_cell_token_attribution_scores(
     else:
         clf_layer = None
         tasks = list(supervised_labels.keys())
-        task_index = tasks.index(obs_key)
+        if not obs_key.endswith('_id'):
+            task_tag = obs_key + '_id'
+        else:
+            task_tag = obs_key
+        task_index = tasks.index(task_tag)
 
     imodel = iGlobalWrapper(
         gp_transformer,
         clf_layer,
+        global_loss=gp_transformer.model.global_loss,
         use_embedding=use_embedding,
         pretrained_emb=pretrained_emb,
         vocab_size=len(gpdb.columns),
@@ -1120,6 +1156,10 @@ def calculate_cell_token_attribution_scores(
     gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[0].mlp)
 
     attribution_scores = {}
+
+    # optionally add gpFinder
+    if add_remaining_var is not None:
+        gp_inputs.append('remaining_var')
 
     for g in gp_inputs:
         attribution_scores[g] = []

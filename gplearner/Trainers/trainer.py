@@ -420,6 +420,31 @@ class scGPL(pl.LightningModule):
         setattr(self, f'{stage}_loss', [])
 
     def validation_step(self, batch, batch_idx):
+        if self.model_type == 'Base':
+            loss_output = self.compute_loss(batch)
+            loss = loss_output['total_loss']
+            perp = torch.exp(loss)
+
+            self.log(
+                'val/loss',
+                loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+
+            self.log(
+                'val/perplexity',
+                perp,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+
         # Optionally save embeddings
         if self.save_emb:
             output = self.forward(batch)
@@ -432,7 +457,7 @@ class scGPL(pl.LightningModule):
                     output['num_genes_per_cell_list'][i].cpu().numpy().T
                 )
 
-            if self.model_type == 'Global':
+            if 'cell_token' in output:
                 emb_dict['cell_token'] = output['cell_token'].detach().cpu()
 
             # metadata
@@ -936,9 +961,6 @@ class scGPL(pl.LightningModule):
         gp_loss_dict = {}
         loss = 0
 
-        # import time
-        # t0 = time.time()
-
         for i in range(len(self.model.gp_inputs)):
             # Loss
             if (
@@ -982,13 +1004,6 @@ class scGPL(pl.LightningModule):
                 gp_loss_dict[self.model.gp_inputs[i]] = (
                     torch.tensor(0).to(output['logits_lm_list'][i].device).float()
                 )
-
-            # compute total loss
-        #     tensor_list = list(gp_loss_dict.values())
-
-        # loss = torch.sum(torch.stack(tensor_list))
-        # t3 = time.time()
-        # print(f'Time taken after loss calculation: {t3 - t0}')
 
         # package outputs to return flexible number of objects
         holder = {
@@ -1048,12 +1063,7 @@ class scGPL(pl.LightningModule):
                     self.train_pred_counts_list.append(output['count_output'])
                     self.train_true_counts_list.append(output['true_bins'])
 
-        # t5 = time.time()
-        # print('Skipped global stuff', t5-t3)
         holder['total_loss'] = loss
-
-        # t6 = time.time()
-        # print(f'Time taken for loss calculation: {t6 - t0}')
 
         return holder
 
