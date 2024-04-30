@@ -389,7 +389,7 @@ def get_gp_tokens(
 
     # Check if GP exists in the reactome columns
     if GP not in db.columns:
-        raise ValueError(f'{GP} not found in {db}.')
+        raise ValueError(f'{GP} not found in {db.columns}.')
 
     # Extract the column 'GP' from the DataFrame
     gp_column = db[GP]

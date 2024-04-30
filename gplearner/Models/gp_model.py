@@ -574,7 +574,7 @@ class cellWrapper(nn.Module):
         # n_genes_per_cell = torch.tensor(np.array(num_genes_per_cell_list).T).to(
         #     z.device
         # )
-        n_genes_per_cell = torch.stack(num_genes_per_cell_list).T.contiguous()
+        n_genes_per_cell = torch.stack(num_genes_per_cell_list).T.to(z.device)
 
         # Find the indices that would sort each row in descending order
         sorted_indices = torch.argsort(-n_genes_per_cell, dim=1)
@@ -997,7 +997,7 @@ class gpTransformerGlobal(gpTransformerBase):
         if self.global_loss == 'supervised':
             if supervised_labels is None:
                 raise ValueError(
-                    'Please provide a dictionary' 'of the form {task_name : n_classes}'
+                    'Please provide a dictionary of the form {task_name : n_classes}'
                 )
 
             for k, n in supervised_labels.items():
@@ -1121,11 +1121,8 @@ class iGpWrapper(nn.Module):
         token_to_gene = {v: k for k, v in token_dictionary.items()}
 
         gene_conversion = {
-            'token_original': list(gp_tokens),
-            'token_encoded': [
-                i + 1 for i in range(len(gp_tokens))
-            ],  # +1 comes from encoded in iTxDatamodule
-            'ensembl': [token_to_gene[t] for t in gp_tokens],
+            'token': gp_tokens.cpu().numpy().tolist(),
+            'ensembl': [token_to_gene[t.item()] for t in gp_tokens],
         }
 
         gene_conversion['symbol'] = [
@@ -1215,10 +1212,11 @@ class iGlobalWrapper(nn.Module):
 
 
 class AverageNonZero(nn.Module):
-    def __init__(self):
+    def __init__(self, cls_tag='cls'):
         super().__init__()
+        self.cls_tag = cls_tag
 
-    def forward(self, x, **kwargs):
+    def forward(self, x, *args, **kwargs):
         # extra argument only for compatibility with gpTransformerEncoder
         # also for compatability: extract tensor if necessary
         if isinstance(x, dict):
@@ -1234,8 +1232,8 @@ class AverageNonZero(nn.Module):
         # Replace NaN values with 0
         x[torch.isnan(x)] = 0
 
-        # print count of nan values to check
-        output = {'cls': x, 'logits_lm': [], 'gene_labels': []}
+        # output
+        output = {self.cls_tag: x, 'logits_lm': [], 'gene_labels': []}
 
         return output
 
@@ -1398,7 +1396,7 @@ class gfGlobal(gpTransformerGlobal):
             learn_new_gp=False,
         )
 
-        self.cell_token_learner = AverageNonZero()
+        self.cell_token_learner = AverageNonZero(cls_tag='cell_token')
 
     def get_cell_token_attention(self, input_dataset):
         warnings.warn(

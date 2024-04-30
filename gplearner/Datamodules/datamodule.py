@@ -523,6 +523,8 @@ class iTxDataModule(txDataModule):
         gene_name_path=GENE_NAME_FILE,
         gf_layer_to_quant=-1,
         gene_counts_df=None,
+        add_remaining_var=None,
+        gp_inputs=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -532,22 +534,45 @@ class iTxDataModule(txDataModule):
             geneformer_model=geneformer_model, gf_layer_to_quant=gf_layer_to_quant
         )
 
+        # Get vocab size
+        with open(gene_token_path, 'rb') as f:
+            token_dict = pickle.load(f)
+        self.vocab_size = max(token_dict.values())
+
         # Set up encoded GP tokens
-        self.gp_tokens = get_gp_tokens(
-            gp,
-            gpdb,
-            do_ensembl_conversion,
-            gene_counts_df,
-            gene_token_path,
-            gene_name_path,
-        )
+        if add_remaining_var is None:
+            gp_tokens = get_gp_tokens(
+                gp,
+                gpdb,
+                do_ensembl_conversion,
+                gene_counts_df,
+                gene_token_path,
+                gene_name_path,
+            )
 
-        self.gp_tokens_encoded = self.encode_gp_tokens(self.gp_tokens)
+            gp_tokens_tensor = torch.tensor(list(gp_tokens), dtype=torch.int32)
+            self.gp_tokens = gp_tokens_tensor
 
-    def encode_gp_tokens(self, gp_tokens):
-        return {gene: idx + 1 for idx, gene in enumerate(gp_tokens)}
+        else:
+            all_gp_tokens = set()
 
-    def build_input_matrix(self, gf, input_ids, gpi_tokens_list):
+            for gpi in gp_inputs:
+                gp_tokens = get_gp_tokens(
+                    gpi,
+                    gpdb,
+                    do_ensembl_conversion,
+                    gene_counts_df,
+                    gene_token_path,
+                    gene_name_path,
+                )
+
+                all_gp_tokens.update(gp_tokens)
+                non_gp_tokens = set(gene_counts_df['token'].tolist()) - all_gp_tokens
+                tokens_tensor = torch.tensor(list(non_gp_tokens), dtype=torch.int32)
+
+                self.gp_tokens = tokens_tensor
+
+    def build_input_matrix(self, gf, input_ids, gp_tokens):
         """
         Build a matrix of shape (n_cells, n_gp_tokens, 256)
         where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
@@ -570,12 +595,6 @@ class iTxDataModule(txDataModule):
                             -> max size is total GP size
 
         """
-        # Get list of gp tokens
-        gp_tokens = torch.tensor(gpi_tokens_list)
-
-        # Convert input IDs (list of lists) to array:
-        holder = []
-
         # binary mask (h, i, k)
         # in cell h, is the gene as position i in our GP at position k?
         mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0)
@@ -611,7 +630,7 @@ class iTxDataModule(txDataModule):
         for i in range(masked_labels.shape[0]):
             x = masked_labels[i, :]
             nz = x != 0
-            z = np.concatenate((x[nz], x[~nz]))
+            z = torch.concat((x[nz], x[~nz]), dim=0)
             holder += [z]
 
         masked_labels_output = torch.stack(holder)
@@ -892,9 +911,14 @@ class EmbDataModule(LightningDataModule):
 
 
 class iEmbDataModule(EmbDataModule):
-    def __init__(self, gp_inputs, **kwargs):
-        self.gp_inputs = gp_inputs
+    def __init__(self, gp_inputs, add_remaining_var, **kwargs):
         super().__init__(**kwargs)
+
+        if isinstance(gp_inputs, str):
+            gp_inputs = [gp_inputs]
+        if add_remaining_var is not None:
+            gp_inputs = gp_inputs + ['remaining_var']
+        self.gp_inputs = gp_inputs
 
     def custom_collate(self, batch):
         # Prepare data for input into cellwrapper
@@ -914,13 +938,11 @@ class iEmbDataModule(EmbDataModule):
         z = gp_embs_tensor.transpose(0, 1)
 
         # 2. num_genes_per_cell_list
-
         genes_per_cell_list = []
 
         for gp in self.gp_inputs:
-            genes_per_cell_list.append(
-                [torch.tensor(d[f'{gp}_num_genes']) for d in batch]
-            )
+            gp_i = [torch.tensor(d[f'{gp}_num_genes']) for d in batch]
+            genes_per_cell_list.append(torch.stack(gp_i))
 
         output_dict = {'num_genes_per_cell_list': genes_per_cell_list}
 

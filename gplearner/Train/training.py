@@ -506,6 +506,9 @@ def run_training(
         # reset output directory
         gp_transformer.output_dir = output_dir
 
+        # reset supervised labels
+        gp_transformer.model.supervised_labels = supervised_labels
+
     # Learning new GP
     if learn_new_gp:
         # load pretrained model
@@ -572,11 +575,6 @@ def run_training(
             profiler='advanced',
             strategy=strategy,
         )
-
-    print('***** DONE ALL INITIALIZATION *****')
-    print('***** STARTING TRAINING *****')
-    print('***** USING GPU *****', torch.cuda.get_device_name())
-    print('***** USING GPU *****', torch.cuda.get_device_properties(0))
 
     # Ready to train with new learning rate
     trainer.fit(gp_transformer, txdata)
