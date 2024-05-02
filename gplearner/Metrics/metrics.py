@@ -1,4 +1,5 @@
 import random
+import warnings
 from collections import Counter
 from itertools import combinations
 
@@ -613,6 +614,8 @@ def concept_alignment_score(
 
     EDIT : removed option to force alignment
     """
+
+    warnings.simplefilter('ignore', UserWarning)
 
     # First lets compute an alignment between concept
     # scores and ground truth concepts
