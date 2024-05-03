@@ -321,16 +321,22 @@ class gpTransformerEncoder(nn.Module):
     def random_gene_masking(self, x, gene_labels):
         x = x.clone()
         gene_labels = gene_labels.clone()
-        mask = self.mask_generator(gene_labels)
+        full_mask, mask, random_mask = self.mask_generator(gene_labels)
 
         # Apply the mask to the target tensor
         # if mask = 1, we want to 0 out the token embedding
         # but keep the label for loss calculation
         x = x.masked_fill(mask.unsqueeze(-1), 0)
 
+        # Add random tokens to the masked positions
+        random_tokens = torch.randn(x.shape, device=x.device)
+
+        # x = x.masked_fill(random_mask.unsqueeze(-1), random_tokens[random_mask])
+        x[random_mask] = random_tokens[random_mask]
+
         # Replace unmasked indices with -100 in the labels
         # since we only compute loss on masked tokens
-        gene_labels[~mask] = -100
+        gene_labels[~full_mask] = -100
 
         return x, gene_labels
 
@@ -419,6 +425,7 @@ class PretrainedEmbeddings(nn.Module):
     BertEmbedding style class for exploring LIG
     Initialize nn.Embedding directly from embeddings
     which are output from another part of the model
+    # NOT USED
     '''
 
     def __init__(
