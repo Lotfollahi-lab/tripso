@@ -175,6 +175,7 @@ class EmbDataset(Dataset):
         filter_value=None,
         clf_label=None,  # classification label
         encode_covariates=False,
+        frac_for_training=1,
     ):
         self.data_type = data_type
         if self.data_type == 'dataset':
@@ -184,6 +185,11 @@ class EmbDataset(Dataset):
                     emb = emb.filter(lambda x: x[filter_key] == filter_value)
                 elif isinstance(filter_value, list):
                     emb = emb.filter(lambda x: x[filter_key] in filter_value)
+            if frac_for_training < 1:
+                emb = emb.shuffle(seed=0).select(
+                    range(int(len(emb) * frac_for_training))
+                )
+
             self.emb = emb
             if clf_label is not None:
                 unique_labels = emb.unique(clf_label)
@@ -198,6 +204,17 @@ class EmbDataset(Dataset):
                     emb = emb[emb.obs[filter_key] == filter_value]
                 elif isinstance(filter_value, list):
                     emb = emb[emb.obs[filter_key].isin(filter_value)]
+
+            if frac_for_training < 1:
+                num_cells = emb.n_obs  # Total number of cells
+                num_sample = int(
+                    emb.n_obs * frac_for_training
+                )  # Number of cells to sample
+                # Generate random indices
+                random_indices = np.random.choice(num_cells, num_sample, replace=False)
+                # Select the sampled cells from the anndata object
+                emb = emb[random_indices, :]
+
             self.emb = emb
             if clf_label is not None:
                 self.num_classes = emb.obs[clf_label].nunique()
@@ -730,6 +747,8 @@ class EmbDataModule(LightningDataModule):
         filter_value=None,
         clf_label=None,
         encode_covariate=False,
+        # for development
+        frac_for_training=1,
     ):
         super().__init__()
         self.folder_path = folder_path
@@ -748,6 +767,7 @@ class EmbDataModule(LightningDataModule):
         self.filter_value = filter_value
         self.clf_label = clf_label
         self.encode_covariate = encode_covariate
+        self.frac_for_training = frac_for_training
 
     def prepare_data(self):
         folder_path = Path(self.folder_path)
@@ -764,6 +784,7 @@ class EmbDataModule(LightningDataModule):
             filter_value=self.filter_value,
             clf_label=self.clf_label,
             encode_covariates=self.encode_covariate,
+            frac_for_training=self.frac_for_training,
         )
 
         self.val_dataset = EmbDataset(

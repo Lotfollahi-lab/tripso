@@ -18,7 +18,11 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
-from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
+from ..Models.gp_model import (
+    GENEFORMER_MODEL_PATH,
+    gpTransformerBase,
+    gpTransformerGlobal,
+)
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import find_latest_file
 
@@ -66,6 +70,7 @@ def run_training(
     weight_decay: float = 0.0,
     use_weighted_sampler: Optional[bool] = False,
     sample_by: Optional[str] = 'cell_type',
+    geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
 ):
     """
     Wrapper function for training gpLearner model
@@ -373,6 +378,7 @@ def run_training(
             add_remaining_var=add_remaining_var,
             use_flash=use_flash,
             learn_new_gp=learn_new_gp,
+            geneformer_model=geneformer_model_path,
         )
 
     elif model_type == 'Global':
@@ -400,10 +406,11 @@ def run_training(
             reconstruction_loss=reconstruction_loss,
             total_n_genes=total_n_genes,
             use_flash=use_flash,
+            geneformer_model=geneformer_model_path,
         )
 
     else:
-        raise ValueError('only model types Base or Global implemented for now')
+        raise ValueError('Model type must be Base or Global')
 
     use_gp_similarity_loss = gp_similarity_file is not None
 
