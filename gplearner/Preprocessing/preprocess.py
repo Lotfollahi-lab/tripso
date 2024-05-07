@@ -297,7 +297,13 @@ def pp_and_tokenize(
                 )
 
         # Select gp genes
-        adata = adata[:, list(gp_genes)]
+        gp_genes_union = set(adata.var_names) & gp_genes
+        if not gp_genes_union:
+            raise ValueError(
+                'No GP genes found in the dataset'
+                'Do GP genes format match adata indices?'
+            )
+        adata = adata[:, list(gp_genes_union)]
 
         # Save to disk
         adata.write_h5ad(
