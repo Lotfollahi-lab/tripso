@@ -724,12 +724,19 @@ class mlm_mask_generator:
             torch.rand(x.shape, device=x.device) < self.no_change_prob
         )
 
-        mask = full_mask & ~unchanged
+        # A mask for tokens to be replaced with random tokens
+        random_mask = (
+            full_mask
+            & ~unchanged
+            & (torch.rand(x.shape, device=x.device) < self.randomize_prob)
+        )
+
+        mask = full_mask & ~unchanged & ~random_mask
 
         # mask = full_mask
 
         # Return the masks for processing inside transformer
-        return mask
+        return full_mask, mask, random_mask
 
 
 ###################################
