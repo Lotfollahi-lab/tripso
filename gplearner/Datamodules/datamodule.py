@@ -303,6 +303,7 @@ class txDataModule(LightningDataModule):
         return_tuple=False,
         filter_key=None,
         filter_value=None,
+        frac_for_generation=1,
         # development only:
         frac_for_training=1,
         data_split_to_pass_to_val_step='val',
@@ -332,6 +333,7 @@ class txDataModule(LightningDataModule):
         self.return_tuple = return_tuple
         self.filter_key = filter_key
         self.filter_value = filter_value
+        self.frac_for_generation = frac_for_generation
 
         with open(token_dictionary_file, 'rb') as f:
             self.gene_token_dict = pickle.load(f)
@@ -380,16 +382,19 @@ class txDataModule(LightningDataModule):
         dataset_size = len(self.dataset)
 
         train_size = int(
-            0.8 * dataset_size * self.frac_for_training
+            0.8 * dataset_size * self.frac_for_training * self.frac_for_generation
         )  # 80% for training
         print(f'Training on {train_size} samples')
         self.train_size = train_size
 
-        val_size = int(0.1 * dataset_size)  # 10% for validation
+        val_size = int(
+            0.1 * dataset_size * self.frac_for_generation
+        )  # 10% for validation
         self.val_size = val_size
 
-        test_size = (
-            dataset_size - int(0.8 * dataset_size) - val_size
+        test_size = int(
+            (dataset_size - int(0.8 * dataset_size) - val_size)
+            * self.frac_for_generation
         )  # Remaining for test
 
         # # FOR DEBUGGING

@@ -330,9 +330,7 @@ class gpWrapper(nn.Module):
         gene_labels_list = []
         gene_original_labels_list = []
         num_genes_per_cell_list = []
-
         gene_emb_list = []
-        gp_labels_list = []
 
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
@@ -376,11 +374,8 @@ class gpWrapper(nn.Module):
                 gene_labels_list.append(encoder_output['gene_labels'])
 
                 if return_gene_embeddings:
-                    gene_emb_list.append(encoder_output['gene_embeddings'])
-                    gene_original_labels_list.append(tokens_pad_unencoded)
-                    gp_labels_list.append(
-                        [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
-                    )
+                    gene_emb_list = encoder_output['gene_embeddings']
+                    gene_original_labels_list = tokens_pad_unencoded
             else:
                 continue
 
@@ -393,58 +388,47 @@ class gpWrapper(nn.Module):
             'logits_lm_list': logits_lm_list,
             'gene_labels_list': gene_labels_list,
             'gene_emb_list': gene_emb_list,
-            'gp_labels_list': gp_labels_list,
             'gene_original_labels_list': gene_original_labels_list,
             'num_genes_per_cell_list': num_genes_per_cell_list,
         }
 
         if return_gene_embeddings:
-            output = self.filter_gene_embeddings(output, tokens_to_keep)
+            output = self.wrangle_gene_embeddings(output, tokens_to_keep)
 
         return output
 
-    def filter_gene_embeddings(self, emb_dict, tokens_to_keep):
-        gene_emb_list = emb_dict['gene_emb_list']
-        gp_labels_list = emb_dict['gp_labels_list']
-        tokens_list = emb_dict['gene_original_labels_list']
+    def wrangle_gene_embeddings(self, emb_dict, tokens_to_keep):
+        gene_emb = emb_dict['gene_emb_list']
+        token_labels = emb_dict['gene_original_labels_list']
 
-        x_scgpl = []
-        tokens_scgpl = []
-        gp_labels = []
+        output = {}
 
-        # Filter to only keep genes in multiple GP
-        # loop through emb list = embeddings are grouped by GP
-        for i in range(len(gene_emb_list)):
-            x_out, tokens, _, attn_mask = self.build_input_matrix(
-                gene_emb_list[i],
-                tokens_list[i],
-                tokens_to_keep,
-                mode='extract_genes',
-                gp_idx=i,
-            )
+        for gene in tokens_to_keep:
+            # zero out other genes
+            mask = token_labels.unsqueeze(2) == gene
+            mask = mask.to(torch.int)
+            mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
-            gp_label_i = gp_labels_list[i]
+            masked_emb = gene_emb * mask_expanded
 
-            # remove missing values
-            x_out = x_out.reshape(x_out.shape[0] * x_out.shape[1], -1)
-            non_missing = (x_out != 0).all(dim=1)
-            x_out = x_out[non_missing]
+            # Find the indices of the non-zero vectors
+            non_zero_mask = torch.norm(masked_emb, dim=2) != 0
+            indices = non_zero_mask.nonzero(as_tuple=True)
 
-            tokens = tokens.reshape(tokens.shape[0] * tokens.shape[1])
-            tokens = tokens[tokens != -100]
+            # Initialize the result tensor with zeros
+            result = torch.zeros(gene_emb.shape[0], gene_emb.shape[-1])
 
-            gp_label_out = [gp_label_i[0] for _ in range(tokens.shape[0])]
+            # Initialize the rank tensor with -1
+            # (or any invalid index, indicating 'not found')
+            rank = -torch.ones(gene_emb.shape[0], dtype=torch.int64)
 
-            # Add to list
-            x_scgpl.append(x_out)
-            tokens_scgpl.append(tokens)
-            gp_labels.append(gp_label_out)
+            # Check if there are any non-zero rows, and update the result tensor
+            if indices[0].nelement() != 0:
+                result[indices[0]] = masked_emb[indices[0], indices[1]]
+                rank[indices[0]] = indices[1]
 
-        output = {
-            'x_scgpl': x_scgpl,
-            'tokens_scgpl': tokens_scgpl,
-            'gp_labels': gp_labels,
-        }
+            output[gene] = result
+            output[f'{gene}_rank'] = rank
 
         return output
 
