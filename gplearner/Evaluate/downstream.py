@@ -28,6 +28,7 @@ from ..Datamodules.datamodule import (
     txDataModule,
 )
 from ..Models.gp_model import (
+    GENEFORMER_MODEL_PATH,
     gfGlobal,
     gpTransformerBase,
     gpTransformerGlobal,
@@ -126,6 +127,7 @@ class gpEval:
         global_n_blocks: Optional[int] = 1,
         global_loss: Optional[str] = 'supervised',
         reconstruction_loss: Optional[str] = 'zinb',
+        geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -168,6 +170,7 @@ class gpEval:
                 num_heads=n_heads,
                 gp_latent_size=gp_latent_size,
                 add_remaining_var=add_remaining_var,
+                geneformer_model=geneformer_model_path,
             )
 
         elif model_type == 'Global':
@@ -185,6 +188,7 @@ class gpEval:
                 global_n_blocks=global_n_blocks,
                 global_loss=global_loss,
                 reconstruction_loss=reconstruction_loss,
+                geneformer_model=geneformer_model_path,
             )
 
             self.reconstruction_loss = reconstruction_loss
@@ -201,6 +205,7 @@ class gpEval:
                 mgm_mask_ratio=1,
                 num_heads=1,
                 add_remaining_var=add_remaining_var,
+                geneformer_model=geneformer_model_path,
             )
 
         else:
@@ -331,6 +336,8 @@ class gpEval:
         filter_value=None,
         encode_covariate=False,
         filter_tag=None,
+        # development
+        frac_for_training=1,
     ):
         '''
         Train nn.Linear layer based on embeddings
@@ -378,6 +385,7 @@ class gpEval:
             filter_value=filter_value,
             clf_label=clf_label,
             encode_covariate=encode_covariate,
+            frac_for_training=frac_for_training,
         )
 
         emb_dm.setup()
