@@ -416,11 +416,13 @@ class gpWrapper(nn.Module):
             indices = non_zero_mask.nonzero(as_tuple=True)
 
             # Initialize the result tensor with zeros
-            result = torch.zeros(gene_emb.shape[0], gene_emb.shape[-1])
+            result = torch.zeros(gene_emb.shape[0], gene_emb.shape[-1]).to(
+                gene_emb.device
+            )
 
             # Initialize the rank tensor with -1
             # (or any invalid index, indicating 'not found')
-            rank = -torch.ones(gene_emb.shape[0], dtype=torch.int64)
+            rank = -torch.ones(gene_emb.shape[0], dtype=torch.int64).to(gene_emb.device)
 
             # Check if there are any non-zero rows, and update the result tensor
             if indices[0].nelement() != 0:
@@ -902,6 +904,7 @@ class gpTransformerBase(nn.Module):
         return_attention=False,
         tokens_to_keep=None,
         return_gf_cell_emb=False,
+        gp_of_interest=None,
     ):
         if self.training:
             inference = False
@@ -917,13 +920,15 @@ class gpTransformerBase(nn.Module):
         if not hasattr(self, 'gp_of_interest'):
             self.gp_of_interest = None
 
+        gp_to_pass = self.gp_of_interest if gp_of_interest is None else gp_of_interest
+
         output = self.multi_gp_encoder(
             emb_out,
             input_dataset,
             return_gene_embeddings=return_gene_embeddings,
             return_attention=return_attention,
             tokens_to_keep=tokens_to_keep,
-            gp_of_interest=self.gp_of_interest,
+            gp_of_interest=gp_to_pass,
         )
 
         # Optionally return geneformer cell embeddings
@@ -1018,6 +1023,7 @@ class gpTransformerGlobal(gpTransformerBase):
         return_gene_embeddings=False,
         return_attention=False,
         tokens_to_keep=None,
+        gp_of_interest=None,
     ):
         return_gf_cell_emb = True if self.global_loss == 'mse' else False
 
@@ -1036,7 +1042,11 @@ class gpTransformerGlobal(gpTransformerBase):
             return_attention,
             tokens_to_keep,
             return_gf_cell_emb,
+            gp_of_interest=gp_of_interest,
         )
+
+        if return_gene_embeddings:
+            return base_output
 
         cell_output = self.cell_token_learner(base_output, inference)
 
@@ -1200,7 +1210,10 @@ class AverageNonZero(nn.Module):
         super().__init__()
         self.cls_tag = cls_tag
 
-    def forward(self, x, *args, **kwargs):
+    def forward(self, x, return_gene_embeddings=False, *args, **kwargs):
+        if return_gene_embeddings:
+            return x
+
         # extra argument only for compatibility with gpTransformerEncoder
         # also for compatability: extract tensor if necessary
         if isinstance(x, dict):

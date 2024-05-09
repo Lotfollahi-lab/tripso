@@ -8,6 +8,7 @@ from typing import (
     Optional,
 )
 
+import anndata as ad
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -117,6 +118,7 @@ class gpEval:
         gene_format: Optional[str] = 'symbol',
         tissue: Optional[str] = 'test',
         model_type: Optional[str] = 'Base',
+        model_type_in_checkpoint: Optional[str] = None,
         n_heads: Optional[int] = 8,
         gp_latent_size: Optional[int] = 256,
         gp_inputs: Optional[list] = None,
@@ -143,7 +145,12 @@ class gpEval:
 
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
-            latest_ckpt = find_latest_file(output_dir, tissue, model_type)
+            tag = (
+                model_type_in_checkpoint
+                if model_type_in_checkpoint is not None
+                else model_type
+            )
+            latest_ckpt = find_latest_file(output_dir, tissue, tag)
             print('Latest .ckpt file:', latest_ckpt)
             self.checkpoint_path = os.path.join(output_dir, latest_ckpt)
 
@@ -606,9 +613,15 @@ class gpEval:
         """
         os.chdir(self.output_dir)
 
-        gene_dir_tag = pathway
+        gene_dir_tag = f'{pathway}_gene_embeddings'
+
         if obs_value is not None:
-            gene_dir_tag += f'_from_{obs_value}'
+            if isinstance(obs_value, str):
+                gene_dir_tag += f'_from_{obs_value}'
+            else:
+                unpacked_label = '_'.join(map(str, obs_value))
+                gene_dir_tag += f'_{unpacked_label}'
+
         if output_tag is not None:
             gene_dir_tag += f'_{output_tag}'
 
@@ -619,10 +632,15 @@ class gpEval:
             token_dictionary = pickle.load(f)
 
         if do_ensembl_conversion:
-            ensembl_ids = [name_dictionary[t] for t in genes_to_keep]
+            ensembl_ids = [
+                name_dictionary[t] for t in genes_to_keep if t in name_dictionary
+            ]
         else:
             ensembl_ids = genes_to_keep
-        tokens_to_keep = [token_dictionary[e] for e in ensembl_ids]
+        tokens_to_keep = [
+            token_dictionary[e] for e in ensembl_ids if e in token_dictionary
+        ]
+        print(f'Number of genes to keep: {len(tokens_to_keep)}')
 
         gp_transformer = self._init_trainer(
             return_gene_embeddings=True,
@@ -644,6 +662,61 @@ class gpEval:
 
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
         trainer.validate(gp_transformer, txdata)
+
+    def visualize_gene_embeddings(
+        self,
+        genes_to_plot,
+        cell_label_to_plot,
+        gene_label_to_plot,
+        gene_label_df,
+        gene_embedding_dir,
+        output_dir,
+        frac=1,
+    ):
+        # Load gene embeddings
+        pathway = gene_embedding_dir.split('_')[0]
+        emb = load_from_disk(os.path.join(output_dir, gene_embedding_dir))
+        emb = emb.shuffle(seed=0).select(range(int(frac * len(emb))))
+
+        # Wrangle into anndata
+        holder = []
+
+        for g in genes_to_plot:
+            x = np.array(emb[g])
+            y = pd.DataFrame(
+                {k: emb[k] for k in emb.column_names if k in cell_label_to_plot}
+            )
+            y['gene'] = g
+            y['geneformer_rank'] = np.array(emb[f'{g}_rank'])
+            gdata = sc.AnnData(X=x, obs=y)
+            # remove missing genes
+            gdata = gdata[gdata.obs['geneformer_rank'] != -1]
+            holder.append(gdata)
+
+        adata = ad.concat(holder)
+
+        # add gene metadata
+        if gene_label_df is not None:
+            adata.obs = adata.obs.join(gene_label_df.set_index('gene'), on='gene')
+
+        sc.pp.neighbors(adata, use_rep='X')
+        sc.tl.umap(adata)
+
+        for c in cell_label_to_plot:
+            sc.pl.umap(
+                adata,
+                color=c,
+                save=f'_{pathway}_genes_by_{c}.pdf',
+                frameon=False,
+            )
+
+        for c in gene_label_to_plot:
+            sc.pl.umap(
+                adata,
+                color=c,
+                save=f'_{pathway}_genes_by_{c}.pdf',
+                frameon=False,
+            )
 
     def generate_attention_matrix(self, gp):
         """

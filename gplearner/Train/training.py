@@ -495,7 +495,7 @@ def run_training(
 
     # For training global model after base model
     # but finetuning original GP blocks
-    if global_training == 'finetune':
+    if (global_training == 'finetune') | (global_training == 'finetune_global'):
         if path_to_base_model is None:
             raise ValueError(
                 'Please provide path to pre-trained'
@@ -503,7 +503,8 @@ def run_training(
             )
         # look for Base model to load
         # if not found, this will raise an error
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+        tag = 'Base' if global_training == 'finetune' else 'Global'
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, tag)
         checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
         print('Loading from checkpoint', checkpoint_path)
         checkpoint = torch.load(latest_ckpt)

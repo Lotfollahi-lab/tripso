@@ -131,6 +131,8 @@ class scGPL(pl.LightningModule):
     ) -> None:
         super().__init__()
         # save hyperparameters
+        # ignore model to avoid yaml error
+        # self.save_hyperparameters(ignore=['model'])
         self.save_hyperparameters()
 
         # setup model
@@ -243,6 +245,7 @@ class scGPL(pl.LightningModule):
             x,
             return_gene_embeddings=self.return_gene_embeddings,
             tokens_to_keep=self.tokens_to_keep,
+            gp_of_interest=self.gp,
         )
 
         return out
@@ -451,12 +454,7 @@ class scGPL(pl.LightningModule):
             return None
 
         if self.return_gene_embeddings:
-            output = self.forward(
-                batch,
-                return_gene_embeddings=True,
-                tokens_to_keep=self.tokens_to_keep,
-                gp_of_interest=self.gp,
-            )
+            output = self.forward(batch)
 
             emb_dict = {}
 
@@ -472,12 +470,12 @@ class scGPL(pl.LightningModule):
                 if k != 'input_ids':
                     emb_dict[k] = v
 
+            emb = Dataset.from_dict(emb_dict)
+
             if self.gene_dataset is None:
-                self.gene_dataset = Dataset.from_dict(emb_dict)
+                self.gene_dataset = emb
             else:
-                self.gene_dataset = concatenate_datasets(
-                    [self.gene_dataset, Dataset.from_dict(emb_dict)]
-                )
+                self.gene_dataset = concatenate_datasets([self.gene_dataset, emb])
 
             return None
 

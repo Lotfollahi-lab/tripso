@@ -15,6 +15,7 @@ from .utils import (  # noqa: F401
     CosineLRwithWarmUp,
     bool_flag,
     count_genes_per_cell,
+    dataset_pivot_longer,
     do_balanced_downsampling,
     do_linear_regression,
     do_logistic_regression,
@@ -27,6 +28,7 @@ from .utils import (  # noqa: F401
     mlm_mask_generator,
     one_hot_encoder,
     pad_array,
+    pivot_single_column,
     summarize_attributions,
     trunc_normal_,
 )
@@ -58,4 +60,6 @@ __all___ = [
     'zinb',
     'one_hot_encoder',
     'summarize_attributions',
+    'dataset_pivot_longer',
+    'pivot_single_column',
 ]

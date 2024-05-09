@@ -19,6 +19,7 @@ import pytorch_lightning as pl
 import scanpy as sc
 import seaborn as sns
 import torch
+from datasets import concatenate_datasets, load_from_disk
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
@@ -126,6 +127,97 @@ def remove_leading_numbers_and_underscore(input_string):
 ###################################
 # Wrangling hugging face dataset
 ###################################
+
+
+def pivot_single_column(x, col, values_to, cols_to_keep, pivot_cols_suffix, names_to):
+    z = x.rename_column(col, values_to)
+    z = z.select_columns(values_to)
+
+    # add desired metadata
+    for meta in cols_to_keep:
+        z = z.add_column(meta, x[meta])
+
+    # add gene column
+    clean_name = col
+    for suffix in pivot_cols_suffix:
+        clean_name = col.replace(suffix, '')
+    z = z.add_column(names_to, [clean_name] * len(z))
+
+    return z
+
+
+def dataset_pivot_longer(
+    in_dir,
+    out_dir,
+    filename,
+    pivot_cols_start_with,
+    pivot_cols_suffix,
+    values_to,
+    names_to,
+    cols_to_keep,
+):
+    '''
+    Pivot longer for huggingface dataset
+    '''
+
+    # Load the dataset
+    x = load_from_disk(os.path.join(in_dir, filename))
+
+    # Extract the data
+    if isinstance(pivot_cols_suffix, str):
+        pivot_cols_suffix = [pivot_cols_suffix]
+
+    col_groups = []
+
+    for suffix in pivot_cols_suffix:
+        if suffix == '':
+            cols = [
+                col
+                for prefix in pivot_cols_start_with
+                for col in x.column_names
+                if col == prefix
+            ]
+        else:
+            cols = [
+                col
+                for prefix in pivot_cols_start_with
+                for col in x.column_names
+                if col.startswith(prefix) and col.endswith(suffix)
+            ]
+
+        col_groups.append(cols)
+
+    long_dataset = None
+
+    for i, c in enumerate(col_groups):
+        if i == 0:
+            for j, col in enumerate(c):
+                if j == 0:
+                    long_dataset = pivot_single_column(
+                        x, col, values_to[i], cols_to_keep, pivot_cols_suffix, names_to
+                    )
+
+                else:
+                    z = pivot_single_column(
+                        x,
+                        col,
+                        values_to[i],
+                        cols_to_keep,
+                        pivot_cols_suffix,
+                        names_to[i],
+                    )
+                    long_dataset = concatenate_datasets([long_dataset, z])
+        else:
+            for j, col in enumerate(c):
+                z = pivot_single_column(
+                    x, col, values_to[i], cols_to_keep, pivot_cols_suffix, names_to
+                )
+                long_dataset = concatenate_datasets([long_dataset, z])
+
+    # Save the dataset
+    long_dataset.save_to_disk(os.path.join(out_dir, filename))
+
+    return None
 
 
 def encode_labels(input_data, input_col, new_col):
