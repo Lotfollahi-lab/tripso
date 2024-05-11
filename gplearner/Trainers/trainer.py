@@ -132,8 +132,8 @@ class scGPL(pl.LightningModule):
         super().__init__()
         # save hyperparameters
         # ignore model to avoid yaml error
-        # self.save_hyperparameters(ignore=['model'])
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['model'])
+        # self.save_hyperparameters()
 
         # setup model
         self.model = model

@@ -1065,7 +1065,6 @@ class gpTransformerGlobal(gpTransformerBase):
             base_output['count_output'] = count_output
 
             if self.reconstruction_loss == 'binning':
-                print('input dataset', input_dataset.keys())
                 binned = bin_gene_expression(
                     input_dataset['counts'], n_bins=self.n_bins
                 )
@@ -1212,7 +1211,13 @@ class AverageNonZero(nn.Module):
 
     def forward(self, x, return_gene_embeddings=False, *args, **kwargs):
         if return_gene_embeddings:
-            return x
+            output = {
+                'cls': torch.zeros((1, 1)),
+                'gene_embeddings': x,
+                'logits_lm': [],
+                'gene_labels': [],
+            }
+            return output
 
         # extra argument only for compatibility with gpTransformerEncoder
         # also for compatability: extract tensor if necessary

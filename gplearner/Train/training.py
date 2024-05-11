@@ -71,6 +71,7 @@ def run_training(
     use_weighted_sampler: Optional[bool] = False,
     sample_by: Optional[str] = 'cell_type',
     geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
+    seed: Optional[int] = 0,
 ):
     """
     Wrapper function for training gpLearner model
@@ -172,7 +173,6 @@ def run_training(
         os.makedirs(output_dir)
 
     # set seed for reproducibility
-    seed = 0
     np.random.seed(seed)
     random.seed(seed)
     pl.seed_everything(seed)
@@ -333,6 +333,7 @@ def run_training(
         adata_path=adata_path,
         use_weighted_sampler=use_weighted_sampler,
         label_key=sample_by,
+        seed=seed,
     )
 
     # Load gpdb
@@ -580,7 +581,7 @@ def run_training(
             devices=-1,
             accelerator='auto',
             precision='bf16-mixed',
-            profiler='advanced',
+            # profiler='advanced',
             strategy=strategy,
         )
 

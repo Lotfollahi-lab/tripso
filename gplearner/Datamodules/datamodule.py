@@ -307,6 +307,7 @@ class txDataModule(LightningDataModule):
         # development only:
         frac_for_training=1,
         data_split_to_pass_to_val_step='val',
+        seed=42,
     ):
         """Create a datamodule from a tokenized Geneformer dataset
 
@@ -334,6 +335,7 @@ class txDataModule(LightningDataModule):
         self.filter_key = filter_key
         self.filter_value = filter_value
         self.frac_for_generation = frac_for_generation
+        self.seed = seed
 
         with open(token_dictionary_file, 'rb') as f:
             self.gene_token_dict = pickle.load(f)
@@ -408,7 +410,7 @@ class txDataModule(LightningDataModule):
         self.train_dataset, self.val_dataset, self.test_dataset, _ = random_split(
             self.dataset,
             [train_size, val_size, test_size, discard],
-            generator=torch.Generator().manual_seed(42),
+            generator=torch.Generator().manual_seed(self.seed),  # (42),
         )
 
     def train_dataloader(self):

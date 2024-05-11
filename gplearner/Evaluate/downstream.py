@@ -2,6 +2,7 @@ import os
 import pickle
 import random
 import shutil
+import warnings
 from typing import (
     Dict,
     List,
@@ -671,17 +672,21 @@ class gpEval:
         gene_label_df,
         gene_embedding_dir,
         output_dir,
+        pathway=None,
         frac=1,
     ):
         # Load gene embeddings
-        pathway = gene_embedding_dir.split('_')[0]
-        emb = load_from_disk(os.path.join(output_dir, gene_embedding_dir))
+        emb = load_from_disk(gene_embedding_dir)
         emb = emb.shuffle(seed=0).select(range(int(frac * len(emb))))
 
         # Wrangle into anndata
         holder = []
 
         for g in genes_to_plot:
+            if g not in emb.column_names:
+                warnings.warn(f'{g} not in embeddings. Skipping {g}')
+                continue
+
             x = np.array(emb[g])
             y = pd.DataFrame(
                 {k: emb[k] for k in emb.column_names if k in cell_label_to_plot}
@@ -701,6 +706,9 @@ class gpEval:
 
         sc.pp.neighbors(adata, use_rep='X')
         sc.tl.umap(adata)
+
+        # change directory for saving figures
+        os.chdir(output_dir)
 
         for c in cell_label_to_plot:
             sc.pl.umap(
@@ -889,7 +897,6 @@ def calculate_gp_attribution_scores(
         model_type,
         return_gene_embeddings=False,
         tokens_to_keep=None,
-        gene_file_tag=None,
         return_attention=False,
         gp=None,  # (for getting attention matrices)
         return_classification_report=False,
@@ -1060,6 +1067,7 @@ def calculate_cell_token_attribution_scores(
     supervised_labels=None,
     gene_counts_df=None,
     add_remaining_var=None,
+    gene_format='symbol',
 ):
     # --------------------------
     # Set seed
@@ -1119,9 +1127,13 @@ def calculate_cell_token_attribution_scores(
     # Set up model
     # --------------------------
 
+    # remaning variation should be added during initialization
+    if 'remaining_var' in gp_inputs:
+        gp_inputs.remove('remaining_var')
+
     model = gpTransformerGlobal(
         database=gpdb,
-        do_ensembl_conversion=False,
+        do_ensembl_conversion=(gene_format != 'ensembl'),
         n_blocks=n_blocks,
         num_heads=num_heads,
         gp_latent_size=gp_latent_size,
@@ -1139,7 +1151,6 @@ def calculate_cell_token_attribution_scores(
         global_loss=reconstruction_loss,
         return_gene_embeddings=False,
         tokens_to_keep=None,
-        gene_file_tag=None,
         return_attention=False,
         gp=None,
         return_classification_report=False,

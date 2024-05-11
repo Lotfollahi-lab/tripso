@@ -33,7 +33,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 
 random.seed(0)
 
@@ -140,7 +140,9 @@ def pivot_single_column(x, col, values_to, cols_to_keep, pivot_cols_suffix, name
     # add gene column
     clean_name = col
     for suffix in pivot_cols_suffix:
-        clean_name = col.replace(suffix, '')
+        if suffix != '':
+            clean_name = col.replace(suffix, '')
+
     z = z.add_column(names_to, [clean_name] * len(z))
 
     return z
@@ -204,7 +206,7 @@ def dataset_pivot_longer(
                         values_to[i],
                         cols_to_keep,
                         pivot_cols_suffix,
-                        names_to[i],
+                        names_to,
                     )
                     long_dataset = concatenate_datasets([long_dataset, z])
         else:
@@ -1095,7 +1097,7 @@ def make_similarity_matrix(df, save_to=None):
     intersection_matrix = pd.DataFrame(index=df.columns, columns=df.columns)
 
     # Calculate intersection over length of non-null elements
-    for i in tqdm(df.columns, desc='Calculating overlap', leave=False):
+    for i in tqdm(df.columns):
         for j in df.columns:
             intersection = len(set(df[i].dropna()) & set(df[j].dropna()))
             intersection_ratio = (
