@@ -1,12 +1,15 @@
 import os
+import pickle
 import random
 import shutil
+import warnings
 from typing import (
     Dict,
     List,
     Optional,
 )
 
+import anndata as ad
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,6 +20,7 @@ import seaborn as sns
 import torch
 from captum.attr import GuidedGradCam
 from datasets import load_from_disk
+from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
 from scib_metrics.benchmark import Benchmarker
 from tqdm import tqdm
@@ -28,6 +32,7 @@ from ..Datamodules.datamodule import (
     txDataModule,
 )
 from ..Models.gp_model import (
+    GENE_NAME_FILE,
     GENEFORMER_MODEL_PATH,
     gfGlobal,
     gpTransformerBase,
@@ -37,10 +42,7 @@ from ..Models.gp_model import (
 )
 from ..Trainers.trainer import EmbEvaluator, scGPL
 from ..Utils.utils import (
-    do_logistic_regression,
-    find_genes_in_multiple_gp,
     find_latest_file,
-    get_genes_in_single_gp,
     remove_single_data_points,
     summarize_attributions,
 )
@@ -117,6 +119,7 @@ class gpEval:
         gene_format: Optional[str] = 'symbol',
         tissue: Optional[str] = 'test',
         model_type: Optional[str] = 'Base',
+        model_type_in_checkpoint: Optional[str] = None,
         n_heads: Optional[int] = 8,
         gp_latent_size: Optional[int] = 256,
         gp_inputs: Optional[list] = None,
@@ -143,7 +146,12 @@ class gpEval:
 
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
-            latest_ckpt = find_latest_file(output_dir, tissue, model_type)
+            tag = (
+                model_type_in_checkpoint
+                if model_type_in_checkpoint is not None
+                else model_type
+            )
+            latest_ckpt = find_latest_file(output_dir, tissue, tag)
             print('Latest .ckpt file:', latest_ckpt)
             self.checkpoint_path = os.path.join(output_dir, latest_ckpt)
 
@@ -246,7 +254,8 @@ class gpEval:
         self,
         return_gene_embeddings=False,
         tokens_to_keep=None,
-        gene_file_tag=None,
+        genes_to_keep=None,
+        gene_dir_tag=None,
         return_attention=False,
         gp=None,
         return_classification_report=False,
@@ -262,7 +271,8 @@ class gpEval:
                 self.model_type,
                 return_gene_embeddings=return_gene_embeddings,
                 tokens_to_keep=tokens_to_keep,
-                gene_file_tag=gene_file_tag,
+                genes_to_keep=genes_to_keep,
+                gene_dir_tag=gene_dir_tag,
                 return_attention=return_attention,
                 gp=gp,
                 return_classification_report=return_classification_report,
@@ -276,7 +286,8 @@ class gpEval:
                 self.model,
                 self.model_type,
                 tokens_to_keep=tokens_to_keep,
-                gene_file_tag=gene_file_tag,
+                genes_to_keep=genes_to_keep,
+                gene_dir_tag=gene_dir_tag,
                 return_gene_embeddings=return_gene_embeddings,
                 output_dir=self.output_dir,
                 return_classification_report=return_classification_report,
@@ -287,7 +298,8 @@ class gpEval:
         # reset attributes overwritten by loading from checkpoint
         gp_transformer.return_gene_embeddings = return_gene_embeddings
         gp_transformer.tokens_to_keep = tokens_to_keep
-        gp_transformer.gene_file_tag = gene_file_tag
+        gp_transformer.genes_to_keep = genes_to_keep
+        gp_transformer.gene_dir_tag = gene_dir_tag
         gp_transformer.return_attention = return_attention
         gp_transformer.gp = gp
         gp_transformer.return_classification_report = return_classification_report
@@ -563,114 +575,155 @@ class gpEval:
 
         bm.plot_results_table(min_max_scale=False, show=False, savedir=self.output_dir)
 
-    def evaluate_gene_embeddings(
+    def generate_gene_embeddings(
         self,
-        labels=['cell_type', 'condition'],
-        data_to_model='gene_singleGP',  # or "gene_multiGP"
-        min_cells=500,
-        downsample_to_n_genes=50,
+        pathway,
+        split='train',
+        obs_key=None,
+        obs_value=None,
+        data_frac=1,
+        genes_to_keep=None,
+        output_tag=None,
+        do_ensembl_conversion=True,
+        gene_name_path=GENE_NAME_FILE,
+        gene_token_path=TOKEN_DICTIONARY_FILE,
     ):
         """
-        Run logistic regression to predict gene labels from embeddings
+        Save gene embeddings as Dataset
 
         Parameters
         ----------
-        gp_features : list
-            List of GP to use as features
-            If "all", will use all GP
-            If "concat", will concatenate all GP
-        labels : list
-            List of labels to predict
+        split : str
+            Data split to use for generating embeddings
+        obs_key : str
+            Key in adata.obs to filter on
+        obs_value : str
+            Value in adata.obs to filter on
+        data_frac : float
+            Fraction of data to use for generating embeddings
+        pathway : str
+            Pathway to use for generating embeddings
+        genes_to_keep : list
+            Genes to generate embeddings for
+            if None --> all genes
 
-        min_cells : int
-            Genes present in multiple GP must be included in at least min_cells
 
-        downsample_to_n_genes : int
-            Number of genes to downsample to for genes present
-            in multiple GP
+        Use find_genes_in_multiple_gp or get_genes_in_single_gp from Utils.utils
+        for GP selection
 
         """
         os.chdir(self.output_dir)
 
-        # prepare output directories
-        if isinstance(labels, str):
-            labels = [labels]
+        gene_dir_tag = f'{pathway}_gene_embeddings'
 
-        if data_to_model == 'gene_multiGP':
-            txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
+        if obs_value is not None:
+            if isinstance(obs_value, str):
+                gene_dir_tag += f'_from_{obs_value}'
+            else:
+                unpacked_label = '_'.join(map(str, obs_value))
+                gene_dir_tag += f'_{unpacked_label}'
 
-            if not os.path.exists('gene_metrics'):
-                os.makedirs('gene_metrics')
+        if output_tag is not None:
+            gene_dir_tag += f'_{output_tag}'
 
-            genes_in_multiple_gp = find_genes_in_multiple_gp(
-                gp_inputs=self.gp_inputs,
-                gpdb=self.gpdb,
-                token_df=self.gene_counts_df,
-                do_ensembl_conversion=self.do_ensembl_conversion,
-                min_cells=min_cells,
-                downsample_to_n_genes=downsample_to_n_genes,
+        # converting between different gene labels
+        with open(gene_name_path, 'rb') as f:
+            name_dictionary = pickle.load(f)
+        with open(gene_token_path, 'rb') as f:
+            token_dictionary = pickle.load(f)
+
+        if do_ensembl_conversion:
+            ensembl_ids = [
+                name_dictionary[t] for t in genes_to_keep if t in name_dictionary
+            ]
+        else:
+            ensembl_ids = genes_to_keep
+        tokens_to_keep = [
+            token_dictionary[e] for e in ensembl_ids if e in token_dictionary
+        ]
+        print(f'Number of genes to keep: {len(tokens_to_keep)}')
+
+        gp_transformer = self._init_trainer(
+            return_gene_embeddings=True,
+            gene_dir_tag=gene_dir_tag,
+            tokens_to_keep=tokens_to_keep,
+            genes_to_keep=genes_to_keep,
+            gp=pathway,
+            split_label=split,
+        )
+
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_val_step=split,
+            filter_key=obs_key,
+            filter_value=obs_value,
+            frac_for_generation=data_frac,
+        )
+
+        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+        trainer.validate(gp_transformer, txdata)
+
+    def visualize_gene_embeddings(
+        self,
+        genes_to_plot,
+        cell_label_to_plot,
+        gene_label_to_plot,
+        gene_label_df,
+        gene_embedding_dir,
+        output_dir,
+        pathway=None,
+        frac=1,
+    ):
+        # Load gene embeddings
+        emb = load_from_disk(gene_embedding_dir)
+        emb = emb.shuffle(seed=0).select(range(int(frac * len(emb))))
+
+        # Wrangle into anndata
+        holder = []
+
+        for g in genes_to_plot:
+            if g not in emb.column_names:
+                warnings.warn(f'{g} not in embeddings. Skipping {g}')
+                continue
+
+            x = np.array(emb[g])
+            y = pd.DataFrame(
+                {k: emb[k] for k in emb.column_names if k in cell_label_to_plot}
+            )
+            y['gene'] = g
+            y['geneformer_rank'] = np.array(emb[f'{g}_rank'])
+            gdata = sc.AnnData(X=x, obs=y)
+            # remove missing genes
+            gdata = gdata[gdata.obs['geneformer_rank'] != -1]
+            holder.append(gdata)
+
+        adata = ad.concat(holder)
+
+        # add gene metadata
+        if gene_label_df is not None:
+            adata.obs = adata.obs.join(gene_label_df.set_index('gene'), on='gene')
+
+        sc.pp.neighbors(adata, use_rep='X')
+        sc.tl.umap(adata)
+
+        # change directory for saving figures
+        os.chdir(output_dir)
+
+        for c in cell_label_to_plot:
+            sc.pl.umap(
+                adata,
+                color=c,
+                save=f'_{pathway}_genes_by_{c}.pdf',
+                frameon=False,
             )
 
-            gp_transformer = self._init_trainer(
-                return_gene_embeddings=True,
-                tokens_to_keep=genes_in_multiple_gp,
-                gene_file_tag='multipleGP',
-            )
-            trainer = pl.Trainer(
-                max_epochs=1, devices=-1, accelerator='auto', precision=16
-            )
-            trainer.test(gp_transformer, txdata)
-
-            adata = sc.read_h5ad('adata_gene_embedding_multipleGP.h5ad')
-
-            print('Run logistic regression models - PER GENE')
-            for g in adata.obs['ensembl'].unique():
-                print(g)
-                tdata = adata[adata.obs['ensembl'] == g]
-                do_logistic_regression(
-                    tdata,
-                    'GP',
-                    os.path.join(self.output_dir, 'gene_metrics'),
-                    filename=f'gp_prediction_from_scgpl_{g}',
-                    variable_to_track={'ensembl': g, 'gene': tdata.obs['gene'].iloc[0]},
-                )
-
-        elif data_to_model == 'gene_singleGP':
-            txdata = txDataModule(
-                folder=self.dataset_path, batch_size=self.batch_size, num_workers=4
-            )
-
-            if not os.path.exists('gene_metrics'):
-                os.makedirs('gene_metrics')
-
-            genes_in_single_gp = get_genes_in_single_gp(
-                gpdb=self.gpdb,
-                do_ensembl_conversion=self.do_ensembl_conversion,
-                downsample_to_n_genes=downsample_to_n_genes,
-            )
-
-            gp_transformer = self._init_trainer(
-                return_gene_embeddings=True,
-                tokens_to_keep=genes_in_single_gp,
-                gene_file_tag='singleGP',
-            )
-
-            trainer = pl.Trainer(
-                max_epochs=1, devices=-1, accelerator='auto', precision=16
-            )
-
-            trainer.test(gp_transformer, txdata)
-
-            adata_scgpl = sc.read_h5ad(
-                os.path.join(self.output_dir, 'adata_gene_embedding_singleGP.h5ad')
-            )
-
-            do_logistic_regression(
-                adata_scgpl,
-                'GP',
-                os.path.join(self.output_dir, 'gene_metrics'),
-                filename='gp_prediction_from_scgpl',
-                variable_to_track={'embedding_type': 'scGPL'},
+        for c in gene_label_to_plot:
+            sc.pl.umap(
+                adata,
+                color=c,
+                save=f'_{pathway}_genes_by_{c}.pdf',
+                frameon=False,
             )
 
     def generate_attention_matrix(self, gp):
@@ -844,7 +897,6 @@ def calculate_gp_attribution_scores(
         model_type,
         return_gene_embeddings=False,
         tokens_to_keep=None,
-        gene_file_tag=None,
         return_attention=False,
         gp=None,  # (for getting attention matrices)
         return_classification_report=False,
@@ -1015,6 +1067,7 @@ def calculate_cell_token_attribution_scores(
     supervised_labels=None,
     gene_counts_df=None,
     add_remaining_var=None,
+    gene_format='symbol',
 ):
     # --------------------------
     # Set seed
@@ -1074,9 +1127,13 @@ def calculate_cell_token_attribution_scores(
     # Set up model
     # --------------------------
 
+    # remaning variation should be added during initialization
+    if 'remaining_var' in gp_inputs:
+        gp_inputs.remove('remaining_var')
+
     model = gpTransformerGlobal(
         database=gpdb,
-        do_ensembl_conversion=False,
+        do_ensembl_conversion=(gene_format != 'ensembl'),
         n_blocks=n_blocks,
         num_heads=num_heads,
         gp_latent_size=gp_latent_size,
@@ -1094,7 +1151,6 @@ def calculate_cell_token_attribution_scores(
         global_loss=reconstruction_loss,
         return_gene_embeddings=False,
         tokens_to_keep=None,
-        gene_file_tag=None,
         return_attention=False,
         gp=None,
         return_classification_report=False,

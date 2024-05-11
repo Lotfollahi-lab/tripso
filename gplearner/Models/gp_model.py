@@ -330,9 +330,7 @@ class gpWrapper(nn.Module):
         gene_labels_list = []
         gene_original_labels_list = []
         num_genes_per_cell_list = []
-
         gene_emb_list = []
-        gp_labels_list = []
 
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
@@ -376,11 +374,8 @@ class gpWrapper(nn.Module):
                 gene_labels_list.append(encoder_output['gene_labels'])
 
                 if return_gene_embeddings:
-                    gene_emb_list.append(encoder_output['gene_embeddings'])
-                    gene_original_labels_list.append(tokens_pad_unencoded)
-                    gp_labels_list.append(
-                        [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
-                    )
+                    gene_emb_list = encoder_output['gene_embeddings']
+                    gene_original_labels_list = tokens_pad_unencoded
             else:
                 continue
 
@@ -393,58 +388,49 @@ class gpWrapper(nn.Module):
             'logits_lm_list': logits_lm_list,
             'gene_labels_list': gene_labels_list,
             'gene_emb_list': gene_emb_list,
-            'gp_labels_list': gp_labels_list,
             'gene_original_labels_list': gene_original_labels_list,
             'num_genes_per_cell_list': num_genes_per_cell_list,
         }
 
         if return_gene_embeddings:
-            output = self.filter_gene_embeddings(output, tokens_to_keep)
+            output = self.wrangle_gene_embeddings(output, tokens_to_keep)
 
         return output
 
-    def filter_gene_embeddings(self, emb_dict, tokens_to_keep):
-        gene_emb_list = emb_dict['gene_emb_list']
-        gp_labels_list = emb_dict['gp_labels_list']
-        tokens_list = emb_dict['gene_original_labels_list']
+    def wrangle_gene_embeddings(self, emb_dict, tokens_to_keep):
+        gene_emb = emb_dict['gene_emb_list']
+        token_labels = emb_dict['gene_original_labels_list']
 
-        x_scgpl = []
-        tokens_scgpl = []
-        gp_labels = []
+        output = {}
 
-        # Filter to only keep genes in multiple GP
-        # loop through emb list = embeddings are grouped by GP
-        for i in range(len(gene_emb_list)):
-            x_out, tokens, _, attn_mask = self.build_input_matrix(
-                gene_emb_list[i],
-                tokens_list[i],
-                tokens_to_keep,
-                mode='extract_genes',
-                gp_idx=i,
+        for gene in tokens_to_keep:
+            # zero out other genes
+            mask = token_labels.unsqueeze(2) == gene
+            mask = mask.to(torch.int)
+            mask_expanded = mask.sum(dim=-1).unsqueeze(2)
+
+            masked_emb = gene_emb * mask_expanded
+
+            # Find the indices of the non-zero vectors
+            non_zero_mask = torch.norm(masked_emb, dim=2) != 0
+            indices = non_zero_mask.nonzero(as_tuple=True)
+
+            # Initialize the result tensor with zeros
+            result = torch.zeros(gene_emb.shape[0], gene_emb.shape[-1]).to(
+                gene_emb.device
             )
 
-            gp_label_i = gp_labels_list[i]
+            # Initialize the rank tensor with -1
+            # (or any invalid index, indicating 'not found')
+            rank = -torch.ones(gene_emb.shape[0], dtype=torch.int64).to(gene_emb.device)
 
-            # remove missing values
-            x_out = x_out.reshape(x_out.shape[0] * x_out.shape[1], -1)
-            non_missing = (x_out != 0).all(dim=1)
-            x_out = x_out[non_missing]
+            # Check if there are any non-zero rows, and update the result tensor
+            if indices[0].nelement() != 0:
+                result[indices[0]] = masked_emb[indices[0], indices[1]]
+                rank[indices[0]] = indices[1]
 
-            tokens = tokens.reshape(tokens.shape[0] * tokens.shape[1])
-            tokens = tokens[tokens != -100]
-
-            gp_label_out = [gp_label_i[0] for _ in range(tokens.shape[0])]
-
-            # Add to list
-            x_scgpl.append(x_out)
-            tokens_scgpl.append(tokens)
-            gp_labels.append(gp_label_out)
-
-        output = {
-            'x_scgpl': x_scgpl,
-            'tokens_scgpl': tokens_scgpl,
-            'gp_labels': gp_labels,
-        }
+            output[gene] = result
+            output[f'{gene}_rank'] = rank
 
         return output
 
@@ -918,6 +904,7 @@ class gpTransformerBase(nn.Module):
         return_attention=False,
         tokens_to_keep=None,
         return_gf_cell_emb=False,
+        gp_of_interest=None,
     ):
         if self.training:
             inference = False
@@ -933,13 +920,15 @@ class gpTransformerBase(nn.Module):
         if not hasattr(self, 'gp_of_interest'):
             self.gp_of_interest = None
 
+        gp_to_pass = self.gp_of_interest if gp_of_interest is None else gp_of_interest
+
         output = self.multi_gp_encoder(
             emb_out,
             input_dataset,
             return_gene_embeddings=return_gene_embeddings,
             return_attention=return_attention,
             tokens_to_keep=tokens_to_keep,
-            gp_of_interest=self.gp_of_interest,
+            gp_of_interest=gp_to_pass,
         )
 
         # Optionally return geneformer cell embeddings
@@ -1034,6 +1023,7 @@ class gpTransformerGlobal(gpTransformerBase):
         return_gene_embeddings=False,
         return_attention=False,
         tokens_to_keep=None,
+        gp_of_interest=None,
     ):
         return_gf_cell_emb = True if self.global_loss == 'mse' else False
 
@@ -1052,7 +1042,11 @@ class gpTransformerGlobal(gpTransformerBase):
             return_attention,
             tokens_to_keep,
             return_gf_cell_emb,
+            gp_of_interest=gp_of_interest,
         )
+
+        if return_gene_embeddings:
+            return base_output
 
         cell_output = self.cell_token_learner(base_output, inference)
 
@@ -1071,7 +1065,6 @@ class gpTransformerGlobal(gpTransformerBase):
             base_output['count_output'] = count_output
 
             if self.reconstruction_loss == 'binning':
-                print('input dataset', input_dataset.keys())
                 binned = bin_gene_expression(
                     input_dataset['counts'], n_bins=self.n_bins
                 )
@@ -1216,7 +1209,16 @@ class AverageNonZero(nn.Module):
         super().__init__()
         self.cls_tag = cls_tag
 
-    def forward(self, x, *args, **kwargs):
+    def forward(self, x, return_gene_embeddings=False, *args, **kwargs):
+        if return_gene_embeddings:
+            output = {
+                'cls': torch.zeros((1, 1)),
+                'gene_embeddings': x,
+                'logits_lm': [],
+                'gene_labels': [],
+            }
+            return output
+
         # extra argument only for compatibility with gpTransformerEncoder
         # also for compatability: extract tensor if necessary
         if isinstance(x, dict):
