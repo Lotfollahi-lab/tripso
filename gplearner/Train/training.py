@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import torch
-
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
@@ -337,7 +336,8 @@ def run_training(
             frac_for_training=frac_for_training,
             adata_path=adata_path,
             use_weighted_sampler=use_weighted_sampler,
-            label_key=subsample_by,
+            label_key=sample_by,
+            seed=seed,
         )
     elif mode == 'scgpt':
         txdata = scgptDataModule(
@@ -354,16 +354,6 @@ def run_training(
             'Using MSE loss for reconstruction'
             '\nMake sure you pass anndata object with normalized counts'
         )
-
-    txdata = txDataModule(
-        folder=dataset_path,
-        batch_size=batch_size,
-        frac_for_training=frac_for_training,
-        adata_path=adata_path,
-        use_weighted_sampler=use_weighted_sampler,
-        label_key=sample_by,
-        seed=seed,
-    )
 
     # Load gpdb
     gpdb = pd.read_csv(gpdb_path)
