@@ -1,13 +1,9 @@
+import json
 import os
 import pickle
 import random
 from collections import Counter
 from pathlib import Path
-from scanpy import read as sc_read
-import numpy as np
-import os
-import json
-from pandas import read_csv
 
 import numpy as np
 import scanpy as sc
@@ -15,21 +11,19 @@ import torch
 from datasets import load_from_disk
 from geneformer.perturber_utils import pad_tensor_list
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from pandas import Series, read_csv
 from pytorch_lightning import LightningDataModule
+from scanpy import read as sc_read
+from scgpt.data_collator import DataCollator
+from scgpt.tokenizer import GeneVocab
 from torch.utils.data import (
     DataLoader,
     Dataset,
+    SequentialSampler,
     WeightedRandomSampler,
     random_split,
-    SequentialSampler
 )
 
-from scgpt.data_collator import DataCollator
-from scgpt.tokenizer import GeneVocab
-
-from scanpy import read as sc_read
-import os
-import json
 random.seed(0)
 
 
@@ -187,6 +181,14 @@ class EmbDataset(Dataset):
         self.data_type = data_type
         if self.data_type == 'dataset':
             self.emb = load_from_disk(folder_path)
+            self.emb = self.emb.add_column(
+                'cell_type_id',
+                Series(self.emb['cell_type']).astype('category').cat.codes.tolist(),
+            )
+            self.emb = self.emb.add_column(
+                'condition_id',
+                Series(self.emb['condition']).astype('category').cat.codes.tolist(),
+            )
         elif self.data_type == 'h5ad':
             self.emb = sc.read_h5ad(folder_path)
         else:
@@ -604,8 +606,11 @@ class EmbDataModule(LightningDataModule):
 
         return output_dict
 
+
 class scgptDataset(Dataset):
-    def __init__(self, adata, gene_ids, vocab, model_configs, adata_global, batch_ids=None):
+    def __init__(
+        self, adata, gene_ids, vocab, model_configs, adata_global, batch_ids=None
+    ):
         self.adata = adata
         self.metadata = [c for c in self.adata.obs.columns]
         self.gene_ids = gene_ids
@@ -614,7 +619,11 @@ class scgptDataset(Dataset):
         self.adata_global = adata_global
         self.model_configs = model_configs
         self.count_matrix = self.adata.X
-        self.count_matrix = (self.count_matrix if isinstance(self.count_matrix, np.ndarray) else self.count_matrix.A)
+        self.count_matrix = (
+            self.count_matrix
+            if isinstance(self.count_matrix, np.ndarray)
+            else self.count_matrix.A
+        )
 
     def __len__(self):
         return len(self.count_matrix)
@@ -629,27 +638,27 @@ class scgptDataset(Dataset):
         values = row[nonzero_idx]
         genes = self.gene_ids[nonzero_idx]
         # append <cls> token at the beginning
-        genes = np.insert(genes, 0, self.vocab["<cls>"])
-        values = np.insert(values, 0, self.model_configs["pad_value"])
+        genes = np.insert(genes, 0, self.vocab['<cls>'])
+        values = np.insert(values, 0, self.model_configs['pad_value'])
         genes = torch.from_numpy(genes).long()
         values = torch.from_numpy(values).float()
-        output = {
-            "id": idx,
-            "genes": genes,
-            "expressions": values,
-            "adata": adata
-        }
+        output = {'id': idx, 'genes': genes, 'expressions': values, 'adata': adata}
         if self.batch_ids is not None:
-            output["batch_labels"] = self.batch_ids[idx]
+            output['batch_labels'] = self.batch_ids[idx]
         for m in self.metadata:
-            output["metadata_"+m] = self.adata.obs[m].iloc[idx]
+            output['metadata_' + m] = self.adata.obs[m].iloc[idx]
         return output
+
 
 class scgptDataModule(LightningDataModule):
     def __init__(
         self,
-        adata_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/gplearner_reproducibility/24-04-03_synthetic_clean/data/input_h5ad/24-04-03_synthetic_clean.h5ad',
-        adata_path_global='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/gplearner_reproducibility/24-04-03_synthetic_clean/data/input_h5ad/24-04-03_synthetic_clean_hvg.h5ad',
+        adata_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
+        'gplearner_reproducibility/24-04-03_synthetic_clean/data/'
+        'input_h5ad/24-04-03_synthetic_clean.h5ad',
+        adata_path_global='/lustre/scratch126/cellgen/team292/mm58/'
+        'geneformer_endometrium/gplearner_reproducibility/24-04-03_synthetic_clean/'
+        'data/input_h5ad/24-04-03_synthetic_clean_hvg.h5ad',
         batch_size=3,
         num_workers=1,
         shuffle=False,
@@ -659,6 +668,7 @@ class scgptDataModule(LightningDataModule):
         n_bins=51,
         # development only:
         frac_for_training=1,
+        data_split_to_pass_to_val_step='val',
     ):
         """Create a datamodule from scgpt dataset
 
@@ -671,20 +681,29 @@ class scgptDataModule(LightningDataModule):
                 during sampling. Defaults to False.
             frac_for_training (float, optional): The fraction of the dataset to use
                 for training. Defaults to 1.
+            data_split_to_pass_to_val_step (str): the split for generating embeddings
         """
         super().__init__()
         self.adata = sc_read(adata_path)
         if 'batch_key' in self.adata.obs.columns:
             self.adata.obs['batch_key_id'] = self.adata.obs['batch_key'].cat.codes
-        self.adata_global = AnnDataset(adata_path_global)
+        if 'cell_type' in self.adata.obs.columns:
+            self.adata.obs['cell_type_id'] = self.adata.obs['cell_type'].cat.codes
+        if 'condition' in self.adata.obs.columns:
+            self.adata.obs['condition_id'] = self.adata.obs['condition'].cat.codes
+        if adata_path_global:
+            self.adata_global = AnnDataset(adata_path_global)
+        else:
+            self.adata_global = None
         self.max_length = max_length
         self.n_bins = n_bins
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.shuffle = shuffle
         self.frac_for_training = frac_for_training
+        self.data_for_validation_step = data_split_to_pass_to_val_step
 
-        if input_emb_style == "category":
+        if input_emb_style == 'category':
             self.mask_value = self.n_bins + 1
             self.pad_value = self.n_bins  # for padding gene expr values
             self.n_input_bins = self.n_bins + 2
@@ -693,43 +712,57 @@ class scgptDataModule(LightningDataModule):
             self.pad_value = -2
             self.n_input_bins = self.n_bins
 
-        self.vocab_file = f"/lustre/scratch126/cellgen/team205/ha11/scGPT/{scgpt_mod}/vocab.json"
+        self.vocab_file = (
+            f'/lustre/scratch126/cellgen/team205/ha11/scGPT/{scgpt_mod}/vocab.json'
+        )
         self.vocab = GeneVocab.from_file(self.vocab_file)
-        with open(f'/lustre/scratch126/cellgen/team205/ha11/scGPT/{scgpt_mod}/args.json', "r") as f:
+        with open(
+            f'/lustre/scratch126/cellgen/team205/ha11/scGPT/{scgpt_mod}/args.json', 'r'
+        ) as f:
             self.model_configs = json.load(f)
-        assert self.model_configs["pad_value"] == self.pad_value
+        assert self.model_configs['pad_value'] == self.pad_value
         if 'gene_name' not in self.adata.var.columns:
             if 'ensembl_id' not in self.adata.var.columns:
-                raise Exception("Either gene_name or ensembl_id should be present in adata.var")
+                raise Exception(
+                    'Either gene_name or ensembl_id should be present in adata.var'
+                )
             else:
                 self.extract_gene_names()
 
     def extract_gene_names(self):
-        df = read_csv('/lustre/scratch126/cellgen/team205/ha11/scGPT/gene_info.csv', index_col=0)
+        df = read_csv(
+            '/lustre/scratch126/cellgen/team205/ha11/scGPT/gene_info.csv', index_col=0
+        )
         ids = df['feature_id'].tolist()
         names = df['feature_name'].tolist()
-        name_dictionary = {k:v for k, v in zip(ids, names)}
+        name_dictionary = {k: v for k, v in zip(ids, names)}
         self.adata.var['gene_name'] = self.adata.var['ensembl_id'].map(name_dictionary)
-        self.adata = self.adata[:, self.adata.var_names.isin(self.adata.var.dropna(how='any').index)]
-        
-        pad_token = "<pad>"
-        special_tokens = [pad_token, "<cls>", "<eoc>"]
+        self.adata = self.adata[
+            :, self.adata.var_names.isin(self.adata.var.dropna(how='any').index)
+        ]
+
+        pad_token = '<pad>'
+        special_tokens = [pad_token, '<cls>', '<eoc>']
         for s in special_tokens:
             if s not in self.vocab:
                 self.vocab.append_token(s)
-        
-        self.adata.var["id_in_vocab"] = [1 if gene in self.vocab else -1 for gene in self.adata.var["gene_name"]]
-        self.gene_ids_in_vocab = np.array(self.adata.var["id_in_vocab"])
-        self.vocab.set_default_index(self.vocab["<pad>"])
 
-        self.genes = self.adata.var["gene_name"].tolist()
+        self.adata.var['id_in_vocab'] = [
+            1 if gene in self.vocab else -1 for gene in self.adata.var['gene_name']
+        ]
+        self.gene_ids_in_vocab = np.array(self.adata.var['id_in_vocab'])
+        self.vocab.set_default_index(self.vocab['<pad>'])
+
+        self.genes = self.adata.var['gene_name'].tolist()
         self.gene_ids = np.array(self.vocab(self.genes), dtype=int)
         if self.gene_ids is None:
-            self.gene_ids = np.array(self.adata.var["id_in_vocab"])
-            assert np.all(gene_ids >= 0)
+            self.gene_ids = np.array(self.adata.var['id_in_vocab'])
+            assert np.all(self.gene_ids >= 0)
 
     def setup(self, stage=None):
-        self.dataset = scgptDataset(self.adata, self.gene_ids, self.vocab, self.model_configs, self.adata_global)
+        self.dataset = scgptDataset(
+            self.adata, self.gene_ids, self.vocab, self.model_configs, self.adata_global
+        )
 
         # Calculate lengths for train, validation, and test sets
         dataset_size = len(self.dataset)
@@ -754,7 +787,7 @@ class scgptDataModule(LightningDataModule):
         )
         self.collator = DataCollator(
             do_padding=True,
-            pad_token_id=self.vocab[self.model_configs["pad_token"]],
+            pad_token_id=self.vocab[self.model_configs['pad_token']],
             pad_value=self.pad_value,
             do_mlm=False,
             do_binning=True,
@@ -772,20 +805,43 @@ class scgptDataModule(LightningDataModule):
             sampler=SequentialSampler(self.train_dataset),
             drop_last=False,
             num_workers=min(len(os.sched_getaffinity(0)), self.batch_size),
-            pin_memory=True
+            pin_memory=True,
         )
 
     def val_dataloader(self):
-        return DataLoader(
-            self.val_dataset,
-            collate_fn=self.collator,
-            batch_size=self.batch_size,
-            # shuffle=True,
-            sampler=SequentialSampler(self.val_dataset),
-            drop_last=False,
-            num_workers=min(len(os.sched_getaffinity(0)), self.batch_size),
-            pin_memory=True
-        )
+        if self.data_for_validation_step == 'train':
+            return DataLoader(
+                self.train_dataset,
+                collate_fn=self.collator,
+                batch_size=self.batch_size,
+                # shuffle=True,
+                sampler=SequentialSampler(self.train_dataset),
+                drop_last=False,
+                num_workers=min(len(os.sched_getaffinity(0)), self.batch_size),
+                pin_memory=True,
+            )
+        elif self.data_for_validation_step == 'test':
+            return DataLoader(
+                self.test_dataset,
+                collate_fn=self.collator,
+                batch_size=self.batch_size,
+                # shuffle=True,
+                sampler=SequentialSampler(self.test_dataset),
+                drop_last=False,
+                num_workers=min(len(os.sched_getaffinity(0)), self.batch_size),
+                pin_memory=True,
+            )
+        else:
+            return DataLoader(
+                self.val_dataset,
+                collate_fn=self.collator,
+                batch_size=self.batch_size,
+                # shuffle=True,
+                sampler=SequentialSampler(self.val_dataset),
+                drop_last=False,
+                num_workers=min(len(os.sched_getaffinity(0)), self.batch_size),
+                pin_memory=True,
+            )
 
     def test_dataloader(self):
         return DataLoader(
@@ -796,5 +852,5 @@ class scgptDataModule(LightningDataModule):
             sampler=SequentialSampler(self.test_dataset),
             drop_last=False,
             num_workers=min(len(os.sched_getaffinity(0)), self.batch_size),
-            pin_memory=True
+            pin_memory=True,
         )

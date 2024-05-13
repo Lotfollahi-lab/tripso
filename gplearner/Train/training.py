@@ -10,15 +10,19 @@ import pandas as pd
 import pytorch_lightning as pl
 import torch
 
-# set up wandb
-import wandb
-
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 
-from ..Datamodules.datamodule import AnnDataset, txDataModule, scgptDataModule
+# set up wandb
+import wandb  # type: ignore
+
+from ..Datamodules.datamodule import (
+    AnnDataset,
+    scgptDataModule,
+    txDataModule,
+)
 from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import find_latest_file
@@ -28,7 +32,7 @@ def run_training(
     dataset_path: str,
     gpdb_path: str,
     output_dir: str,
-    mode: Literal['geneformer', 'scgpt'] = 'geneformer',
+    mode: str = 'geneformer',
     gp_similarity_file: Optional[str] = None,
     batch_size: int = 32,
     mgm: float = 0.15,
@@ -177,7 +181,7 @@ def run_training(
     pl.seed_everything(seed)
     torch.manual_seed(seed)
 
-    wandb.login()
+    wandb.login()  # type: ignore
 
     # get date for today in YYYY-MM-DD format
     today = datetime.datetime.today().strftime('%Y-%m-%d')
@@ -197,7 +201,7 @@ def run_training(
 
     if torch.cuda.device_count() > 1:
         # multi gpu training with group logging
-        wandb.init(
+        wandb.init(  # type: ignore
             project='scGPL',
             # group=f'{today}_gp_transformer_{tissue}_{supervised_tag}',
             # all runs are saved in one group for multi gpu training
@@ -206,7 +210,7 @@ def run_training(
             dir=wandb_dir,
         )
     else:
-        wandb.init(project='scGPL', id=save_id, dir=wandb_dir)
+        wandb.init(project='scGPL', id=save_id, dir=wandb_dir)  # type: ignore
 
     early_stopping_callback = EarlyStopping(
         # monitor='val/loss',
@@ -321,11 +325,20 @@ def run_training(
     mode = mode.lower()
     if mode == 'geneformer':
         txdata = txDataModule(
-            folder=dataset_path, batch_size=batch_size, frac_for_training=frac_for_training,
-            adata_path=adata_path, use_weighted_sampler=use_weighted_sampler, label_key=subsample_by
+            folder=dataset_path,
+            batch_size=batch_size,
+            frac_for_training=frac_for_training,
+            adata_path=adata_path,
+            use_weighted_sampler=use_weighted_sampler,
+            label_key=subsample_by,
         )
     elif mode == 'scgpt':
-        txdata = scgptDataModule(batch_size=batch_size, num_workers=15, adata_path_global=adata_path)
+        txdata = scgptDataModule(
+            batch_size=batch_size,
+            num_workers=15,
+            adata_path_global=adata_path,
+            adata_path=dataset_path,
+        )
     else:
         raise NotImplementedError()
 
@@ -584,7 +597,7 @@ def run_training(
 
     # save logs to csv for custom plotting
     # Fetch logged data from wandb
-    api = wandb.Api()
+    api = wandb.Api()  # type: ignore
     if torch.cuda.device_count() > 1:
         run = api.run(f'scGPL/{save_id}_gpu_{str(rank_zero_only.rank)}')
     else:
@@ -594,4 +607,4 @@ def run_training(
     df = run.history()
     df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
 
-    wandb.finish()
+    wandb.finish()  # type: ignore

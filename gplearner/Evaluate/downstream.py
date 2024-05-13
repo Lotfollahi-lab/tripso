@@ -4,6 +4,7 @@ import shutil
 from typing import (
     Dict,
     List,
+    Literal,
     Optional,
 )
 
@@ -17,7 +18,11 @@ from datasets import load_from_disk
 from pytorch_lightning.loggers import CSVLogger
 from scib_metrics.benchmark import Benchmarker
 
-from ..Datamodules.datamodule import EmbDataModule, txDataModule
+from ..Datamodules.datamodule import (
+    EmbDataModule,
+    scgptDataModule,
+    txDataModule,
+)
 from ..Models.gp_model import (
     gfBaseline,
     gpTransformerBase,
@@ -46,6 +51,8 @@ class gpEval:
     Main class for running downstream evaluation tasks on trained models
     Parameters
     ----------
+    mode : str
+        Whether to use scgpt or geneformer as the feature extractor backbone
     dataset_path : str
         Path to folder containing tokenized dataset
     gpdb_path : str
@@ -95,6 +102,7 @@ class gpEval:
 
     def __init__(
         self,
+        mode: Literal['geneformer', 'scgpt'] = 'geneformer',
         gpdb_path: Optional[str] = None,
         output_dir: str = '/path/to/output/',
         dataset_path: Optional[str] = None,
@@ -124,6 +132,7 @@ class gpEval:
         pl.seed_everything(seed)
         torch.manual_seed(seed)
 
+        self.mode = mode
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
             latest_ckpt = find_latest_file(output_dir, tissue, model_type)
@@ -145,6 +154,7 @@ class gpEval:
 
         if model_type == 'Base':
             self.model = gpTransformerBase(
+                mode=mode,
                 gp_inputs=gp_inputs,
                 gene_counts_df=self.gene_counts_df,
                 database=gpdb,
@@ -157,6 +167,7 @@ class gpEval:
 
         elif model_type == 'Global':
             self.model = gpTransformerGlobal(
+                mode=mode,
                 gene_counts_df=gene_counts_df,
                 database=gpdb,
                 do_ensembl_conversion=do_ensembl_conversion,
@@ -237,20 +248,7 @@ class gpEval:
         if (
             self.model_type != 'Mean'
         ):  # no training required if just averaging geneformer embeddings
-            gp_transformer = scGPL(
-                self.model,
-                self.model_type,
-                return_gene_embeddings=return_gene_embeddings,
-                tokens_to_keep=tokens_to_keep,
-                gene_file_tag=gene_file_tag,
-                return_attention=return_attention,
-                gp=gp,
-                return_classification_report=return_classification_report,
-                global_loss=self.global_loss,
-                test_random_baseline=test_random_baseline,
-                save_emb=save_emb,
-                split_label=split_label,
-            ).load_from_checkpoint(self.checkpoint_path)
+            gp_transformer = scGPL.load_from_checkpoint(self.checkpoint_path)
         else:
             gp_transformer = scGPL(
                 self.model,
@@ -284,12 +282,18 @@ class gpEval:
         '''
 
         gp_transformer = self._init_trainer(save_emb=True, split_label=split)
-
-        txdata = txDataModule(
-            folder=self.dataset_path,
-            batch_size=self.batch_size,
-            data_split_to_pass_to_val_step=split,
-        )
+        if self.mode == 'geneformer':
+            txdata = txDataModule(
+                folder=self.dataset_path,
+                batch_size=self.batch_size,
+                data_split_to_pass_to_val_step=split,
+            )
+        elif self.mode == 'scgpt':
+            txdata = scgptDataModule(
+                batch_size=self.batch_size,
+                num_workers=15,
+                data_split_to_pass_to_val_step=split,
+            )
 
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
 
@@ -383,7 +387,9 @@ class gpEval:
         if isinstance(gp_to_plot, str):
             gp_to_plot = [gp_to_plot]
 
-        emb = load_from_disk(os.path.join('embeddings', f'{data_to_plot}_set'))
+        emb = load_from_disk(
+            os.path.join(self.output_dir, 'embeddings', f'{data_to_plot}_set')
+        )
 
         if subsample is not None:
             emb = emb.shuffle(seed=0).select(range(subsample))
