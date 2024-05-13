@@ -2,14 +2,13 @@
 # Load packages
 ####################################
 
+import pickle
 import warnings
 from typing import Dict, Optional
 from types import SimpleNamespace
 import json 
 
 # imports
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,13 +16,13 @@ from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from scipy.sparse import csr_matrix
 from transformers import BertForMaskedLM
 
-from ..Modules.modules import Mlp, gpTransformerEncoder
-from ..Utils.geneformer_utils import EmbExtractor
-from ..Utils.utils import (
-    bin_gene_expression,
-    get_gp_tokens,
-    pad_array,
+from ..Modules.modules import (
+    Mlp,
+    PretrainedEmbeddings,
+    gpTransformerEncoder,
 )
+from ..Utils.geneformer_utils import EmbExtractor
+from ..Utils.utils import bin_gene_expression, get_gp_tokens
 
 from scgpt.model import TransformerModel
 from scgpt.tokenizer import GeneVocab
@@ -58,6 +57,7 @@ class gfWrapper(nn.Module):
 
     def forward(self, input_dataset, inference):
         # input is tokenized dataset
+
         emb_out = self.gf_emb_extractor.extract_embs(
             model=self.gf, input_data=input_dataset, inference=inference
         )
@@ -259,34 +259,41 @@ class gpWrapper(nn.Module):
         self.model_type = model_type
         self.learning_new_gp = learn_new_gp
 
+        # Get vocab size
+        with open(gene_token_path, 'rb') as f:
+            token_dict = pickle.load(f)
+        self.vocab_size = max(token_dict.values())
+
         # Store all genes included in at least one GP
         self.all_gp_tokens = set()
 
-        # TO DO : ADD THIS TO A FUNCTION THAT RETURNS TWO DICTIONARIES
         for i, gpi in enumerate(self.gp_inputs):
-            setattr(
-                self,
-                f'gp{i}_tokens',
-                get_gp_tokens(
-                    gpi,
-                    database,
-                    do_ensembl_conversion,
-                    gene_counts_df,
-                    gene_token_path,
-                    gene_name_path,
-                ),
+            gp_tokens = get_gp_tokens(
+                gpi,
+                database,
+                do_ensembl_conversion,
+                gene_counts_df,
+                gene_token_path,
+                gene_name_path,
             )
+
+            gp_tokens_tensor = torch.tensor(list(gp_tokens), dtype=torch.int32)
+
+            self.register_buffer(f'gp{i}_tokens', gp_tokens_tensor)
 
             print('Number of genes in GP', gpi, len(getattr(self, f'gp{i}_tokens')))
-            self.all_gp_tokens.update(getattr(self, f'gp{i}_tokens'))
+            self.all_gp_tokens.update(gp_tokens)
 
-            # within each gene program,
-            # gene tokens need to be re-encoded to avoid having 25_000 classes in each
-            setattr(
-                self,
-                f'gp{i}_tokens_encoded',
-                self.encode_gp_tokens(getattr(self, f'gp{i}_tokens')),
-            )
+            # Set up look up tensor
+            # for converting gene tokens to encoded values inside transformer block
+            # +2 because in geneformer 0 --> padding and 1 --> mask
+            lookup_tensor = torch.full((self.vocab_size + 2,), -100, dtype=torch.int32)
+            # Create a tensor of indices corresponding to positions in gp_tokens
+            indices = torch.arange(gp_tokens_tensor.shape[0], dtype=torch.int32)
+
+            # Use tensor indexing to assign values
+            lookup_tensor[gp_tokens_tensor.long()] = indices
+            self.register_buffer(f'gp{i}_tokens_lookup', lookup_tensor)
 
         self.encoder = nn.ModuleList(
             [
@@ -303,7 +310,8 @@ class gpWrapper(nn.Module):
         )
 
         self.add_remaining_var = add_remaining_var
-        if self.add_remaining_var:
+
+        if self.add_remaining_var is not None:
             n_gp = len(self.gp_inputs)
             gp_inputs.append('remaining_var')
             self.gp_inputs = gp_inputs
@@ -311,30 +319,43 @@ class gpWrapper(nn.Module):
             # find non GP genes
             if gene_counts_df is None:
                 raise ValueError(
-                    'Please provide a dataframe'
+                    'Please provide a dataframe '
                     'with counts of gene occurrences in dataset'
                 )
 
             non_gp_tokens = set(gene_counts_df['token'].tolist()) - self.all_gp_tokens
 
-            setattr(self, f'gp{n_gp}_tokens', non_gp_tokens)
-            setattr(
-                self, f'gp{n_gp}_tokens_encoded', self.encode_gp_tokens(non_gp_tokens)
-            )
+            tokens_tensor = torch.tensor(list(non_gp_tokens), dtype=torch.int32)
+
+            self.register_buffer(f'gp{n_gp}_tokens', tokens_tensor)
+
+            # Set up look up tensor
+            # for converting gene tokens to encoded values inside transformer block
+            # +2 because in geneformer 0 --> padding and 1 --> mask
+            lookup_tensor = torch.full((self.vocab_size + 2,), -100, dtype=torch.int32)
+            # Create a tensor of indices corresponding to positions in gp_tokens
+            indices = torch.arange(tokens_tensor.shape[0], dtype=torch.int32)
+
+            # Use tensor indexing to assign values
+            lookup_tensor[tokens_tensor.long()] = indices
+            self.register_buffer(f'gp{n_gp}_tokens_lookup', lookup_tensor)
 
             self.encoder.append(
                 gpTransformerEncoder(
-                    n_gp_tokens=100,  # we only keep top 100 genes
+                    n_gp_tokens=100
+                    if self.add_remaining_var == 'top100'
+                    else len(non_gp_tokens),  # we only keep top 100 genes
                     vocab_size=len(non_gp_tokens),
                     embed_dim=self.gp_latent_size,
                     depth=self.n_blocks,
                     num_heads=num_heads,
                     mlm_masking_prob=self.mgm_mask_ratio,
+                    use_flash=(self.add_remaining_var == 'allgenes'),
                 )
             )
 
     def build_input_matrix(
-        self, gf, input_ids, gpi_tokens_list, gp_idx, mode='full_model'
+        self, gf, input_ids, gp_tokens, crop_to_gp_len=True, is_gpfinder=False
     ):
         """
         Build a matrix of shape (n_cells, n_gp_tokens, 256)
@@ -356,109 +377,102 @@ class gpWrapper(nn.Module):
             "full_model" : set for input into geneformer
             "extract_genes" : when extracting gene embeddings
                             -> max size is total GP size
+            # NEED TO REIMPLEMENT
 
         """
         # Get list of gp tokens
-        gp_tokens = np.array(list(gpi_tokens_list)).astype(np.int16)
+        # convert gp_tokens bf16 tensor to integers
+        # gp_tokens = gp_tokens.to(torch.int)
+        gp_tokens = gp_tokens.long()
 
-        # Convert input IDs (list of lists) to array:
-        holder = []
-
-        # Find max value for padding
-        if mode == 'full_model':
-            max_value = gf.shape[1]
-
-            for i in range(len(input_ids)):
-                if len(input_ids[i]) == max_value:
-                    holder.append(input_ids[i].cpu().numpy())
-                else:
-                    padded = pad_array(
-                        input_ids[i].cpu().numpy(), desired_length=max_value
-                    )
-                    holder.append(padded)
-
-        else:
-            # when we are filtering gene embeddings,
-            # outputs are already padded to same length
-            holder = input_ids.cpu().numpy()
-
-        # Build an array (n_cells, n_genes) with token IDs at each position
-        tokens_arr = np.array(holder)
-
-        # binary mask (h, i, k)
-        # in cell h, is the gene as position i in our GP at position k?
-        mask = (tokens_arr[:, :, np.newaxis] == gp_tokens[np.newaxis, :]).astype(int)
+        # Create a binary mask (h, i, k)
+        # In cell h, is the gene at position i in our GP at position k?
+        # Using broadcasting to compare tokens_arr with gp_tokens
+        mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0)  # .unsqueeze(0)
+        mask = mask.to(torch.int)
 
         # Now reshape so that we will zero out non GP genes in each cell
-        mask_expanded = torch.tensor(mask.sum(axis=-1)[:, :, np.newaxis]).to(gf.device)
+        # Sum along the last dimension to count how many GP tokens each gene matches
+        mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
-        # Apply the mask to the data using broadcasting
-        masked_latent = gf * mask_expanded
+        if crop_to_gp_len or (
+            is_gpfinder is not None
+            and is_gpfinder
+            and self.add_remaining_var == 'top100'
+        ):
+            # Apply the mask to the data using broadcasting
+            masked_latent = gf * mask_expanded
 
-        # Now wrangle so that the non zero genes are first
-        # but we maintain the order
-        # loop through the cells to deal with different shapes
-        holder = []
+            # Now wrangle so that the non zero genes are first
+            # but we maintain the order
+            # loop through the cells to deal with different shapes
+            holder = []
 
-        for i in range(masked_latent.shape[0]):
-            x = masked_latent[i, :, :]
-            c = masked_latent[i, :, 1]  # find which genes have been 0'd out
-            idx = c != 0
-            idx_zero = c == 0
-            z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
-            holder += [z]
+            for i in range(masked_latent.shape[0]):
+                x = masked_latent[i, :, :]
+                c = masked_latent[i, :, 1]  # find which genes have been 0'd out
+                idx = c != 0
+                idx_zero = c == 0
+                z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
+                holder += [z]
 
-        result_matrix = torch.stack(holder).to(gf.device)
+            result_matrix = torch.stack(holder)
 
-        # Now do the same for labels
-        masked_labels = mask.sum(axis=-1) * tokens_arr
+            masked_labels = torch.where(
+                mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
+            )
 
-        holder = []
-        for i in range(masked_labels.shape[0]):
-            x = masked_labels[i, :]
-            nz = x != 0
-            z = np.concatenate((x[nz], x[~nz]))
-            holder += [z]
+            holder = []
+            for i in range(masked_labels.shape[0]):
+                x = masked_labels[i, :]
+                nz = x != 0
+                z = torch.concat((x[nz], x[~nz]), dim=0)
+                holder += [z]
 
-        masked_labels_output = np.array(holder)
+            masked_labels_output = torch.stack(holder)
+
+            # crop
+            if (
+                is_gpfinder is not None
+                and is_gpfinder
+                and self.add_remaining_var == 'top100'
+            ):
+                n_genes_to_keep = 100
+            else:
+                n_genes_to_keep = gp_tokens.shape[0]
+            result_matrix = result_matrix[:, :n_genes_to_keep, :]
+            masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
+
+        else:
+            # Apply the mask to the data using broadcasting
+            result_matrix = gf * mask_expanded
+
+            # Now do the same for labels
+            # masked_labels_output = mask.sum(axis=-1) * input_ids
+            masked_labels_output = torch.where(
+                mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
+            )
 
         # count number of genes per cell
         num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
 
         # Make tensor for forward pass
-        masked_labels_output = torch.tensor(masked_labels_output).to(gf.device)
         # comment the line below to leave 0s because they are actually informative
         # (this gene was not in the top 1000 of this cell)
-        masked_labels_output[masked_labels_output == 0] = -100
-
-        # We know that at most, the non zero genes is the number of genes in the GP
-        # for known GP we keep all genes
-        # for remaining var we only keep top 100
-        if self.add_remaining_var and gp_idx == len(self.gp_inputs) - 1:
-            n_genes_to_keep = 100
-        else:
-            n_genes_to_keep = len(gpi_tokens_list)
-        result_matrix = result_matrix[:, :n_genes_to_keep, :]
-        masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
+        # masked_labels_output[masked_labels_output == 0] = -100
+        # happens when do LOOKUP
 
         # Set up attention mask
         # to avoid attention to padding tokens
         attn_mask = torch.zeros_like(masked_labels_output)
-        attn_mask[masked_labels_output != -100] = 1
+        attn_mask[masked_labels_output != 0] = 1
 
         # never mask cls
         attn_mask = torch.cat(
-            [torch.ones(attn_mask.shape[0], 1).to(attn_mask.device), attn_mask], dim=1
+            [torch.ones_like(attn_mask)[:, 0].unsqueeze(-1), attn_mask], dim=-1
         )
 
         return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
-
-    def encode_gp_tokens(self, gp_tokens):
-        """
-        Convert tokens to encoded values inside transformer block
-        goes from 1 to n_gp_genes not starting from 0 so 0 corresponds to missing gene
-        """
-        return {gene: idx for idx, gene in enumerate(gp_tokens)}
 
     def forward(
         self,
@@ -467,6 +481,7 @@ class gpWrapper(nn.Module):
         return_attention,
         return_gene_embeddings=False,
         tokens_to_keep=None,
+        gp_of_interest=None,
     ):
         # randomly mask genes only during training :
         if self.training:
@@ -480,22 +495,10 @@ class gpWrapper(nn.Module):
         gene_labels_list = []
         gene_original_labels_list = []
         num_genes_per_cell_list = []
-
         gene_emb_list = []
-        gp_labels_list = []
-        
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
-            # when learning new GP, onyl do FW pass on new GP
-            if (
-                (self.training)
-                & (self.encoder[i].blocks[0].attn.qkv.weight.requires_grad is False)
-                & (self.model_type == 'Base')
-                # & (self.learning_new_gp) # commented out for backwards compatibility
-                # but would be good to have
-            ):
-                continue
-            else:
+            if (gp_of_interest is None) or (self.gp_inputs[i] in gp_of_interest):
                 (
                     emb_pad,
                     tokens_pad,
@@ -505,32 +508,22 @@ class gpWrapper(nn.Module):
                     gf_emb,  # geneformer embeddings
                     input_dataset['input_ids'],
                     getattr(self, f'gp{i}_tokens'),
-                    gp_idx=i,
+                    is_gpfinder=(self.gp_inputs[i] == 'remaining_var'),
                 )
 
                 # track number of genes per cell
                 # divide by GP length
-                num_genes_per_cell = num_genes_per_cell / len(
-                    getattr(self, f'gp{i}_tokens')
+                num_genes_per_cell = num_genes_per_cell / (
+                    getattr(self, f'gp{i}_tokens').shape[0]
                 )
                 num_genes_per_cell_list += [num_genes_per_cell]
 
-                # Encode tokens for encoding
+                # Encode tokens for MLM
                 tokens_pad_unencoded = tokens_pad
-
-                tokens_pad = (
-                    tokens_pad.cpu()
-                    .apply_(
-                        lambda x: getattr(self, f'gp{i}_tokens_encoded')[x]
-                        if x in getattr(self, f'gp{i}_tokens_encoded').keys()
-                        else -100
-                    )
-                    .to(emb_pad.device)
-                )
+                tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
 
                 # get token GP representation, logits for gene level prediction,
                 # and gene_labels where masked genes = -100
-
                 encoder_output = self.encoder[i](
                     emb_pad,
                     attn_mask=attn_mask,
@@ -545,11 +538,10 @@ class gpWrapper(nn.Module):
                 gene_labels_list.append(encoder_output['gene_labels'])
 
                 if return_gene_embeddings:
-                    gene_emb_list.append(encoder_output['gene_embeddings'])
-                    gene_original_labels_list.append(tokens_pad_unencoded)
-                    gp_labels_list.append(
-                        [self.gp_inputs[i] for _ in range(gf_emb[0].shape[0])]
-                    )
+                    gene_emb_list = encoder_output['gene_embeddings']
+                    gene_original_labels_list = tokens_pad_unencoded
+            else:
+                continue
 
         # Concatenate tensors
         z = torch.stack(gp_token_list, dim=1)
@@ -560,58 +552,49 @@ class gpWrapper(nn.Module):
             'logits_lm_list': logits_lm_list,
             'gene_labels_list': gene_labels_list,
             'gene_emb_list': gene_emb_list,
-            'gp_labels_list': gp_labels_list,
             'gene_original_labels_list': gene_original_labels_list,
             'num_genes_per_cell_list': num_genes_per_cell_list,
         }
 
         if return_gene_embeddings:
-            output = self.filter_gene_embeddings(output, tokens_to_keep)
+            output = self.wrangle_gene_embeddings(output, tokens_to_keep)
 
         return output
 
-    def filter_gene_embeddings(self, emb_dict, tokens_to_keep):
-        gene_emb_list = emb_dict['gene_emb_list']
-        gp_labels_list = emb_dict['gp_labels_list']
-        tokens_list = emb_dict['gene_original_labels_list']
+    def wrangle_gene_embeddings(self, emb_dict, tokens_to_keep):
+        gene_emb = emb_dict['gene_emb_list']
+        token_labels = emb_dict['gene_original_labels_list']
 
-        x_scgpl = []
-        tokens_scgpl = []
-        gp_labels = []
+        output = {}
 
-        # Filter to only keep genes in multiple GP
-        # loop through emb list = embeddings are grouped by GP
-        for i in range(len(gene_emb_list)):
-            x_out, tokens, _, attn_mask = self.build_input_matrix(
-                gene_emb_list[i],
-                tokens_list[i],
-                tokens_to_keep,
-                mode='extract_genes',
-                gp_idx=i,
+        for gene in tokens_to_keep:
+            # zero out other genes
+            mask = token_labels.unsqueeze(2) == gene
+            mask = mask.to(torch.int)
+            mask_expanded = mask.sum(dim=-1).unsqueeze(2)
+
+            masked_emb = gene_emb * mask_expanded
+
+            # Find the indices of the non-zero vectors
+            non_zero_mask = torch.norm(masked_emb, dim=2) != 0
+            indices = non_zero_mask.nonzero(as_tuple=True)
+
+            # Initialize the result tensor with zeros
+            result = torch.zeros(gene_emb.shape[0], gene_emb.shape[-1]).to(
+                gene_emb.device
             )
 
-            gp_label_i = gp_labels_list[i]
+            # Initialize the rank tensor with -1
+            # (or any invalid index, indicating 'not found')
+            rank = -torch.ones(gene_emb.shape[0], dtype=torch.int64).to(gene_emb.device)
 
-            # remove missing values
-            x_out = x_out.reshape(x_out.shape[0] * x_out.shape[1], -1)
-            non_missing = (x_out != 0).all(dim=1)
-            x_out = x_out[non_missing]
+            # Check if there are any non-zero rows, and update the result tensor
+            if indices[0].nelement() != 0:
+                result[indices[0]] = masked_emb[indices[0], indices[1]]
+                rank[indices[0]] = indices[1]
 
-            tokens = tokens.reshape(tokens.shape[0] * tokens.shape[1])
-            tokens = tokens[tokens != -100]
-
-            gp_label_out = [gp_label_i[0] for _ in range(tokens.shape[0])]
-
-            # Add to list
-            x_scgpl.append(x_out)
-            tokens_scgpl.append(tokens)
-            gp_labels.append(gp_label_out)
-
-        output = {
-            'x_scgpl': x_scgpl,
-            'tokens_scgpl': tokens_scgpl,
-            'gp_labels': gp_labels,
-        }
+            output[gene] = result
+            output[f'{gene}_rank'] = rank
 
         return output
 
@@ -738,9 +721,10 @@ class cellWrapper(nn.Module):
         ).to(z.device)
 
         # reorder gp based on number of genes per cell
-        n_genes_per_cell = torch.tensor(np.array(num_genes_per_cell_list).T).to(
-            z.device
-        )
+        # n_genes_per_cell = torch.tensor(np.array(num_genes_per_cell_list).T).to(
+        #     z.device
+        # )
+        n_genes_per_cell = torch.stack(num_genes_per_cell_list).T.to(z.device)
 
         # Find the indices that would sort each row in descending order
         sorted_indices = torch.argsort(-n_genes_per_cell, dim=1)
@@ -907,7 +891,7 @@ class CountHead(nn.Module):
         # use cls token for count prediction
         count_outputs = {}
         mlp_output = self.mlp(x)
-        mlp_output = F.normalize(mlp_output, dim=-1, p=2)
+        # mlp_output = F.normalize(mlp_output, dim=-1, p=2)
         if self.loss_mode == 'mse':
             count_outputs['count_lognorm'] = self.relu_output(mlp_output)
         elif self.loss_mode == 'zinb':
@@ -966,7 +950,7 @@ class gpTransformerBase(nn.Module):
         attn_dropout=0,
         gp_inputs=None,
         gene_counts_df=None,
-        add_remaining_var=False,
+        add_remaining_var=None,
         do_ensembl_conversion=True,
         gp_latent_size=256,
         num_heads=1,
@@ -979,6 +963,7 @@ class gpTransformerBase(nn.Module):
         gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl',
         model_type='Base',
         learn_new_gp=False,
+        gp_of_interest=None,
     ):
         """
         database :
@@ -1064,6 +1049,10 @@ class gpTransformerBase(nn.Module):
         self.do_ensembl_conversion = do_ensembl_conversion
         self.n_blocks = n_blocks
         self.attn_dropout = attn_dropout
+        self.use_flash = use_flash
+        if isinstance(gp_of_interest, str):
+            gp_of_interest = [gp_of_interest]
+        self.gp_of_interest = gp_of_interest
 
         self.multi_gp_encoder = gpWrapper(
             database=self.gpdb,
@@ -1089,6 +1078,7 @@ class gpTransformerBase(nn.Module):
         return_attention=False,
         tokens_to_keep=None,
         return_gf_cell_emb=False,
+        gp_of_interest=None,
     ):
         if self.training:
             inference = False
@@ -1099,12 +1089,20 @@ class gpTransformerBase(nn.Module):
         emb_out = self.gf_wrapper(input_dataset, inference)
 
         # Extract embeddings for each gene program
+        # For backwards compataibilty
+        # if not gp_of_interest attribute set to None
+        if not hasattr(self, 'gp_of_interest'):
+            self.gp_of_interest = None
+
+        gp_to_pass = self.gp_of_interest if gp_of_interest is None else gp_of_interest
+
         output = self.multi_gp_encoder(
             emb_out,
             input_dataset,
             return_gene_embeddings=return_gene_embeddings,
             return_attention=return_attention,
             tokens_to_keep=tokens_to_keep,
+            gp_of_interest=gp_to_pass,
         )
 
         # Optionally return geneformer cell embeddings
@@ -1135,9 +1133,9 @@ class gpTransformerGlobal(gpTransformerBase):
     def __init__(
         self,
         global_attn_heads=8,
-        global_loss='supervised',
+        global_loss='reconstruction',
         total_n_genes=25426,
-        reconstruction_loss='mse',
+        reconstruction_loss='nb',
         supervised_labels: Optional[Dict] = None,
         global_masking_rate=0,
         global_n_blocks=1,
@@ -1162,7 +1160,7 @@ class gpTransformerGlobal(gpTransformerBase):
         if self.global_loss == 'supervised':
             if supervised_labels is None:
                 raise ValueError(
-                    'Please provide a dictionary' 'of the form {task_name : n_classes}'
+                    'Please provide a dictionary of the form {task_name : n_classes}'
                 )
 
             for k, n in supervised_labels.items():
@@ -1199,6 +1197,7 @@ class gpTransformerGlobal(gpTransformerBase):
         return_gene_embeddings=False,
         return_attention=False,
         tokens_to_keep=None,
+        gp_of_interest=None,
     ):
         return_gf_cell_emb = True if self.global_loss == 'mse' else False
 
@@ -1217,7 +1216,11 @@ class gpTransformerGlobal(gpTransformerBase):
             return_attention,
             tokens_to_keep,
             return_gf_cell_emb,
+            gp_of_interest=gp_of_interest,
         )
+
+        if return_gene_embeddings:
+            return base_output
 
         cell_output = self.cell_token_learner(base_output, inference)
 
@@ -1236,7 +1239,6 @@ class gpTransformerGlobal(gpTransformerBase):
             base_output['count_output'] = count_output
 
             if self.reconstruction_loss == 'binning':
-                print('input dataset', input_dataset.keys())
                 binned = bin_gene_expression(
                     input_dataset['counts'], n_bins=self.n_bins
                 )
@@ -1253,16 +1255,144 @@ class gpTransformerGlobal(gpTransformerBase):
         return output
 
 
+class iGpWrapper(nn.Module):
+    def __init__(
+        self,
+        gp_transformer,
+        clf_layer,
+        gp_of_interest,
+        gene_token_path=TOKEN_DICTIONARY_FILE,
+        gene_name_path=GENE_NAME_FILE,
+    ):
+        super().__init__()
+        # get index of gp of interest
+        self.gp_of_interest = gp_of_interest
+        self.gp_idx = gp_transformer.model.gp_inputs.index(gp_of_interest)
+
+        # select relevant gp block
+        self.gp_block = gp_transformer.model.multi_gp_encoder.encoder[self.gp_idx]
+        self.clf_layer = clf_layer
+
+        # store relevant gp tokens as nn.Embedding
+        gp_tokens = getattr(
+            gp_transformer.model.multi_gp_encoder, f'gp{self.gp_idx}_tokens'
+        )
+
+        # table for converting between different gene labels
+        with open(gene_name_path, 'rb') as f:
+            name_dictionary = pickle.load(f)
+        with open(gene_token_path, 'rb') as f:
+            token_dictionary = pickle.load(f)
+
+        ensembl_to_name = {v: k for k, v in name_dictionary.items()}
+        token_to_gene = {v: k for k, v in token_dictionary.items()}
+
+        gene_conversion = {
+            'token': gp_tokens.cpu().numpy().tolist(),
+            'ensembl': [token_to_gene[t.item()] for t in gp_tokens],
+        }
+
+        gene_conversion['symbol'] = [
+            ensembl_to_name[e] for e in gene_conversion['ensembl']
+        ]
+
+        self.gene_conversion = gene_conversion
+
+    def forward(self, emb, additional_input_dict):
+        output = self.gp_block(
+            emb,
+            attn_mask=additional_input_dict['attn_mask'],
+            gene_labels=additional_input_dict['token_labels'],
+            inference=True,
+            return_attention=False,
+            return_gene_embeddings=False,
+        )
+
+        logits = self.clf_layer(output['cls'])
+        return logits
+
+        # out = output['logits_lm'][:, 0, :]
+        # return out.max(1).values
+
+
+class iGlobalWrapper(nn.Module):
+    def __init__(
+        self,
+        gp_transformer,
+        clf_layer=None,
+        global_loss='reconstruction',
+        task_index=None,
+        use_embedding=False,
+        pretrained_emb=None,
+        vocab_size=None,
+        embedding_dim=None,
+    ):
+        super().__init__()
+
+        self.global_block = gp_transformer.model.cell_token_learner
+        # set decoder to identiy
+        self.global_block.encoder.decoder = nn.Identity()
+
+        if global_loss != 'supervised':
+            if clf_layer is None:
+                raise ValueError('Please provide a classifier layer')
+            self.clf_layer = clf_layer
+        else:
+            if task_index is None:
+                raise ValueError('Please provide a task index')
+            self.clf_layer = gp_transformer.model.clf_head[task_index]
+
+        self.use_embedding = use_embedding
+        if self.use_embedding:
+            self.gp_embedding = PretrainedEmbeddings(
+                pretrained_emb=pretrained_emb,
+                pretrained_pos_emb=self.global_block.encoder.pos_embed,
+                vocab_size=vocab_size,
+                embedding_dim=embedding_dim,
+            )
+
+            # turn off positional embeddings
+            self.global_block.encoder.pos_embed = nn.Identity()
+
+    def forward(self, emb, additional_input_dict):
+        if self.use_embedding:
+            emb = self.gp_embedding(emb)
+
+        input_dataset = {
+            'z': emb,
+            'num_genes_per_cell_list': additional_input_dict['num_genes_per_cell_list'],
+        }
+
+        # Global cell token learner
+        out = self.global_block(input_dataset, inference=False)
+
+        # Pass through linear layer
+        logits = self.clf_layer(out['cell_token'])
+
+        # return logits.max(1).values
+        return logits
+
+
 ####################################
 # Baseline : averaging GP embeddings
 ####################################
 
 
 class AverageNonZero(nn.Module):
-    def __init__(self):
+    def __init__(self, cls_tag='cls'):
         super().__init__()
+        self.cls_tag = cls_tag
 
-    def forward(self, x, **kwargs):
+    def forward(self, x, return_gene_embeddings=False, *args, **kwargs):
+        if return_gene_embeddings:
+            output = {
+                'cls': torch.zeros((1, 1)),
+                'gene_embeddings': x,
+                'logits_lm': [],
+                'gene_labels': [],
+            }
+            return output
+
         # extra argument only for compatibility with gpTransformerEncoder
         # also for compatability: extract tensor if necessary
         if isinstance(x, dict):
@@ -1278,8 +1408,8 @@ class AverageNonZero(nn.Module):
         # Replace NaN values with 0
         x[torch.isnan(x)] = 0
 
-        # print count of nan values to check
-        output = {'cls': x, 'logits_lm': [], 'gene_labels': []}
+        # output
+        output = {self.cls_tag: x, 'logits_lm': [], 'gene_labels': []}
 
         return output
 
@@ -1414,10 +1544,35 @@ class gfBaseline(gpTransformerBase):
 
 
 class gfGlobal(gpTransformerGlobal):
-    def __init__(self, **kwargs):
+    def __init__(
+        self,
+        gene_counts_df,
+        num_heads,
+        gene_token_path=TOKEN_DICTIONARY_FILE,
+        gene_name_path=GENE_NAME_FILE,
+        add_remaining_var=False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
 
-        self.cell_token_learner = AverageNonZero()
+        self.multi_gp_encoder = gpAverager(
+            database=self.gpdb,
+            do_ensembl_conversion=self.do_ensembl_conversion,
+            gene_counts_df=gene_counts_df,
+            gp_latent_size=self.gp_latent_size,
+            n_blocks=self.n_blocks,
+            num_heads=num_heads,
+            mgm_mask_ratio=self.mgm_mask_ratio,
+            gene_token_path=gene_token_path,
+            gene_name_path=gene_name_path,
+            gp_inputs=self.gp_inputs,
+            add_remaining_var=add_remaining_var,
+            use_flash=False,
+            model_type='Mean',
+            learn_new_gp=False,
+        )
+
+        self.cell_token_learner = AverageNonZero(cls_tag='cell_token')
 
     def get_cell_token_attention(self, input_dataset):
         warnings.warn(
@@ -1500,46 +1655,4 @@ class EmbEvaluatorHead(nn.Module):
 
 
 if __name__ == '__main__':
-    from gplearner.Datamodules.datamodule import txDataModule
-
-    txdata = txDataModule(
-        folder='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'
-        '/scgpl_reproducibility/examples/pbmc_ifn/data/input_dataset',
-        batch_size=32,
-    )
-    txdata.setup()
-
-    dataloader = txdata.val_dataloader()
-
-    iterator = iter(dataloader)
-
-    batch = next(iterator)
-
-    gpdb = pd.read_csv(
-        '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/'
-        'scgpl_reproducibility/examples/pbmc_ifn/ifn_db_3gp.csv'
-    )
-
-    model = gpTransformerGlobal(
-        database=gpdb,
-        attn_dropout=0,
-        gene_counts_df=None,
-        do_ensembl_conversion=True,
-        gp_latent_size=256,
-        num_heads=8,
-        n_blocks=1,
-        mgm_mask_ratio=0.5,
-        geneformer_model='/lustre/scratch126/cellgen/team292/mm58/'
-        'geneformer_endometrium/Geneformer/',
-        gf_layer_to_quant=-1,
-        global_loss='masking',
-        global_attn_heads=1,
-        global_masking_rate=0.3,
-    )
-
-    out = model.forward(batch)
-
-    for k, v in out.items():
-        print(k, v.shape)
-
-    print('done')
+    pass

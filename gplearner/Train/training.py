@@ -10,7 +10,7 @@ import pandas as pd
 import pytorch_lightning as pl
 import torch
 
-# from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
@@ -23,7 +23,11 @@ from ..Datamodules.datamodule import (
     scgptDataModule,
     txDataModule,
 )
-from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
+from ..Models.gp_model import (
+    GENEFORMER_MODEL_PATH,
+    gpTransformerBase,
+    gpTransformerGlobal,
+)
 from ..Trainers.trainer import scGPL
 from ..Utils.utils import find_latest_file
 
@@ -53,7 +57,7 @@ def run_training(
     resume_training: Optional[bool] = False,
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
-    add_remaining_var: Optional[bool] = False,
+    add_remaining_var: Optional[str] = None,
     frac_for_training: Optional[float] = 1.0,
     lambda_gp_similarity: Optional[float] = 1e-2,
     global_loss: str = 'supervised',
@@ -71,7 +75,9 @@ def run_training(
     use_flash: Optional[bool] = False,
     weight_decay: float = 0.0,
     use_weighted_sampler: Optional[bool] = False,
-    subsample_by: Optional[str] = 'cell_type',
+    sample_by: Optional[str] = 'cell_type',
+    geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
+    seed: Optional[int] = 0,
 ):
     """
     Wrapper function for training gpLearner model
@@ -169,19 +175,20 @@ def run_training(
     # Setup
     ##########################################
 
-    torch.set_float32_matmul_precision('medium')
+    # torch.set_float32_matmul_precision('medium')
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
     # set seed for reproducibility
-    seed = 0
     np.random.seed(seed)
     random.seed(seed)
     pl.seed_everything(seed)
     torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-    wandb.login()  # type: ignore
+    # wandb.login()  # type: ignore
 
     # get date for today in YYYY-MM-DD format
     today = datetime.datetime.today().strftime('%Y-%m-%d')
@@ -348,6 +355,16 @@ def run_training(
             '\nMake sure you pass anndata object with normalized counts'
         )
 
+    txdata = txDataModule(
+        folder=dataset_path,
+        batch_size=batch_size,
+        frac_for_training=frac_for_training,
+        adata_path=adata_path,
+        use_weighted_sampler=use_weighted_sampler,
+        label_key=sample_by,
+        seed=seed,
+    )
+
     # Load gpdb
     gpdb = pd.read_csv(gpdb_path)
 
@@ -392,6 +409,7 @@ def run_training(
             add_remaining_var=add_remaining_var,
             use_flash=use_flash,
             learn_new_gp=learn_new_gp,
+            geneformer_model=geneformer_model_path,
         )
 
     elif model_type == 'Global':
@@ -420,10 +438,11 @@ def run_training(
             reconstruction_loss=reconstruction_loss,
             total_n_genes=total_n_genes,
             use_flash=use_flash,
+            geneformer_model=geneformer_model_path,
         )
 
     else:
-        raise ValueError('only model types Base or Global implemented for now')
+        raise ValueError('Model type must be Base or Global')
 
     use_gp_similarity_loss = gp_similarity_file is not None
 
@@ -439,7 +458,7 @@ def run_training(
             finetune_lr=finetune_lr,
             use_finetune_lr=global_training == 'finetune',
             lr_scheduler=lr_scheduler,
-            # optimizer=DeepSpeedCPUAdam,
+            optimizer=DeepSpeedCPUAdam,  # FusedAdam
             use_gp_similarity_loss=use_gp_similarity_loss,
             gp_similarity=gp_similarity,
             output_dir=output_dir,
@@ -508,7 +527,7 @@ def run_training(
 
     # For training global model after base model
     # but finetuning original GP blocks
-    if global_training == 'finetune':
+    if (global_training == 'finetune') | (global_training == 'finetune_global'):
         if path_to_base_model is None:
             raise ValueError(
                 'Please provide path to pre-trained'
@@ -516,7 +535,8 @@ def run_training(
             )
         # look for Base model to load
         # if not found, this will raise an error
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+        tag = 'Base' if global_training == 'finetune' else 'Global'
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, tag)
         checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
         print('Loading from checkpoint', checkpoint_path)
         checkpoint = torch.load(latest_ckpt)
@@ -526,11 +546,13 @@ def run_training(
         # reset output directory
         gp_transformer.output_dir = output_dir
 
+        # reset supervised labels
+        gp_transformer.model.supervised_labels = supervised_labels
+
     # Learning new GP
     if learn_new_gp:
         # load pretrained model
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type)
-        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        checkpoint_path = find_latest_file(path_to_base_model, tissue, model_type)
         checkpoint = torch.load(checkpoint_path)
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
         n_epochs = checkpoint['epoch'] + n_epochs
@@ -572,8 +594,10 @@ def run_training(
             devices=-1,
             accelerator='auto',  # uses ddp per default for multi-gpu training
             strategy=strategy,
-            precision='bf16-mixed',
-            profiler='simple',
+            precision='bf16-mixed'
+            if strategy == 'ddp_find_unused_parameters_true'
+            else 16,
+            profiler='advanced',
         )
     else:
         trainer = pl.Trainer(
@@ -588,8 +612,8 @@ def run_training(
             devices=-1,
             accelerator='auto',
             precision='bf16-mixed',
-            profiler='simple',
-            # strategy=strategy,
+            # profiler='advanced',
+            strategy=strategy,
         )
 
     # Ready to train with new learning rate

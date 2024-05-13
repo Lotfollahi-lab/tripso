@@ -9,6 +9,7 @@ from typing import (
 )
 
 import numpy as np
+import pandas as pd
 import scanpy as sc
 from datasets import concatenate_datasets, load_from_disk
 from geneformer import TranscriptomeTokenizer
@@ -40,6 +41,7 @@ def pp_and_tokenize(
     tissue: Optional[str] = None,
     save_intermediate: Optional[bool] = False,
     hvg_batch_key: Optional[str] = None,
+    save_gp_genes_object: Optional[bool] = False,
 ):
     """
     Preprocess and tokenize data for scGPL
@@ -93,6 +95,9 @@ def pp_and_tokenize(
         print('Input anndata object', adata.shape)
 
         if 'idx' not in adata.obs.columns:
+            # make unique
+            if adata.obs.index.duplicated().any():
+                adata.obs_names_make_unique()
             adata.obs['idx'] = adata.obs.index
 
         if batch_keys is not None:
@@ -260,4 +265,47 @@ def pp_and_tokenize(
             max_gp_len=max_gp_len,
             name_tag=name_tag,
             save_intermediate=save_intermediate,
+        )
+
+    if save_gp_genes_object:
+        # Load GP genes
+        gpdb = pd.read_csv(f'{root_dir}/gpdb_{name_tag}.csv')
+        gp_genes = set()
+        for c in gpdb.columns:
+            gp_genes.update(gpdb[c].dropna().tolist())
+
+        # Load anndata object
+        # look for existing object in input_h5ad directory
+        if os.path.exists(os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad')):
+            adata = sc.read_h5ad(
+                os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad')
+            )
+        else:
+            adata = sc.read_h5ad(adata_path)
+
+            if 'idx' not in adata.obs.columns:
+                # make unique
+                if adata.obs.index.duplicated().any():
+                    adata.obs_names_make_unique()
+                adata.obs['idx'] = adata.obs.index
+
+            if batch_keys is not None:
+                if isinstance(batch_keys, str):
+                    batch_keys = [batch_keys]
+                adata.obs['batch_key'] = adata.obs[batch_keys].apply(
+                    lambda x: '_'.join(x), axis=1
+                )
+
+        # Select gp genes
+        gp_genes_union = set(adata.var_names) & gp_genes
+        if not gp_genes_union:
+            raise ValueError(
+                'No GP genes found in the dataset'
+                'Do GP genes format match adata indices?'
+            )
+        adata = adata[:, list(gp_genes_union)]
+
+        # Save to disk
+        adata.write_h5ad(
+            os.path.join(root_dir, f'data/input_h5ad/{tissue}_gp_genes.h5ad')
         )

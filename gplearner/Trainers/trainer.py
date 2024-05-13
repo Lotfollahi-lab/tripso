@@ -15,10 +15,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
-from scipy.sparse import vstack
-from sklearn.metrics import classification_report
 
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
+from scipy.sparse import vstack
+from sklearn.metrics import classification_report
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 from torchmetrics.functional import pairwise_cosine_similarity
@@ -116,7 +116,8 @@ class scGPL(pl.LightningModule):
         total_epochs: int = 100,
         return_gene_embeddings: bool = False,
         tokens_to_keep: Optional[List] = None,
-        gene_file_tag: Optional[str] = None,
+        genes_to_keep: Optional[List] = None,
+        gene_dir_tag: Optional[str] = None,
         return_attention: bool = False,
         gp: Optional[str] = None,
         return_classification_report: bool = False,
@@ -130,7 +131,9 @@ class scGPL(pl.LightningModule):
     ) -> None:
         super().__init__()
         # save hyperparameters
-        self.save_hyperparameters()
+        # ignore model to avoid yaml error
+        self.save_hyperparameters(ignore=['model'])
+        # self.save_hyperparameters()
 
         # setup model
         self.model = model
@@ -214,34 +217,35 @@ class scGPL(pl.LightningModule):
 
             setattr(self, f'{stage}_loss', [])
 
+        self.output_dir = output_dir
+
         # For output - cells
         self.gp_cls: List[float] = []
         self.cell_metadata: Dict[str, Union[str, float]] = {}
         self.cell_token: List[float] = []
-        # For output - genes
-        self.x_scgpl: List[float] = []
-        self.tokens_scgpl: List[float] = []
-        self.gp_labels: List[str] = []
+
         # For output - attention
         self.attn_scores: List[float] = []
-
-        self.output_dir = output_dir
 
         # for test step
         self.return_gene_embeddings = return_gene_embeddings
         self.tokens_to_keep = tokens_to_keep
-        self.gene_file_tag = gene_file_tag
+        self.genes_to_keep = genes_to_keep
+
+        self.gene_dir_tag = gene_dir_tag
         self.return_attention = return_attention
         self.gp = gp
 
         # for saving embeddings
         self.emb_dataset = None
+        self.gene_dataset = None
 
     def forward(self, x):
         out = self.model(
             x,
             return_gene_embeddings=self.return_gene_embeddings,
             tokens_to_keep=self.tokens_to_keep,
+            gp_of_interest=self.gp,
         )
 
         return out
@@ -428,8 +432,11 @@ class scGPL(pl.LightningModule):
 
             for i, gp in enumerate(self.model.gp_inputs):
                 emb_dict[gp] = output['z'][:, i, :].detach().cpu()
+                emb_dict[f'{gp}_num_genes'] = (
+                    output['num_genes_per_cell_list'][i].cpu().numpy().T
+                )
 
-            if self.model_type == 'Global':
+            if 'cell_token' in output:
                 emb_dict['cell_token'] = output['cell_token'].detach().cpu()
 
             # metadata
@@ -445,6 +452,57 @@ class scGPL(pl.LightningModule):
                 self.emb_dataset = concatenate_datasets([self.emb_dataset, emb])
 
             return None
+
+        if self.return_gene_embeddings:
+            output = self.forward(batch)
+
+            emb_dict = {}
+
+            # Get embeddings of the relevant genes
+            for i, gene in enumerate(self.tokens_to_keep):
+                gene_name = self.genes_to_keep[i]
+
+                emb_dict[gene_name] = output[gene].detach().cpu()
+                emb_dict[f'{gene_name}_rank'] = output[f'{gene}_rank'].detach().cpu()
+
+            # metadata
+            for k, v in batch.items():
+                if k != 'input_ids':
+                    emb_dict[k] = v
+
+            emb = Dataset.from_dict(emb_dict)
+
+            if self.gene_dataset is None:
+                self.gene_dataset = emb
+            else:
+                self.gene_dataset = concatenate_datasets([self.gene_dataset, emb])
+
+            return None
+
+        if self.model_type == 'Base':
+            loss_output = self.compute_loss(batch)
+            loss = loss_output['total_loss']
+            perp = torch.exp(loss)
+
+            self.log(
+                'val/loss',
+                loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+
+            self.log(
+                'val/perplexity',
+                perp,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
 
         if self.model_type == 'Global':
             if self.global_loss == 'supervised':
@@ -481,6 +539,14 @@ class scGPL(pl.LightningModule):
             output_name = os.path.join(output_path, f'{self.split_label}_set')
             self.emb_dataset.save_to_disk(output_name)
             self.emb_dataset = None
+            return None
+
+        if self.return_gene_embeddings:
+            output_path = os.path.join(self.output_dir, self.gene_dir_tag)
+            os.makedirs(output_path, exist_ok=True)
+            output_name = os.path.join(output_path, f'{self.split_label}_set')
+            self.gene_dataset.save_to_disk(output_name)
+            self.gene_dataset = None
             return None
 
         if self.model_type == 'Global':
@@ -565,13 +631,6 @@ class scGPL(pl.LightningModule):
                         output['count_output']['count_mean']
                     )
 
-    def _test_step_genes(self, batch, batch_idx):
-        output = self.forward(batch)
-
-        self.x_scgpl += output['x_scgpl']
-        self.tokens_scgpl += output['tokens_scgpl']
-        self.gp_labels += output['gp_labels']
-
     def _test_step_attn(self, batch, batch_idx):
         if self.gp == 'cell_token':
             output = self.model.get_cell_token_attention(batch)
@@ -594,9 +653,7 @@ class scGPL(pl.LightningModule):
         batch,
         batch_idx,
     ):
-        if self.return_gene_embeddings:
-            self._test_step_genes(batch, batch_idx)
-        elif self.return_attention:
+        if self.return_attention:
             self._test_step_attn(batch, batch_idx)
         else:
             self._test_step_cell(batch, batch_idx)
@@ -830,39 +887,6 @@ class scGPL(pl.LightningModule):
         self.cell_metadata = {}
         self.cell_token = []
 
-    def _end_test_epoch_genes(self):
-        # Concatenate tensors
-        x_scgpl = torch.cat(self.x_scgpl, dim=0).cpu().numpy()
-        tokens_scgpl = torch.cat(self.tokens_scgpl, dim=0).cpu().numpy()
-
-        # flatten list
-        gp_labels = np.array(
-            [item for sublist in self.gp_labels for item in sublist]
-        ).flatten()
-
-        # Create anndata object for clustering and visualisation
-        adata = sc.AnnData(X=x_scgpl)
-        adata.obs['token'] = list(tokens_scgpl)
-        adata.obs['GP'] = list(gp_labels)
-
-        # Map gene names for interpretability
-        adata.obs['ensembl'] = adata.obs['token'].map(token_to_gene)
-        adata.obs['gene'] = adata.obs['ensembl'].map(ensembl_to_name)
-
-        print('Writing anndata file to disk at')
-        print(f'{self.output_dir}/adata_gene_embedding_{self.gene_file_tag}.h5ad')
-
-        adata.write_h5ad(
-            os.path.join(
-                self.output_dir, f'adata_gene_embedding_{self.gene_file_tag}.h5ad'
-            )
-        )
-
-        # Reset
-        self.x_scgpl = []
-        self.tokens_scgpl = []
-        self.gp_labels = []
-
     def _end_test_epoch_attn(self):
         attn = vstack(self.attn_scores)
 
@@ -919,9 +943,7 @@ class scGPL(pl.LightningModule):
         self.attn_scores = []
 
     def on_test_epoch_end(self):
-        if self.return_gene_embeddings:
-            self._end_test_epoch_genes()
-        elif self.return_attention:
+        if self.return_attention:
             self._end_test_epoch_attn()
         else:
             self._end_test_epoch_cell()
@@ -931,6 +953,7 @@ class scGPL(pl.LightningModule):
 
         # calculate MLM loss for each GP
         gp_loss_dict = {}
+        loss = 0
 
         for i in range(len(self.model.gp_inputs)):
             # Loss
@@ -946,36 +969,32 @@ class scGPL(pl.LightningModule):
                     output['gene_labels_list'][i].reshape(-1),
                 )
 
-                if torch.isnan(loss_i):
-                    # usually happens if all labels are masked
-                    print(f'Loss is NaN in {self.model.gp_inputs[i]}')
-                    print('Predictions:')
-                    print(output['logits_lm_list'][i])
-                    print('')
-                    print('True labels:')
-                    print(output['gene_labels_list'][i])
-                    print('')
-                    print('Number of NaNs in predictions:')
-                    print(torch.isnan(output['logits_lm_list'][i]).sum())
-                    print('')
-                    print('Number of NaNs in true labels:')
-                    print(torch.isnan(output['gene_labels_list'][i]).sum())
-                    gp_loss_dict[self.model.gp_inputs[i]] = (
-                        torch.tensor(0).to(loss_i.device).float()
-                    )
+                # if torch.isnan(loss_i):
+                #     # usually happens if all labels are masked
+                #     print(f'Loss is NaN in {self.model.gp_inputs[i]}')
+                #     print('Predictions:')
+                #     print(output['logits_lm_list'][i])
+                #     print('')
+                #     print('True labels:')
+                #     print(output['gene_labels_list'][i])
+                #     print('')
+                #     print('Number of NaNs in predictions:')
+                #     print(torch.isnan(output['logits_lm_list'][i]).sum())
+                #     print('')
+                #     print('Number of NaNs in true labels:')
+                #     print(torch.isnan(output['gene_labels_list'][i]).sum())
+                #     gp_loss_dict[self.model.gp_inputs[i]] = (
+                #         torch.tensor(0).to(loss_i.device).float()
+                #     )
 
-                else:
-                    gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+                # else:
+                gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+                loss += loss_i
 
             else:
                 gp_loss_dict[self.model.gp_inputs[i]] = (
                     torch.tensor(0).to(output['logits_lm_list'][i].device).float()
                 )
-
-            # compute total loss
-            tensor_list = list(gp_loss_dict.values())
-
-        loss = torch.sum(torch.stack(tensor_list))
 
         # package outputs to return flexible number of objects
         holder = {
@@ -1196,14 +1215,23 @@ class scGPL(pl.LightningModule):
 
 
 class EmbEvaluator(pl.LightningModule):
-    def __init__(self, n_classes, emb_dim, task, lr, emb_label, y_label, output_dir):
+    def __init__(
+        self, n_classes, emb_dim, task, lr, emb_label, y_label, output_dir, filter_tag
+    ):
         super().__init__()
+        self.save_hyperparameters()
 
         self.evaluator_head = EmbEvaluatorHead(emb_dim, n_classes)
         self.emb_label = emb_label
+
+        if task == 'classification':
+            # add id tag for encoded covariate
+            if not y_label.endswith('_id'):
+                y_label = f'{y_label}_id'
         self.y_label = y_label
         self.task = task
         self.output_dir = output_dir
+        self.filter_tag = filter_tag
 
         if task == 'classification':
             self.loss_fn = nn.CrossEntropyLoss()
@@ -1219,6 +1247,9 @@ class EmbEvaluator(pl.LightningModule):
         for stage in ['train', 'val', 'test']:
             setattr(self, f'{stage}_pred', [])
             setattr(self, f'{stage}_true', [])
+
+    def forward(self, x):
+        return self.evaluator_head(x)
 
     def training_step(self, batch, batch_idx):
         x = batch[self.emb_label]
@@ -1328,23 +1359,9 @@ class EmbEvaluator(pl.LightningModule):
 
         y_out = self.evaluator_head(x)
 
-        loss = self.loss_fn(y_out, y)
-
-        self.log(
-            'test_loss',
-            loss,
-            on_step=True,
-            on_epoch=True,
-            logger=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
-
         self.test_pred.append(y_out)
         self.test_true.append(y)
         self.y_unencoded += y_unencoded
-
-        return loss
 
     def on_test_epoch_end(self):
         # calculate accuracy
@@ -1386,7 +1403,8 @@ class EmbEvaluator(pl.LightningModule):
             output_df.to_csv(
                 os.path.join(
                     self.output_dir,
-                    f'cell_metrics/{self.y_label}_from_{self.emb_label}.csv',
+                    f'cell_metrics/{self.y_label}_from_{self.emb_label}'
+                    f'{self.filter_tag}.csv',
                 ),
                 index=False,
             )
