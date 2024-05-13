@@ -5,6 +5,8 @@
 import pickle
 import warnings
 from typing import Dict, Optional
+from types import SimpleNamespace
+import json 
 
 # imports
 import torch
@@ -22,6 +24,8 @@ from ..Modules.modules import (
 from ..Utils.geneformer_utils import EmbExtractor
 from ..Utils.utils import bin_gene_expression, get_gp_tokens
 
+from scgpt.model import TransformerModel
+from scgpt.tokenizer import GeneVocab
 ####################################
 # Geneformer
 ####################################
@@ -60,6 +64,167 @@ class gfWrapper(nn.Module):
 
         return emb_out
 
+####################################
+# scGPT ####
+####################################
+
+class scgptWrapper(nn.Module):
+    def __init__(
+        self,
+        scgpt_mod='scGPT_human',
+    ):
+        super().__init__()
+
+        hyperparameter_defaults = dict(
+            seed=0,
+            dataset_name="ms",
+            do_train=False,
+            load_model=f"/lustre/scratch126/cellgen/team205/ha11/scGPT/{scgpt_mod}/",
+            mask_ratio=0.0,
+            epochs=10,
+            n_bins=51,
+            MVC=False, # Masked value prediction for cell embedding
+            ecs_thres=0.0, # Elastic cell similarity objective, 0.0 to 1.0, 0.0 to disable
+            dab_weight=0.0,
+            lr=1e-4,
+            batch_size=32,
+            layer_size=128,
+            nlayers=4,  # number of nn.TransformerEncoderLayer in nn.TransformerEncoder
+            nhead=4,  # number of heads in nn.MultiheadAttention
+            dropout=0.2,  # dropout probability
+            schedule_ratio=0.9,  # ratio of epochs for learning rate schedule
+            save_eval_interval=5,
+            fast_transformer=True,
+            pre_norm=False,
+            amp=True,  # Automatic Mixed Precision
+            include_zero_gene = False,
+            freeze = False, #freeze
+            DSBN = False,  # Domain-spec batchnorm
+        )
+        config = SimpleNamespace(**hyperparameter_defaults)
+        # settings for input and preprocessing
+        pad_token = "<pad>"
+        special_tokens = [pad_token, "<cls>", "<eoc>"]
+        mask_ratio = config.mask_ratio
+        mask_value = "auto"  # for masked values, now it should always be auto
+        
+        include_zero_gene = config.include_zero_gene  # if True, include zero genes among hvgs in the training
+        max_seq_len = 3001
+        n_bins = config.n_bins
+        
+        # input/output representation
+        input_style = "binned"  # "normed_raw", "log1p", or "binned"
+        output_style = "binned"  # "normed_raw", "log1p", or "binned"
+        
+        # settings for training
+        MLM = False  # whether to use masked language modeling, currently it is always on.
+        CLS = True  # celltype classification objective
+        ADV = False  # Adversarial training for batch correction
+        CCE = False  # Contrastive cell embedding objective
+        MVC = config.MVC  # Masked value prediction for cell embedding
+        ECS = config.ecs_thres > 0  # Elastic cell similarity objective
+        DAB = False  # Domain adaptation by reverse backpropagation, set to 2 for separate optimizer
+        INPUT_BATCH_LABELS = False  # TODO: have these help MLM and MVC, while not to classifier
+        input_emb_style = "continuous"  # "category" or "continuous" or "scaling"
+        cell_emb_style = "cls"  # "avg-pool" or "w-pool" or "cls"
+        adv_E_delay_epochs = 0  # delay adversarial training on encoder for a few epochs
+        adv_D_delay_epochs = 0
+        mvc_decoder_style = "inner product"
+        ecs_threshold = config.ecs_thres
+        dab_weight = config.dab_weight
+        
+        explicit_zero_prob = MLM and include_zero_gene  # whether explicit bernoulli for zeros
+        do_sample_in_train = False and explicit_zero_prob  # sample the bernoulli in training
+        
+        per_seq_batch_sample = False
+        
+        if input_emb_style == "category":
+            mask_value = n_bins + 1
+            pad_value = n_bins  # for padding gene expr values
+            n_input_bins = n_bins + 2
+        else:
+            mask_value = -1
+            pad_value = -2
+            n_input_bins = n_bins
+        
+        # settings for optimizer
+        lr = config.lr  # TODO: test learning rate ratio between two tasks
+        lr_ADV = 1e-3  # learning rate for discriminator, used when ADV is True
+        batch_size = config.batch_size
+        eval_batch_size = config.batch_size
+        epochs = config.epochs
+        schedule_interval = 1
+        
+        # settings for the model
+        fast_transformer = config.fast_transformer
+        fast_transformer_backend = "flash"  # "linear" or "flash"
+        embsize = config.layer_size  # embedding dimension
+        d_hid = config.layer_size  # dimension of the feedforward network in TransformerEncoder
+        nlayers = config.nlayers  # number of TransformerEncoderLayer in TransformerEncoder
+        nhead = config.nhead  # number of heads in nn.MultiheadAttention
+        dropout = config.dropout  # dropout probability
+        
+        # logging
+        log_interval = 100  # iterations
+        save_eval_interval = config.save_eval_interval  # epochs
+        do_eval_scib_metrics = True
+        num_types = 5 # TODO: hard coded for synthetic data
+        cell_embedding_mode = 'cls'
+        max_length = 9585
+        batch_size = 4
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.vocab_file = f"/lustre/scratch126/cellgen/team205/ha11/scGPT/{scgpt_mod}/vocab.json"
+        self.vocab = GeneVocab.from_file(self.vocab_file)
+        with open(f'/lustre/scratch126/cellgen/team205/ha11/scGPT/{scgpt_mod}/args.json', "r") as f:
+            self.model_configs = json.load(f)
+        ntokens = len(self.vocab)  # size of vocabulary
+        self.model = TransformerModel(
+            ntokens,
+            embsize,
+            nhead,
+            d_hid,
+            nlayers,
+            nlayers_cls=3,
+            n_cls=num_types if CLS else 1,
+            vocab=self.vocab,
+            dropout=dropout,
+            pad_token=pad_token,
+            pad_value=pad_value,
+            do_mvc=MVC,
+            do_dab=DAB,
+            use_batch_labels=INPUT_BATCH_LABELS,
+            num_batch_labels=0,
+            domain_spec_batchnorm=config.DSBN,
+            input_emb_style=input_emb_style,
+            n_input_bins=n_input_bins,
+            cell_emb_style=cell_emb_style,
+            mvc_decoder_style=mvc_decoder_style,
+            ecs_threshold=ecs_threshold,
+            explicit_zero_prob=explicit_zero_prob,
+            use_fast_transformer=True, # TODO: create new env on farm22 to add flash_transformer. change to True on farm5
+            fast_transformer_backend=fast_transformer_backend,
+            pre_norm=config.pre_norm,
+        )
+        self.use_batch_labels = INPUT_BATCH_LABELS
+
+    def forward(self, data_dict, *args, **kwargs):
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
+            count = 0
+            input_gene_ids = data_dict["gene"].to(self.device)
+            src_key_padding_mask = input_gene_ids.eq(
+                self.vocab[self.model_configs["pad_token"]]
+            )
+            embeddings = self.model._encode(
+                input_gene_ids,
+                data_dict["expr"].to(self.device),
+                src_key_padding_mask=src_key_padding_mask,
+                batch_labels=data_dict["batch_labels"].to(self.device)
+                if self.use_batch_labels
+                else None,
+            )
+            embeddings = embeddings[:, 1:, :]  # get all the token embeddings except the <cls> (just the corresponding gene positions)
+            return embeddings
+    
 
 ####################################
 # GP wrapper
@@ -331,7 +496,6 @@ class gpWrapper(nn.Module):
         gene_original_labels_list = []
         num_genes_per_cell_list = []
         gene_emb_list = []
-
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
             if (gp_of_interest is None) or (self.gp_inputs[i] in gp_of_interest):
@@ -702,7 +866,7 @@ class CountHead(nn.Module):
         self,
         loss_mode: str = 'mse',
         n_genes: int = 25426,
-        d_model: int = 256,
+        d_model: int = 128,
     ):
         super().__init__()
         self.loss_mode = loss_mode
@@ -782,6 +946,7 @@ class gpTransformerBase(nn.Module):
     def __init__(
         self,
         database,
+        mode='geneformer',
         attn_dropout=0,
         gp_inputs=None,
         gene_counts_df=None,
@@ -794,8 +959,8 @@ class gpTransformerBase(nn.Module):
         use_flash=False,
         geneformer_model=GENEFORMER_MODEL_PATH,
         gf_layer_to_quant=-1,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
+        gene_token_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/token_dictionary.pkl',
+        gene_name_path='/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl',
         model_type='Base',
         learn_new_gp=False,
         gp_of_interest=None,
@@ -851,9 +1016,18 @@ class gpTransformerBase(nn.Module):
         super().__init__()
 
         # Initialize geneformer model for getting geneformer embeddings
-        self.gf_wrapper = gfWrapper(
-            geneformer_model=geneformer_model, gf_layer_to_quant=gf_layer_to_quant
-        )
+        if mode == 'geneformer':
+            self.gf_wrapper = gfWrapper(
+                geneformer_model=geneformer_model, gf_layer_to_quant=gf_layer_to_quant
+            )
+            gene_token_path = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/token_dictionary.pkl'
+            gene_name_path = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl'
+        elif mode == 'scgpt':
+            self.gf_wrapper = scgptWrapper()
+            gene_token_path = '/lustre/scratch126/cellgen/team205/ha11/scGPT/synthetic_token_dict.pkl'
+            gene_name_path = '/lustre/scratch126/cellgen/team205/ha11/scGPT/gene_name_id_dict.pkl'
+        else:
+            raise NotImplementedError()
 
         # Optionally: extract Geneformer cell embeddings
         self.gf_cell_encoder = AverageNonZero()
@@ -892,7 +1066,7 @@ class gpTransformerBase(nn.Module):
             mgm_mask_ratio=self.mgm_mask_ratio,
             gp_inputs=gp_inputs,
             add_remaining_var=add_remaining_var,
-            use_flash=self.use_flash,
+            use_flash=True,
             model_type=model_type,
             learn_new_gp=learn_new_gp,
         )

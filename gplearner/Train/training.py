@@ -9,15 +9,19 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import torch
-
-# set up wandb
-import wandb
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 
-from ..Datamodules.datamodule import AnnDataset, txDataModule
+# set up wandb
+import wandb  # type: ignore
+
+from ..Datamodules.datamodule import (
+    AnnDataset,
+    scgptDataModule,
+    txDataModule,
+)
 from ..Models.gp_model import (
     GENEFORMER_MODEL_PATH,
     gpTransformerBase,
@@ -31,6 +35,7 @@ def run_training(
     dataset_path: str,
     gpdb_path: str,
     output_dir: str,
+    mode: str = 'geneformer',
     gp_similarity_file: Optional[str] = None,
     batch_size: int = 32,
     mgm: float = 0.15,
@@ -90,6 +95,8 @@ def run_training(
         directory where we will dump our experiment's results.
         If not given, then we will use the directory given as
         the 'results_dir' in the config file.
+    mode: str
+        scgpt or geneformer as the backbone feature extractor
     batch_size : int
         batch size
     mgm : float
@@ -180,7 +187,7 @@ def run_training(
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # wandb.login()
+    # wandb.login()  # type: ignore
 
     # get date for today in YYYY-MM-DD format
     today = datetime.datetime.today().strftime('%Y-%m-%d')
@@ -200,7 +207,7 @@ def run_training(
 
     if torch.cuda.device_count() > 1:
         # multi gpu training with group logging
-        wandb.init(
+        wandb.init(  # type: ignore
             project='scGPL',
             # group=f'{today}_gp_transformer_{tissue}_{supervised_tag}',
             # all runs are saved in one group for multi gpu training
@@ -209,7 +216,7 @@ def run_training(
             dir=wandb_dir,
         )
     else:
-        wandb.init(project='scGPL', id=save_id, dir=wandb_dir)
+        wandb.init(project='scGPL', id=save_id, dir=wandb_dir)  # type: ignore
 
     early_stopping_callback = EarlyStopping(
         # monitor='val/loss',
@@ -320,21 +327,33 @@ def run_training(
 
     # Instantiate dataset
     # (tokenized dataset should be created already)
+    # txdata = DummyDataModule(folder = dataset_path, batch_size=batch_size)
+    mode = mode.lower()
+    if mode == 'geneformer':
+        txdata = txDataModule(
+            folder=dataset_path,
+            batch_size=batch_size,
+            frac_for_training=frac_for_training,
+            adata_path=adata_path,
+            use_weighted_sampler=use_weighted_sampler,
+            label_key=sample_by,
+            seed=seed,
+        )
+    elif mode == 'scgpt':
+        txdata = scgptDataModule(
+            batch_size=batch_size,
+            num_workers=15,
+            adata_path_global=adata_path,
+            adata_path=dataset_path,
+        )
+    else:
+        raise NotImplementedError()
+
     if reconstruction_loss == 'mse':
         warnings.warn(
             'Using MSE loss for reconstruction'
             '\nMake sure you pass anndata object with normalized counts'
         )
-
-    txdata = txDataModule(
-        folder=dataset_path,
-        batch_size=batch_size,
-        frac_for_training=frac_for_training,
-        adata_path=adata_path,
-        use_weighted_sampler=use_weighted_sampler,
-        label_key=sample_by,
-        seed=seed,
-    )
 
     # Load gpdb
     gpdb = pd.read_csv(gpdb_path)
@@ -367,6 +386,7 @@ def run_training(
 
     if model_type == 'Base':
         model = gpTransformerBase(
+            mode=mode,
             gene_counts_df=gene_counts_df,
             database=gpdb,
             do_ensembl_conversion=do_ensembl_conversion,
@@ -389,6 +409,7 @@ def run_training(
         #     supervised_labels = txdata.count_unique_classes(classification_labels)
 
         model = gpTransformerGlobal(
+            mode=mode,
             gene_counts_df=gene_counts_df,
             database=gpdb,
             do_ensembl_conversion=do_ensembl_conversion,
@@ -590,7 +611,7 @@ def run_training(
 
     # save logs to csv for custom plotting
     # Fetch logged data from wandb
-    api = wandb.Api()
+    api = wandb.Api()  # type: ignore
     if torch.cuda.device_count() > 1:
         run = api.run(f'scGPL/{save_id}_gpu_{str(rank_zero_only.rank)}')
     else:
@@ -600,4 +621,4 @@ def run_training(
     df = run.history()
     df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
 
-    wandb.finish()
+    wandb.finish()  # type: ignore

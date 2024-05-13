@@ -6,6 +6,7 @@ import warnings
 from typing import (
     Dict,
     List,
+    Literal,
     Optional,
 )
 
@@ -27,6 +28,7 @@ from tqdm import tqdm
 
 from ..Datamodules.datamodule import (
     EmbDataModule,
+    scgptDataModule,
     iEmbDataModule,
     iTxDataModule,
     txDataModule,
@@ -61,6 +63,8 @@ class gpEval:
     Main class for running downstream evaluation tasks on trained models
     Parameters
     ----------
+    mode : str
+        Whether to use scgpt or geneformer as the feature extractor backbone
     dataset_path : str
         Path to folder containing tokenized dataset
     gpdb_path : str
@@ -111,6 +115,7 @@ class gpEval:
 
     def __init__(
         self,
+        mode: Literal['geneformer', 'scgpt'] = 'geneformer',
         gpdb_path: Optional[str] = None,
         output_dir: str = '/path/to/output/',
         dataset_path: Optional[str] = None,
@@ -144,6 +149,7 @@ class gpEval:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+        self.mode = mode
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
             tag = (
@@ -170,6 +176,7 @@ class gpEval:
 
         if model_type == 'Base':
             self.model = gpTransformerBase(
+                mode=mode,
                 gp_inputs=gp_inputs,
                 gene_counts_df=self.gene_counts_df,
                 database=gpdb,
@@ -183,6 +190,8 @@ class gpEval:
 
         elif model_type == 'Global':
             self.model = gpTransformerGlobal(
+                mode=mode,
+                # gene_counts_df=gene_counts_df,
                 gene_counts_df=self.gene_counts_df,
                 database=gpdb,
                 do_ensembl_conversion=do_ensembl_conversion,
@@ -266,6 +275,7 @@ class gpEval:
         if (
             self.model_type != 'Mean'
         ):  # no training required if just averaging geneformer embeddings
+            # gp_transformer = scGPL.load_from_checkpoint(self.checkpoint_path)
             gp_transformer = scGPL(
                 self.model,
                 self.model_type,
@@ -316,12 +326,18 @@ class gpEval:
         '''
 
         gp_transformer = self._init_trainer(save_emb=True, split_label=split)
-
-        txdata = txDataModule(
-            folder=self.dataset_path,
-            batch_size=self.batch_size,
-            data_split_to_pass_to_val_step=split,
-        )
+        if self.mode == 'geneformer':
+            txdata = txDataModule(
+                folder=self.dataset_path,
+                batch_size=self.batch_size,
+                data_split_to_pass_to_val_step=split,
+            )
+        elif self.mode == 'scgpt':
+            txdata = scgptDataModule(
+                batch_size=self.batch_size,
+                num_workers=15,
+                data_split_to_pass_to_val_step=split,
+            )
 
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
 
@@ -459,7 +475,9 @@ class gpEval:
         if isinstance(gp_to_plot, str):
             gp_to_plot = [gp_to_plot]
 
-        emb = load_from_disk(os.path.join('embeddings', f'{data_to_plot}_set'))
+        emb = load_from_disk(
+            os.path.join(self.output_dir, 'embeddings', f'{data_to_plot}_set')
+        )
 
         if subsample is not None:
             emb = emb.shuffle(seed=0).select(range(subsample))
