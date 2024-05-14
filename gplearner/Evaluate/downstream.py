@@ -131,18 +131,20 @@ class gpEval:
         global_loss: Optional[str] = 'supervised',
         reconstruction_loss: Optional[str] = 'zinb',
         geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
+        path_to_trained_model: Optional[str] = None,
+        seed: Optional[int] = 0,
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
 
         # set seed for reproducibility
-        seed = 0
         np.random.seed(seed)
         random.seed(seed)
         pl.seed_everything(seed)
         torch.manual_seed(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        self.seed = seed
 
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
@@ -151,9 +153,15 @@ class gpEval:
                 if model_type_in_checkpoint is not None
                 else model_type
             )
-            latest_ckpt = find_latest_file(output_dir, tissue, tag)
+
+            if path_to_trained_model is None:
+                model_path = output_dir
+            else:
+                model_path = path_to_trained_model
+
+            latest_ckpt = find_latest_file(model_path, tissue, tag)
             print('Latest .ckpt file:', latest_ckpt)
-            self.checkpoint_path = os.path.join(output_dir, latest_ckpt)
+            self.checkpoint_path = os.path.join(model_path, latest_ckpt)
 
         gpdb = pd.read_csv(gpdb_path)
 
@@ -293,6 +301,7 @@ class gpEval:
                 return_classification_report=return_classification_report,
                 save_emb=save_emb,
                 split_label=split_label,
+                hparam_save='ignore_model',
             )
 
         # reset attributes overwritten by loading from checkpoint
@@ -321,6 +330,9 @@ class gpEval:
             folder=self.dataset_path,
             batch_size=self.batch_size,
             data_split_to_pass_to_val_step=split,
+            # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
+            # -> comment out to reproduce original
+            seed=self.seed,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
@@ -659,6 +671,9 @@ class gpEval:
             filter_key=obs_key,
             filter_value=obs_value,
             frac_for_generation=data_frac,
+            # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
+            # -> comment out to reproduce original
+            seed=self.seed,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
@@ -666,15 +681,19 @@ class gpEval:
 
     def visualize_gene_embeddings(
         self,
-        genes_to_plot,
         cell_label_to_plot,
+        genes_to_plot,
         gene_label_to_plot,
         gene_label_df,
         gene_embedding_dir,
         output_dir,
         pathway=None,
         frac=1,
+        gene_col_name='gene',
     ):
+        if isinstance(cell_label_to_plot, str):
+            cell_label_to_plot = [cell_label_to_plot]
+
         # Load gene embeddings
         emb = load_from_disk(gene_embedding_dir)
         emb = emb.shuffle(seed=0).select(range(int(frac * len(emb))))
@@ -702,7 +721,12 @@ class gpEval:
 
         # add gene metadata
         if gene_label_df is not None:
-            adata.obs = adata.obs.join(gene_label_df.set_index('gene'), on='gene')
+            adata.obs = adata.obs.join(
+                gene_label_df.set_index(gene_col_name), on='gene'
+            )
+
+        if adata.shape[0] == 0:
+            raise ValueError('No genes remaining after removing missing genes')
 
         sc.pp.neighbors(adata, use_rep='X')
         sc.tl.umap(adata)
@@ -767,11 +791,26 @@ class gpEval:
             folder=self.dataset_path,
             batch_size=self.batch_size,
             adata_path=adata_path,
+            # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
+            # -> comment out to reproduce original
+            seed=self.seed,
         )
 
         gp_transformer = self._init_trainer(test_random_baseline=True)
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
         trainer.test(gp_transformer, txdata)
+
+    def evaluate_supervised_model(self):
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
+            # -> comment out to reproduce original
+            seed=self.seed,
+        )
+
+        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+        trainer.test(self.gp_transformer, txdata)
 
 
 ################################
@@ -895,6 +934,7 @@ def calculate_gp_attribution_scores(
     gp_transformer = scGPL(
         model,
         model_type,
+        global_loss=global_loss,
         return_gene_embeddings=False,
         tokens_to_keep=None,
         return_attention=False,
