@@ -1065,11 +1065,12 @@ class gpTransformerGlobal(gpTransformerBase):
             base_output['count_output'] = count_output
 
             if self.reconstruction_loss == 'binning':
-                binned = bin_gene_expression(
-                    input_dataset['counts'], n_bins=self.n_bins
-                )
-                binned = torch.tensor(binned).to(count_output.device)
-                base_output['true_bins'] = binned
+                if self.training:
+                    binned = bin_gene_expression(
+                        input_dataset['counts'], n_bins=self.n_bins
+                    )
+                    binned = torch.tensor(binned).to(count_output.device)
+                    base_output['true_bins'] = binned
 
         return base_output
 

@@ -320,7 +320,7 @@ def run_training(
 
     # Instantiate dataset
     # (tokenized dataset should be created already)
-    if reconstruction_loss == 'mse':
+    if (reconstruction_loss == 'mse') & (model_type == 'Global'):
         warnings.warn(
             'Using MSE loss for reconstruction'
             '\nMake sure you pass anndata object with normalized counts'
