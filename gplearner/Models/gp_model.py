@@ -1048,7 +1048,7 @@ class gpTransformerGlobal(gpTransformerBase):
         if return_gene_embeddings:
             return base_output
 
-        cell_output = self.cell_token_learner(base_output, inference)
+        cell_output = self.cell_token_learner(base_output, inference=inference)
 
         base_output['cell_token'] = cell_output['cell_token']
 
