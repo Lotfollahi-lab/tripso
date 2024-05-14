@@ -510,7 +510,7 @@ def run_training(
         print('Loading from checkpoint', checkpoint_path)
         checkpoint = torch.load(latest_ckpt)
         gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-        # n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
+        n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
 
         # reset output directory
         gp_transformer.output_dir = output_dir

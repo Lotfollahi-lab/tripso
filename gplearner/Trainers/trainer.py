@@ -128,12 +128,16 @@ class scGPL(pl.LightningModule):
         use_finetune_lr: bool = False,
         save_emb: bool = False,
         split_label: str = 'train',
+        hparam_save: str = 'all',
     ) -> None:
         super().__init__()
         # save hyperparameters
-        # ignore model to avoid yaml error
-        self.save_hyperparameters(ignore=['model'])
-        # self.save_hyperparameters()
+        if hparam_save == 'all':
+            # important that this is default for model training
+            self.save_hyperparameters()
+        else:
+            # ignore model to avoid yaml error
+            self.save_hyperparameters(ignore=['model'])
 
         # setup model
         self.model = model
@@ -807,10 +811,8 @@ class scGPL(pl.LightningModule):
                 # flatten list of lists
                 meta_dict[k] = [item for sublist in v for item in sublist]
 
-        # get cell type predictions
+        # get model predictions
         if self.model_type == 'Global':
-            cell_token = torch.cat(self.cell_token).cpu().numpy()
-
             if self.global_loss == 'supervised':
                 for t in self.model.supervised_tasks:
                     logits = torch.cat(self.test_clf_pred[t])
@@ -830,57 +832,6 @@ class scGPL(pl.LightningModule):
                             ),
                             index=False,
                         )
-
-        meta = pd.DataFrame(meta_dict)
-
-        # add non encoded string version of predicted labels
-        if self.model_type == 'Global':
-            if self.global_loss == 'supervised':
-                for t in self.model.supervised_tasks:
-                    conversion = meta[[t, f'{t}_pred_encoded']].drop_duplicates()
-                    conversion = {
-                        k: v
-                        for k, v in zip(conversion[f'{t}_pred_encoded'], conversion[t])
-                    }
-                    meta[f'{t}_pred'] = meta[f'{t}_pred_encoded'].map(conversion)
-
-        adata = sc.AnnData(X=gp_emb, obs=meta)
-
-        # Set the var_names attribute of the AnnData object to the GP names
-        # + index for each of the positions in the GP embedding vector
-        gp_labels = [
-            f'{string}_{i}'
-            for string in self.model.gp_inputs
-            for i in range(1, self.model.gp_latent_size + 1)
-        ]
-
-        adata.var_names = gp_labels
-        adata.var['gp_idx'] = adata.var_names
-
-        # change back missing values
-        for column in adata.obs.columns:
-            adata.obs[column] = np.where(
-                adata.obs[column] == ' ', np.nan, adata.obs[column]
-            )
-
-        adata.write_h5ad(os.path.join(self.output_dir, 'adata_gp_embedding.h5ad'))
-
-        sc.pp.neighbors(adata, use_rep='X')
-        sc.tl.umap(adata, min_dist=0.4)
-
-        adata.write_h5ad(os.path.join(self.output_dir, 'adata_gp_embedding.h5ad'))
-
-        if self.model_type == 'Global':
-            bdata = sc.AnnData(X=cell_token, obs=meta)
-            sc.pp.neighbors(bdata, use_rep='X')
-            sc.tl.umap(bdata, min_dist=0.4)
-
-            for column in bdata.obs.columns:
-                bdata.obs[column] = np.where(
-                    bdata.obs[column] == ' ', np.nan, bdata.obs[column]
-                )
-
-            bdata.write_h5ad(os.path.join(self.output_dir, 'adata_cell_embedding.h5ad'))
 
         # reset
         self.gp_cls = []
