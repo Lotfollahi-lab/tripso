@@ -12,6 +12,7 @@ from typing import List, Optional
 
 import anndata as ad
 import matplotlib
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -122,6 +123,40 @@ def load_gmt(path, rm_col_1=True):
 
 def remove_leading_numbers_and_underscore(input_string):
     return re.sub(r'^[\d_]+', '', input_string)
+
+
+class MidpointNormalize(mcolors.Normalize):
+    '''
+    Palette normalization with centering and adapted dynamic range to correspond to
+    the distance of vmin and vmax from the cenetr
+    Adapted from https://stackoverflow.com/a/50003503
+
+    taken directly from
+    https://scanpy-tutorials.readthedocs.io/en/latest/plotting/advanced.html#colors
+    '''
+
+    def __init__(self, vmin=None, vmax=None, midpoint=0, clip=False):
+        self.midpoint = midpoint
+        mcolors.Normalize.__init__(self, vmin, vmax, clip)
+
+    def __call__(self, value, clip=None):
+        value = np.array(value).astype(float)
+        normalized_min = max(
+            0.0,
+            0.5
+            * (1.0 - abs((self.midpoint - self.vmin) / (self.midpoint - self.vmax))),
+        )
+        normalized_max = min(
+            1.0,
+            0.5
+            * (1.0 + abs((self.vmax - self.midpoint) / (self.midpoint - self.vmin))),
+        )
+        normalized_mid = 0.5
+        x, y = (
+            [self.vmin, self.midpoint, self.vmax],
+            [normalized_min, normalized_mid, normalized_max],
+        )
+        return np.ma.masked_array(np.interp(value, x, y))
 
 
 ###################################
