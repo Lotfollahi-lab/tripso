@@ -129,6 +129,7 @@ class scGPL(pl.LightningModule):
         save_emb: bool = False,
         split_label: str = 'train',
         hparam_save: str = 'all',
+        set_gpfinder_weight_decay: Optional[float] = None,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -195,6 +196,7 @@ class scGPL(pl.LightningModule):
         self.use_finetune_lr = use_finetune_lr
         self.save_emb = save_emb
         self.split_label = split_label
+        self.set_gpfinder_weight_decay = set_gpfinder_weight_decay
 
         # Initialise list to append loss and accuracy
         for stage in ['train', 'val', 'test']:
@@ -1117,6 +1119,26 @@ class scGPL(pl.LightningModule):
             ]
         else:
             grouped_parameters = [{'params': [p for n, p in params], 'lr': self.lr}]
+
+        def add_custom_lr(n, idx):
+            return f'multi_gp_encoder.{idx}' in n
+
+        if self.set_gpfinder_weight_decay is not None:
+            rem_var_idx = self.model.gp_inputs.index('remaining_var')
+            grouped_parameters = [
+                {
+                    'params': [p for n, p in params if add_custom_lr(n, rem_var_idx)],
+                    'lr': self.lr,
+                    'weight_decay': self.set_gpfinder_weight_decay,
+                },
+                {
+                    'params': [
+                        p for n, p in params if not add_custom_lr(n, rem_var_idx)
+                    ],
+                    'lr': self.lr,
+                    'weight_decay': self.weight_decay,
+                },
+            ]
 
         optimizer = self.optimizer_class(
             grouped_parameters, lr=self.lr, weight_decay=self.weight_decay

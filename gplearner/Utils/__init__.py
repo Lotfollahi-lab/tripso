@@ -13,6 +13,7 @@ from .losses import (  # noqa: F401
 )
 from .utils import (  # noqa: F401
     CosineLRwithWarmUp,
+    MidpointNormalize,
     bool_flag,
     count_genes_per_cell,
     dataset_pivot_longer,
@@ -62,4 +63,5 @@ __all___ = [
     'summarize_attributions',
     'dataset_pivot_longer',
     'pivot_single_column',
+    'MidpointNormalize',
 ]

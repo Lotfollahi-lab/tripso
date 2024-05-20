@@ -580,7 +580,11 @@ class iTxDataModule(txDataModule):
         else:
             all_gp_tokens = set()
 
-            for gpi in gp_inputs:
+            gp_inputs_dm = gp_inputs.copy()
+            if 'remaining_var' in gp_inputs_dm:
+                gp_inputs_dm.remove('remaining_var')
+
+            for gpi in gp_inputs_dm:
                 gp_tokens = get_gp_tokens(
                     gpi,
                     gpdb,
