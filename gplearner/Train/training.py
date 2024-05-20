@@ -72,6 +72,8 @@ def run_training(
     sample_by: Optional[str] = 'cell_type',
     geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
     seed: Optional[int] = 0,
+    supervised_rem_var: Optional[str] = None,
+    set_gpfinder_weight_decay: Optional[float] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -435,6 +437,7 @@ def run_training(
             n_condition_combined=n_condition_combined,
             total_n_genes=total_n_genes,
             weight_decay=weight_decay,
+            set_gpfinder_weight_decay=set_gpfinder_weight_decay,
         )
     else:
         # otherwise defaults to pytorch AdamW
@@ -454,6 +457,7 @@ def run_training(
             n_condition_combined=n_condition_combined,
             total_n_genes=total_n_genes,
             weight_decay=weight_decay,
+            set_gpfinder_weight_decay=set_gpfinder_weight_decay,
         )
 
     # For continuing training from checkpoint
@@ -495,6 +499,39 @@ def run_training(
                 param.requires_grad = False
 
     # For training global model after base model
+    if supervised_rem_var is not None:
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        print('Loading from checkpoint', checkpoint_path)
+        checkpoint = torch.load(latest_ckpt)
+        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
+        n_epochs = checkpoint['epoch'] + n_epochs
+
+        # reset set_gpfinder_weight_decay
+        gp_transformer.set_gpfinder_weight_decay = set_gpfinder_weight_decay
+
+        # freeze all GP
+        for name, param in gp_transformer.model.named_parameters():
+            if 'multi_gp_encoder' in name:
+                param.requires_grad = False
+
+        # unfreeze remaining variation
+        rem_var_idx = gp_transformer.model.gp_inputs.index('remaining_var')
+        for name, param in gp_transformer.model.named_parameters():
+            if f'multi_gp_encoder.encoder.{rem_var_idx}' in name:
+                param.requires_grad = True
+
+        # reinitialize weights for remaining variation
+        for name, param in gp_transformer.model.named_parameters():
+            if f'multi_gp_encoder.encoder.{rem_var_idx}' in name:
+                if 'weight' in name:
+                    if param.dim() >= 2:
+                        torch.nn.init.xavier_normal_(param)
+                    else:
+                        torch.nn.init.normal_(param, 0, 0.02)
+                if 'bias' in name:
+                    torch.nn.init.zeros_(param)
+
     # but finetuning original GP blocks
     if (global_training == 'finetune') | (global_training == 'finetune_global'):
         if path_to_base_model is None:

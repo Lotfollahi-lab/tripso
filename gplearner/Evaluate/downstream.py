@@ -906,7 +906,6 @@ def calculate_gp_attribution_scores(
     # Set up model
     # --------------------------
 
-    # TO DO : can we get this as config file?
     if model_type == 'Base':
         model = gpTransformerBase(
             database=gpdb,

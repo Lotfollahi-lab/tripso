@@ -102,6 +102,10 @@ class gpWrapper(nn.Module):
         # Store all genes included in at least one GP
         self.all_gp_tokens = set()
 
+        # Reset 'remaining var' --> will be added back in next step if needed
+        if 'remaining_var' in self.gp_inputs:
+            self.gp_inputs.remove('remaining_var')
+
         for i, gpi in enumerate(self.gp_inputs):
             gp_tokens = get_gp_tokens(
                 gpi,
@@ -868,7 +872,11 @@ class gpTransformerBase(nn.Module):
         gp_inputs = [x.replace('/', '_') for x in gp_inputs]
         database.columns = [x.replace('/', '_') for x in database.columns]
 
-        self.gpdb = database[gp_inputs]
+        gp_in_db = gp_inputs.copy()
+        if 'remaining_var' in gp_in_db:
+            gp_in_db.remove('remaining_var')
+
+        self.gpdb = database[gp_in_db]
         self.gp_inputs = gp_inputs
         self.gp_latent_size = gp_latent_size
         self.mgm_mask_ratio = mgm_mask_ratio
@@ -876,6 +884,7 @@ class gpTransformerBase(nn.Module):
         self.n_blocks = n_blocks
         self.attn_dropout = attn_dropout
         self.use_flash = use_flash
+
         if isinstance(gp_of_interest, str):
             gp_of_interest = [gp_of_interest]
         self.gp_of_interest = gp_of_interest
