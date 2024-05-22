@@ -83,6 +83,7 @@ class gpWrapper(nn.Module):
         use_flash,
         model_type,
         learn_new_gp,
+        hvg_list,
     ):
         super().__init__()
 
@@ -152,8 +153,7 @@ class gpWrapper(nn.Module):
 
         if self.add_remaining_var is not None:
             n_gp = len(self.gp_inputs)
-            gp_inputs.append('remaining_var')
-            self.gp_inputs = gp_inputs
+            self.gp_inputs = gp_inputs + ['remaining_var']
 
             # find non GP genes
             if gene_counts_df is None:
@@ -163,6 +163,23 @@ class gpWrapper(nn.Module):
                 )
 
             non_gp_tokens = set(gene_counts_df['token'].tolist()) - self.all_gp_tokens
+
+            if hvg_list is not None:
+                # convert to tokens
+                with open(gene_token_path, 'rb') as f:
+                    token_dict = pickle.load(f)
+
+                with open(gene_name_path, 'rb') as f:
+                    gene_name_dict = pickle.load(f)
+
+                if do_ensembl_conversion:
+                    hvg_list = [
+                        gene_name_dict[x] for x in hvg_list if x in gene_name_dict
+                    ]
+
+                hvg_list = [token_dict[x] for x in hvg_list if x in token_dict]
+
+                non_gp_tokens = non_gp_tokens.intersection(set(hvg_list))
 
             tokens_tensor = torch.tensor(list(non_gp_tokens), dtype=torch.int32)
 
@@ -803,6 +820,7 @@ class gpTransformerBase(nn.Module):
         model_type='Base',
         learn_new_gp=False,
         gp_of_interest=None,
+        hvg_list=None,
     ):
         """
         database :
@@ -904,6 +922,7 @@ class gpTransformerBase(nn.Module):
             use_flash=self.use_flash,
             model_type=model_type,
             learn_new_gp=learn_new_gp,
+            hvg_list=hvg_list,
         )
 
     def forward(

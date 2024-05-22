@@ -130,6 +130,7 @@ class scGPL(pl.LightningModule):
         split_label: str = 'train',
         hparam_save: str = 'all',
         set_gpfinder_weight_decay: Optional[float] = None,
+        calc_gp_loss: bool = True,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -146,6 +147,7 @@ class scGPL(pl.LightningModule):
         self.global_loss = global_loss
         self.return_classification_report = return_classification_report
         self.test_random_baseline = test_random_baseline
+        self.calc_gp_loss = calc_gp_loss
 
         if use_gp_similarity_loss and gp_similarity is None:
             raise ValueError(
@@ -910,7 +912,7 @@ class scGPL(pl.LightningModule):
 
         for i in range(len(self.model.gp_inputs)):
             # Loss
-            if (
+            if self.calc_gp_loss and (
                 self.model.multi_gp_encoder.encoder[i]
                 .blocks[0]
                 .attn.qkv.weight.requires_grad

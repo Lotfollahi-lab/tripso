@@ -134,6 +134,7 @@ class gpEval:
         geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
         path_to_trained_model: Optional[str] = None,
         seed: Optional[int] = 0,
+        hvg_path: Optional[str] = None,
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -177,6 +178,12 @@ class gpEval:
         else:
             self.gene_counts_df = None
 
+        if hvg_path is not None:
+            hvg = pd.read_csv(hvg_path)
+            hvg_list = hvg['hvg'].tolist()
+        else:
+            hvg_list = None
+
         if model_type == 'Base':
             self.model = gpTransformerBase(
                 gp_inputs=gp_inputs,
@@ -188,6 +195,7 @@ class gpEval:
                 gp_latent_size=gp_latent_size,
                 add_remaining_var=add_remaining_var,
                 geneformer_model=geneformer_model_path,
+                hvg_list=hvg_list,
             )
 
         elif model_type == 'Global':
@@ -206,6 +214,7 @@ class gpEval:
                 global_loss=global_loss,
                 reconstruction_loss=reconstruction_loss,
                 geneformer_model=geneformer_model_path,
+                hvg_list=hvg_list,
             )
 
             self.reconstruction_loss = reconstruction_loss
@@ -223,6 +232,7 @@ class gpEval:
                 num_heads=1,
                 add_remaining_var=add_remaining_var,
                 geneformer_model=geneformer_model_path,
+                hvg_list=hvg_list,
             )
 
         else:
@@ -842,6 +852,8 @@ def calculate_gp_attribution_scores(
     supervised_labels=None,
     model_type='Base',
     global_loss='supervised',
+    hvg_path=None,
+    use_flash=False,
 ):
     '''
     Calculate attribution scores for each gene program
@@ -879,6 +891,12 @@ def calculate_gp_attribution_scores(
     if gene_counts_df is not None:
         gene_counts_df = pd.read_csv(gene_counts_df)
 
+    if hvg_path is not None:
+        hvg = pd.read_csv(hvg_path)
+        hvg_list = hvg['hvg'].tolist()
+    else:
+        hvg_list = None
+
     txdata = iTxDataModule(
         folder=dataset_path,
         batch_size=1,
@@ -886,6 +904,7 @@ def calculate_gp_attribution_scores(
         gp=gp,
         gp_inputs=gp_inputs,
         add_remaining_var=add_remaining_var,
+        hvg_list=hvg_list,
         gpdb=gpdb,
         do_ensembl_conversion=(gene_format != 'ensembl'),
         filter_key=obs_key,
@@ -916,6 +935,8 @@ def calculate_gp_attribution_scores(
             gp_inputs=gp_inputs,
             gene_counts_df=gene_counts_df,
             add_remaining_var=add_remaining_var,
+            hvg_list=hvg_list,
+            use_flash=use_flash,
         )
     elif model_type == 'Global':
         model = gpTransformerGlobal(
@@ -929,6 +950,8 @@ def calculate_gp_attribution_scores(
             add_remaining_var=add_remaining_var,
             global_loss=global_loss,
             supervised_labels=supervised_labels,
+            hvg_list=hvg_list,
+            use_flash=use_flash,
         )
 
     gp_transformer = scGPL(
