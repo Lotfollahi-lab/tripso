@@ -1,11 +1,11 @@
  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
  ![python](https://img.shields.io/badge/Python-3.10-brightgreen)
 
-# GPformer: learning representations of single cell gene program activity 
+# GPformer: learning representations of single cell gene program activity
 
 ## 0. Introduction & Scope
 
-We introduce **GPformer**, a self-supervised approach for learning gene program activity at single cell resolution.  
+We introduce **GPformer**, a self-supervised approach for learning gene program activity at single cell resolution.
 
 
 ### Projects
@@ -14,7 +14,7 @@ Currently available:
 
 - [Modules](gplearner/Models/) :
   - Base model for learning individual GP representations
-  - Global model for learning cell representations based on gene expression reconstruction or supervised tasks 
+  - Global model for learning cell representations based on gene expression reconstruction or supervised tasks
 
 ### Discussion Board
 
@@ -71,7 +71,7 @@ import pandas as pd
 from gplearner.Evaluate.downstream import calculate_gp_attribution_scores
 
 
-# Directory paths for loading/saving 
+# Directory paths for loading/saving
 root_dir = 'path/to/directory'
 data_dir = os.path.join(root_dir, 'data/input_dataset')
 
@@ -168,7 +168,7 @@ gplearner.train(
 )
 
 ########################################################
-# Step 3: Visualize 
+# Step 3: Visualize
 ########################################################
 
 # downstream evaluation
@@ -180,7 +180,7 @@ gp_downstream = gplearner.gpEval(
     model_type=model_type,
     n_heads=n_heads,
     n_blocks=n_blocks,
-    global_attn_heads = global_attn_heads,    
+    global_attn_heads = global_attn_heads,
     global_loss = global_loss,
     reconstruction_loss = reconstruction_loss,
 )
@@ -210,7 +210,7 @@ for gp in gp_inputs:
         sample_by = 'celltype',
         encode_covariate = True
         )
-    
+
     gp_downstream.evaluate_embeddings(
         y_label = 'lineage',
         folder_path = os.path.join(output_dir, 'embeddings'),
@@ -220,7 +220,7 @@ for gp in gp_inputs:
         sample_by = 'celltype',
         encode_covariate = True
         )
-    
+
 # Using cell token
 gp_downstream.evaluate_embeddings(
     y_label = 'celltype',

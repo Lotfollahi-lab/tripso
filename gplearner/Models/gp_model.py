@@ -27,9 +27,7 @@ from ..Utils.utils import bin_gene_expression, get_gp_tokens
 ####################################
 
 GENE_NAME_FILE = 'path/to/geneformer/gene_name_dict.pkl'
-GENEFORMER_MODEL_PATH = (
-    'path/to/geneformer/model'
-)
+GENEFORMER_MODEL_PATH = 'path/to/geneformer/model'
 
 
 class gfWrapper(nn.Module):
