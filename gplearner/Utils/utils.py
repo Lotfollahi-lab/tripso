@@ -472,8 +472,7 @@ def pad_array(arr, desired_length=2048, padding_value=-100):
 # GP wrangling
 ###################################
 
-GENE_NAME_FILE = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl'  # noqa
-
+GENE_NAME_FILE = 'gene_name_dict.pkl'
 
 # for converting between gene formats
 # load gene token dict

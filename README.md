@@ -37,7 +37,7 @@ First, clone the repo and change to the project directory.
 git clone https://github.com/{repository name}
 ```
 
-The relevant use-cases and source codes are located in `lotfollibrary`.
+The relevant use-cases and source codes are located in `library`.
 Currently, we support **python >= 3.10**.
 It is recommended to install the required dependencies in a separate environment, e.g.
 via `conda`.

@@ -26,9 +26,9 @@ from ..Utils.utils import bin_gene_expression, get_gp_tokens
 # Geneformer
 ####################################
 
-GENE_NAME_FILE = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl'  # noqa
+GENE_NAME_FILE = 'path/to/geneformer/gene_name_dict.pkl'
 GENEFORMER_MODEL_PATH = (
-    '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/'
+    'path/to/geneformer/model'
 )
 
 
