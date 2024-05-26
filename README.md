@@ -1,23 +1,20 @@
  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
  ![python](https://img.shields.io/badge/Python-3.10-brightgreen)
 
-<p align="center">
-<img src=assets/  alt="Mo's Lab logo"/>
-</p>
-
-# gpleaner: learning representations of single cell gene program activity 
+# GPformer: learning representations of single cell gene program activity 
 
 ## 0. Introduction & Scope
 
-Introducing **gpLearner** 
+We introduce **GPformer**, a self-supervised approach for learning gene program activity at single cell resolution.  
 
 
 ### Projects
 
 Currently available:
 
-- [Modules](gplearner/Models/) : base model for learning individual GP representations
--  
+- [Modules](gplearner/Models/) :
+  - Base model for learning individual GP representations
+  - Global model for learning cell representations based on gene expression reconstruction or supervised tasks 
 
 ### Discussion Board
 
@@ -28,7 +25,8 @@ Please feel free to ask your questions there, share valuable insights and give u
 
 Please note that the contents of this repository are still in the experimental early
 stages and may be subject to significant changes, bugs, and limitations.
-We are continuously working on improving the **lotfollibrary** repository and welcome any
+
+We are continuously working on improving the repository and welcome any
 feedback or contributions. Thank you for your understanding.
 
 ## 1. Usage
@@ -36,7 +34,7 @@ feedback or contributions. Thank you for your understanding.
 First, clone the repo and change to the project directory.
 
 ```shell
-git clone https://github.com/amirvhd/lotfollibrary.git
+git clone https://github.com/{repository name}
 ```
 
 The relevant use-cases and source codes are located in `lotfollibrary`.
@@ -56,110 +54,231 @@ Dependencies are then installed via `pip`.
 pip install -r requirements.txt
 ```
 
-The `lotfollibrary` project is structured like a python package, which has the advantage of
+The current project is structured like a python package, which has the advantage of
 being able to **install** it and thus reuse modules or functions without worrying about
 absolute filepaths.
-An editable version of `lotfollibrary` is also installed over `pip`:
+An editable version of the package is also installed over `pip`:
 
 ```shell
 pip install -e .
 ```
 
-The project contains some jupyter notebooks, which were converted to python files
-due to better handling in the repository.
-These files end with `_nb.py` and can be converted back to a `.ipynb` file with
-`jupytext`:
-
-```shell
-jupytext --to ipynb --execute <your_file>_nb.py
-```
-
-The `--execute` flag triggers executing every cell during conversion.
-Alternatively, you can run the `_nb.py` files like every other python script.
-
 Example usage:
 ```
 import gplearner
 import os
+import pandas as pd
+from gplearner.Evaluate.downstream import calculate_gp_attribution_scores
+
 
 # Directory paths for loading/saving 
-root_dir="/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/scgpl_reproducibility/examples/synthetic"
-data_dir=os.path.join(root_dir, "data/input_dataset")
-output_dir=os.path.join(root_dir, "output_TEST")
+root_dir = 'path/to/directory'
+data_dir = os.path.join(root_dir, 'data/input_dataset')
+
+output_dir = os.path.join(root_dir, "output_base")
+gpdb_tag = "progeny" # identifier for gene program database
+gpdb_path = os.path.join(root_dir, f'gpdb_{gpdb_tag}.csv')
 
 # define model training arguments
-tissue = "synth"
+tissue = "lung"
 model_type = "Base"
 n_heads = 8
-mgm = 0.15
-n_epochs = 20
-batch_size = 128
-gene_format = "ensembl"
+n_blocks = 2
+weight_decay = 1e-4
+mgm = 0.75
+n_epochs = 15
+batch_size = 256
 gp_latent_size = 256
+lr_scheduler = 'CosineLRwithWarmUp'
 
 # load data and preprocess
-gplearner.pp_and_tokenize(root_dir = root_dir,
-                          vars_to_keep = ["cell_type", "condition", "n_counts"],
-                          subsample_by = ["cell_type", "condition"],
-                          n_cells_per_class = 20_000,
-                          n_splits = 2,
-                          name_tag = "synth",
+gplearner.pp_and_tokenize(root_dir=root_dir,
+                          adata_path = os.path.join(root_dir, 'data/lung.h5ad'),
+                          vars_to_keep = ['celltype', 'lineage', 'disease'],
+                          cov_to_encode = ['celltype', 'lineage', 'disease'],
+                          batch_keys = 'dataset',
+                          subsample_by = None,
+                          name_tag=gpdb_tag,
+                          #save_gp_genes_object = True
                           )
 
-# train model
+
+# train model
 gplearner.train(
-    dataset_path = data_dir,
-    gpdb_path = os.path.join(root_dir, 'gpdb_synth.csv'),
-    output_dir = output_dir,
-    batch_size = batch_size,
-    mgm = mgm,
-    tissue = tissue,
-    model_type = model_type, 
-    n_heads = n_heads,
-    n_epochs = n_epochs,
-    gene_format = gene_format,
-    gp_latent_size = gp_latent_size
+    dataset_path=data_dir,
+    gpdb_path=gpdb_path,
+    output_dir=output_dir,
+    batch_size=batch_size,
+    mgm=mgm,
+    tissue=tissue,
+    model_type=model_type,
+    n_heads=n_heads,
+    n_epochs=n_epochs,
+    gp_latent_size=gp_latent_size,
+    use_weighted_sampler = True,
+    sample_by = 'celltype_id',
+    use_flash = False,
+    n_blocks = n_blocks,
+    weight_decay = weight_decay,
+    lr_scheduler = lr_scheduler
 )
+
+########################################################
+# Step 2: learning global cell token
+########################################################
+
+# define model training arguments
+model_type = "Global"
+global_loss = 'reconstruction'
+reconstruction_loss = 'nb'
+n_epochs = 8
+batch_size = 128
+gp_latent_size = 256
+global_attn_heads = 8
+
+path_to_base_model = os.path.join(root_dir, 'output_base')
+
+output_dir = os.path.join(root_dir, "output_global")
+
+
+# train model
+gplearner.train(
+    dataset_path=data_dir,
+    gpdb_path=gpdb_path,
+    output_dir=output_dir,
+    batch_size=batch_size,
+    mgm=mgm,
+    tissue=tissue,
+    model_type=model_type,
+    n_heads=n_heads,
+    n_epochs=n_epochs,
+    gp_latent_size=gp_latent_size,
+    global_loss = global_loss,
+    reconstruction_loss = reconstruction_loss,
+    global_training = 'sequential',
+    global_attn_heads = global_attn_heads,
+    adata_path = os.path.join(root_dir, 'data/input_h5ad/lung_gp_genes.h5ad'),
+    path_to_base_model = path_to_base_model,
+    lr = 1e-3,
+    use_weighted_sampler = True,
+    sample_by = 'celltype_id',
+    use_flash = False,
+    n_blocks = n_blocks,
+    weight_decay = weight_decay
+)
+
+########################################################
+# Step 3: Visualize 
+########################################################
 
 # downstream evaluation
 gp_downstream = gplearner.gpEval(
-    dataset_path = data_dir,
-    gpdb_path = os.path.join(root_dir, 'gpdb_synth.csv'),
-    output_dir = output_dir,
-    tissue = tissue,
-    model_type = model_type,
-    n_heads = n_heads,
-    gene_format = gene_format
+    dataset_path=data_dir,
+    gpdb_path=gpdb_path,
+    output_dir=output_dir,
+    tissue=tissue,
+    model_type=model_type,
+    n_heads=n_heads,
+    n_blocks=n_blocks,
+    global_attn_heads = global_attn_heads,    
+    global_loss = global_loss,
+    reconstruction_loss = reconstruction_loss,
 )
 
-gp_downstream.generate_embeddings() 
+# Generate embeddings for train and test set
+for s in ['train', 'val', 'test']:
+    gp_downstream.generate_embeddings(split = s)
 
 # Generate UMAP for visualization
-gp_downstream.visualize(label_to_plot = ["cell_type", "condition"]) # ouput = UMAP
+gp_downstream.visualize(label_to_plot=["celltype", "lineage", 'Binary Stage'])
+gp_downstream.visualize(gp_to_plot = 'cell_token',
+                        label_to_plot=["celltype", 'Binary Stage'])
 
-# Quantative metrics:
-# scanpy ranked genes and clusterability
-# (could add scIB style metrics here)
-gp_downstream.feature_analysis(label_to_plot = ["cell_type", "condition"],
-                               rank_genes=True, 
-                               cluster_latent=True
-                               )
 
 # Using <GP> cls to classify output labels
-gp_downstream.logistic_regression(data_to_model = 'cell', labels = ['cell_type', 'condition'])
-gp_downstream.logistic_regression(data_to_model = 'cell', 
-                                  labels = ['cell_type', 'condition'],
-                                  gp_features = "concat"
-                                  )
+gpdb = pd.read_csv(gpdb_path)
+gp_inputs = list(gpdb.columns)
 
-# classifying gene embeddings to GP
-gp_downstream.logistic_regression(data_to_model = 'gene_singleGP')
-gp_downstream.logistic_regression(data_to_model = 'gene_mutliGP')
+for gp in gp_inputs:
+    gp = gp.replace('/', '_')
+    gp_downstream.evaluate_embeddings(
+        y_label = 'celltype',
+        folder_path = os.path.join(output_dir, 'embeddings'),
+        emb_label = gp,
+        output_dir = output_dir,
+        use_weighted_sampler = True,
+        sample_by = 'celltype',
+        encode_covariate = True
+        )
+    
+    gp_downstream.evaluate_embeddings(
+        y_label = 'lineage',
+        folder_path = os.path.join(output_dir, 'embeddings'),
+        emb_label = gp,
+        output_dir = output_dir,
+        use_weighted_sampler = True,
+        sample_by = 'celltype',
+        encode_covariate = True
+        )
+    
+# Using cell token
+gp_downstream.evaluate_embeddings(
+    y_label = 'celltype',
+    emb_label = 'cell_token',
+    folder_path = os.path.join(output_dir, 'embeddings'),
+    output_dir = output_dir,
+    use_weighted_sampler = True,
+    sample_by = 'celltype',
+    encode_covariate = True
+    )
 
+# Evaluate count reconstruction
+gp_downstream.test_random_baseline(adata_path = os.path.join(root_dir, 'data/input_h5ad/lung_gp_genes.h5ad'))
 
-# Not yet implemented:
-# gplearner.evaluate.visualize_attention()
-# gplearner.evaluate.analyze_attention()
+# Calculate gene -> GP attributions
+
+model_checkpoint = find_latest_file(output_dir, tissue, model_type)
+
+calculate_gp_attribution_scores(
+    gpdb_path = gpdb_path,
+    dataset_path = data_dir,
+    gp = gp,
+    data_split = 'test',
+    n_blocks = 2,
+    num_heads = 8,
+    gp_latent_size = 256,
+    model_checkpoint = model_checkpoint,
+    obs_key = 'lineage',
+    obs_value = 'Epithelial',
+    output_dir = output_dir,
+    total_n_cells=2000,
+    emb_dataset_path = os.path.join(output_dir, 'embeddings'),
+    model_type='Global',
+    global_loss = 'reconstruction',
+)
+
+# Calculate GP -> cell attributions
+
+for dis in ['Control', 'Disease']:
+    calculate_cell_token_attribution_scores(
+        gpdb_path = gpdb_path,
+        dataset_path = data_dir,
+        emb_dataset_path = os.path.join(output_dir, 'embeddings'),
+        data_split = 'test',
+        n_blocks = 1,
+        num_heads = 8,
+        gp_latent_size = 256,
+        model_checkpoint = model_checkpoint,
+        obs_key = 'disease_status',
+        obs_value = dis,
+        output_dir = output_dir,
+        global_loss = global_loss,
+        save_plot = True,
+        supervised_labels = supervised_labels_dict,
+        # for EmbEvaluator
+        emb_label = 'cell_token',
+        task = 'classification',
+    )
 
 
 ```

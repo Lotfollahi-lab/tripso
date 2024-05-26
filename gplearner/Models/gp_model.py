@@ -83,6 +83,7 @@ class gpWrapper(nn.Module):
         use_flash,
         model_type,
         learn_new_gp,
+        hvg_list,
     ):
         super().__init__()
 
@@ -101,6 +102,10 @@ class gpWrapper(nn.Module):
 
         # Store all genes included in at least one GP
         self.all_gp_tokens = set()
+
+        # Reset 'remaining var' --> will be added back in next step if needed
+        if 'remaining_var' in self.gp_inputs:
+            self.gp_inputs.remove('remaining_var')
 
         for i, gpi in enumerate(self.gp_inputs):
             gp_tokens = get_gp_tokens(
@@ -148,8 +153,7 @@ class gpWrapper(nn.Module):
 
         if self.add_remaining_var is not None:
             n_gp = len(self.gp_inputs)
-            gp_inputs.append('remaining_var')
-            self.gp_inputs = gp_inputs
+            self.gp_inputs = gp_inputs + ['remaining_var']
 
             # find non GP genes
             if gene_counts_df is None:
@@ -159,6 +163,23 @@ class gpWrapper(nn.Module):
                 )
 
             non_gp_tokens = set(gene_counts_df['token'].tolist()) - self.all_gp_tokens
+
+            if hvg_list is not None:
+                # convert to tokens
+                with open(gene_token_path, 'rb') as f:
+                    token_dict = pickle.load(f)
+
+                with open(gene_name_path, 'rb') as f:
+                    gene_name_dict = pickle.load(f)
+
+                if do_ensembl_conversion:
+                    hvg_list = [
+                        gene_name_dict[x] for x in hvg_list if x in gene_name_dict
+                    ]
+
+                hvg_list = [token_dict[x] for x in hvg_list if x in token_dict]
+
+                non_gp_tokens = non_gp_tokens.intersection(set(hvg_list))
 
             tokens_tensor = torch.tensor(list(non_gp_tokens), dtype=torch.int32)
 
@@ -799,6 +820,7 @@ class gpTransformerBase(nn.Module):
         model_type='Base',
         learn_new_gp=False,
         gp_of_interest=None,
+        hvg_list=None,
     ):
         """
         database :
@@ -868,7 +890,11 @@ class gpTransformerBase(nn.Module):
         gp_inputs = [x.replace('/', '_') for x in gp_inputs]
         database.columns = [x.replace('/', '_') for x in database.columns]
 
-        self.gpdb = database[gp_inputs]
+        gp_in_db = gp_inputs.copy()
+        if 'remaining_var' in gp_in_db:
+            gp_in_db.remove('remaining_var')
+
+        self.gpdb = database[gp_in_db]
         self.gp_inputs = gp_inputs
         self.gp_latent_size = gp_latent_size
         self.mgm_mask_ratio = mgm_mask_ratio
@@ -876,6 +902,7 @@ class gpTransformerBase(nn.Module):
         self.n_blocks = n_blocks
         self.attn_dropout = attn_dropout
         self.use_flash = use_flash
+
         if isinstance(gp_of_interest, str):
             gp_of_interest = [gp_of_interest]
         self.gp_of_interest = gp_of_interest
@@ -895,6 +922,7 @@ class gpTransformerBase(nn.Module):
             use_flash=self.use_flash,
             model_type=model_type,
             learn_new_gp=learn_new_gp,
+            hvg_list=hvg_list,
         )
 
     def forward(
@@ -1065,11 +1093,12 @@ class gpTransformerGlobal(gpTransformerBase):
             base_output['count_output'] = count_output
 
             if self.reconstruction_loss == 'binning':
-                binned = bin_gene_expression(
-                    input_dataset['counts'], n_bins=self.n_bins
-                )
-                binned = torch.tensor(binned).to(count_output.device)
-                base_output['true_bins'] = binned
+                if self.training:
+                    binned = bin_gene_expression(
+                        input_dataset['counts'], n_bins=self.n_bins
+                    )
+                    binned = torch.tensor(binned).to(count_output.device)
+                    base_output['true_bins'] = binned
 
         return base_output
 

@@ -42,6 +42,7 @@ from ..Models.gp_model import (
 )
 from ..Trainers.trainer import EmbEvaluator, scGPL
 from ..Utils.utils import (
+    MidpointNormalize,
     find_latest_file,
     remove_single_data_points,
     summarize_attributions,
@@ -133,6 +134,7 @@ class gpEval:
         geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
         path_to_trained_model: Optional[str] = None,
         seed: Optional[int] = 0,
+        hvg_path: Optional[str] = None,
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -176,6 +178,12 @@ class gpEval:
         else:
             self.gene_counts_df = None
 
+        if hvg_path is not None:
+            hvg = pd.read_csv(hvg_path)
+            hvg_list = hvg['hvg'].tolist()
+        else:
+            hvg_list = None
+
         if model_type == 'Base':
             self.model = gpTransformerBase(
                 gp_inputs=gp_inputs,
@@ -187,6 +195,7 @@ class gpEval:
                 gp_latent_size=gp_latent_size,
                 add_remaining_var=add_remaining_var,
                 geneformer_model=geneformer_model_path,
+                hvg_list=hvg_list,
             )
 
         elif model_type == 'Global':
@@ -205,6 +214,7 @@ class gpEval:
                 global_loss=global_loss,
                 reconstruction_loss=reconstruction_loss,
                 geneformer_model=geneformer_model_path,
+                hvg_list=hvg_list,
             )
 
             self.reconstruction_loss = reconstruction_loss
@@ -222,6 +232,7 @@ class gpEval:
                 num_heads=1,
                 add_remaining_var=add_remaining_var,
                 geneformer_model=geneformer_model_path,
+                hvg_list=hvg_list,
             )
 
         else:
@@ -841,6 +852,8 @@ def calculate_gp_attribution_scores(
     supervised_labels=None,
     model_type='Base',
     global_loss='supervised',
+    hvg_path=None,
+    use_flash=False,
 ):
     '''
     Calculate attribution scores for each gene program
@@ -878,6 +891,12 @@ def calculate_gp_attribution_scores(
     if gene_counts_df is not None:
         gene_counts_df = pd.read_csv(gene_counts_df)
 
+    if hvg_path is not None:
+        hvg = pd.read_csv(hvg_path)
+        hvg_list = hvg['hvg'].tolist()
+    else:
+        hvg_list = None
+
     txdata = iTxDataModule(
         folder=dataset_path,
         batch_size=1,
@@ -885,6 +904,7 @@ def calculate_gp_attribution_scores(
         gp=gp,
         gp_inputs=gp_inputs,
         add_remaining_var=add_remaining_var,
+        hvg_list=hvg_list,
         gpdb=gpdb,
         do_ensembl_conversion=(gene_format != 'ensembl'),
         filter_key=obs_key,
@@ -905,7 +925,6 @@ def calculate_gp_attribution_scores(
     # Set up model
     # --------------------------
 
-    # TO DO : can we get this as config file?
     if model_type == 'Base':
         model = gpTransformerBase(
             database=gpdb,
@@ -916,6 +935,8 @@ def calculate_gp_attribution_scores(
             gp_inputs=gp_inputs,
             gene_counts_df=gene_counts_df,
             add_remaining_var=add_remaining_var,
+            hvg_list=hvg_list,
+            use_flash=use_flash,
         )
     elif model_type == 'Global':
         model = gpTransformerGlobal(
@@ -929,6 +950,8 @@ def calculate_gp_attribution_scores(
             add_remaining_var=add_remaining_var,
             global_loss=global_loss,
             supervised_labels=supervised_labels,
+            hvg_list=hvg_list,
+            use_flash=use_flash,
         )
 
     gp_transformer = scGPL(
@@ -1360,3 +1383,126 @@ def calculate_cell_token_attribution_scores(
             os.path.join(output_dir, f'cell_token_attribution_scores_{obs_value}.pdf')
         )
         plt.close()
+
+
+def visualize_with_gene_exp(
+    output_dir,
+    adata_path,
+    gene_name,
+    gp_to_plot,
+    data_to_plot='test',
+    label_to_plot=None,
+    subsample=None,
+    obs_key=None,
+    obs_value=None,
+    obs_key2=None,
+    obs_value2=None,
+    return_adata=False,
+):
+    """
+    UMAP of GP embeddings
+    """
+    os.chdir(output_dir)
+
+    if label_to_plot is not None and isinstance(label_to_plot, str):
+        label_to_plot = [label_to_plot]
+
+    if isinstance(gp_to_plot, str):
+        gp_to_plot = [gp_to_plot]
+
+    if obs_value is not None and not isinstance(obs_value, list):
+        obs_value = [obs_value]
+
+    if obs_value2 is not None and not isinstance(obs_value2, list):
+        obs_value2 = [obs_value2]
+
+    emb = load_from_disk(os.path.join(output_dir, f'embeddings/{data_to_plot}_set'))
+
+    if subsample is not None:
+        emb = emb.shuffle(seed=0).select(range(subsample))
+
+    gene_exp = sc.read_h5ad(adata_path)
+    gene_exp = gene_exp[:, gene_exp.var.index == gene_name]
+
+    for gp in gp_to_plot:
+        x = np.array(emb[gp])
+
+        var_to_keep = ['idx']
+        if label_to_plot is not None:
+            var_to_keep += label_to_plot
+        if obs_key is not None:
+            var_to_keep.append(obs_key)
+        if obs_key2 is not None:
+            var_to_keep.append(obs_key2)
+
+        y = pd.DataFrame({k: emb[k] for k in emb.column_names if k in var_to_keep})
+
+        adata = sc.AnnData(X=x, obs=y)
+
+        # set obs name
+        adata.obs = adata.obs.set_index('idx')
+
+        if obs_key is not None:
+            adata = adata[adata.obs[obs_key].isin(obs_value)]
+
+        if obs_key2 is not None:
+            adata = adata[adata.obs[obs_key2].isin(obs_value2)]
+
+        gx = gene_exp[adata.obs.index, :]
+
+        adata.obs[f'{gene_name}_exp'] = gx.X.toarray().flatten()
+
+        if label_to_plot is not None:
+            for c in label_to_plot:
+                adata = remove_single_data_points(adata, c)
+
+        sc.pp.neighbors(adata, use_rep='X')
+        sc.tl.umap(adata)
+
+        plot_tag = '_'.join(obs_value) if obs_value is not None else ''
+        plot_tag += '_'.join(obs_value2) if obs_value2 is not None else ''
+
+        # Set up color palette as in
+        # https://scanpy-tutorials.readthedocs.io/en/latest/plotting/advanced.html#colors
+        vmin = adata.obs[f'{gene_name}_exp'].min()
+        vmax = adata.obs[f'{gene_name}_exp'].max()
+        vpadding = (vmax - vmin) * 0.1
+        norm = MidpointNormalize(vmin=vmin - vpadding, vmax=vmax + vpadding, midpoint=0)
+
+        # Plot umap
+        fig = sc.pl.umap(
+            adata,
+            color=f'{gene_name}_exp',
+            cmap='coolwarm',
+            # s=20,
+            norm=norm,
+            return_fig=True,
+            show=False,
+            frameon=False,
+        )
+
+        cmap_yticklabels = np.array([t._y for t in fig.axes[1].get_yticklabels()])
+        fig.axes[1].set_ylim(
+            0,  # for normalized gene expression
+            min(cmap_yticklabels[cmap_yticklabels > vmax]),
+        )
+
+        # Save the figure as a PDF
+        fig.savefig(
+            os.path.join(
+                output_dir, f'figures/umap_{gene_name}_exp_in_{gp}{plot_tag}.pdf'
+            ),
+            format='pdf',
+        )
+
+        if label_to_plot is not None:
+            for c in label_to_plot:
+                sc.pl.umap(
+                    adata,
+                    color=c,
+                    save=f'_{gp}_by_{c}{plot_tag}.pdf',
+                    frameon=False,
+                )
+
+    if return_adata:
+        return adata

@@ -12,7 +12,6 @@ import torch
 
 # set up wandb
 import wandb
-from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
@@ -27,10 +26,11 @@ from ..Trainers.trainer import scGPL
 from ..Utils.utils import find_latest_file
 
 
-def run_training(
+def run_training_from_select_gps(
     dataset_path: str,
     gpdb_path: str,
     output_dir: str,
+    gpdb_old: Optional[str] = None,
     gp_similarity_file: Optional[str] = None,
     batch_size: int = 32,
     mgm: float = 0.15,
@@ -43,26 +43,28 @@ def run_training(
     n_epochs: int = 20,
     gene_format: Literal['symbol', 'ensembl'] = 'symbol',
     model_type: str = 'Base',
+    model_type_old: str = 'Base',
     strategy: str = 'ddp_find_unused_parameters_true',
     gp_latent_size: int = 256,
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
     finetune_lr: float = 1e-5,
-    resume_training: Optional[bool] = False,
     gene_counts_df: Optional[str] = None,
-    gp_inputs: Optional[list] = None,
-    add_remaining_var: Optional[str] = None,
+    gp_inputs_old: Optional[list] = None,
+    gp_inputs_new: Optional[list] = None,
+    add_remaining_var_old: Optional[str] = None,
+    add_remaining_var_new: Optional[str] = None,
     frac_for_training: Optional[float] = 1.0,
     lambda_gp_similarity: Optional[float] = 1e-2,
     global_loss: str = 'supervised',
     classification_labels: Optional[list] = None,
     global_attn_heads: Optional[int] = 8,
     supervised_labels: Optional[dict] = None,
+    supervised_labels_old: Optional[dict] = None,
     global_masking_rate: Optional[float] = 0.15,
     global_training: str = 'simultaneous',
     path_to_base_model: str = 'path/to/pretrained/model',
     learn_new_gp: Optional[bool] = False,
-    gp_to_learn: list = ['novel_gp'],
     global_n_blocks: int = 1,
     reconstruction_loss: Optional[str] = 'mse',
     adata_path: Optional[str] = None,
@@ -74,7 +76,8 @@ def run_training(
     seed: Optional[int] = 0,
     supervised_rem_var: Optional[str] = None,
     set_gpfinder_weight_decay: Optional[float] = None,
-    hvg_df: Optional[str] = None,
+    hvg_df: Optional[str] = None, #noqa
+    calc_gp_loss: Optional[bool] = True, #noqa
 ):
     """
     Wrapper function for training gpLearner model
@@ -342,24 +345,18 @@ def run_training(
     # Load gpdb
     gpdb = pd.read_csv(gpdb_path)
 
+    if gpdb_old is not None:
+        gpdb_old = pd.read_csv(gpdb_old)
+    else:
+        gpdb_old = gpdb
+
     if gene_format == 'symbol':
         do_ensembl_conversion = True
     elif gene_format == 'ensembl':
         do_ensembl_conversion = False
 
-    # and similarity file
-    if gp_similarity_file is not None:
-        gp_similarity = np.load(gp_similarity_file, allow_pickle=True)
-        gp_similarity = gp_similarity.astype('float32')
-
-        # filter to match gp_inputs
-        if gp_inputs is not None:
-            # get indices for gp_inputs
-            gp_idx = [gpdb.columns.get_loc(gp) for gp in gp_inputs]
-            gp_similarity = gp_similarity[gp_idx, :][:, gp_idx]
-
-    else:
-        gp_similarity = None
+    # to do - maybe helpful to add back here?
+    gp_similarity = None
 
     if gene_counts_df is not None:
         gene_counts_df = pd.read_csv(gene_counts_df)
@@ -367,13 +364,15 @@ def run_training(
     if hvg_df is not None:
         hvg_df = pd.read_csv(hvg_df)
         hvg_list = hvg_df['hvg'].tolist()
+    else:
+        hvg_list = None
 
     ############################################################################
     # Train model
     ############################################################################
 
     if model_type == 'Base':
-        model = gpTransformerBase(
+        model_v1 = gpTransformerBase(
             gene_counts_df=gene_counts_df,
             database=gpdb,
             do_ensembl_conversion=do_ensembl_conversion,
@@ -382,8 +381,8 @@ def run_training(
             num_heads=n_heads,
             gp_latent_size=gp_latent_size,
             attn_dropout=attn_dropout,
-            gp_inputs=gp_inputs,
-            add_remaining_var=add_remaining_var,
+            gp_inputs=gp_inputs_new,
+            add_remaining_var=add_remaining_var_new,
             use_flash=use_flash,
             learn_new_gp=learn_new_gp,
             geneformer_model=geneformer_model_path,
@@ -391,12 +390,7 @@ def run_training(
         )
 
     elif model_type == 'Global':
-        # very slow --> provide dictionary as input
-        # if global_loss == 'supervised':
-        #     # set up dictionary with number of classes for supervised labels
-        #     supervised_labels = txdata.count_unique_classes(classification_labels)
-
-        model = gpTransformerGlobal(
+        model_v1 = gpTransformerGlobal(
             gene_counts_df=gene_counts_df,
             database=gpdb,
             do_ensembl_conversion=do_ensembl_conversion,
@@ -405,8 +399,8 @@ def run_training(
             num_heads=n_heads,
             gp_latent_size=gp_latent_size,
             attn_dropout=attn_dropout,
-            gp_inputs=gp_inputs,
-            add_remaining_var=add_remaining_var,
+            gp_inputs=gp_inputs_new,
+            add_remaining_var=add_remaining_var_new,
             supervised_labels=supervised_labels,
             global_attn_heads=global_attn_heads,
             global_loss=global_loss,
@@ -422,98 +416,121 @@ def run_training(
     else:
         raise ValueError('Model type must be Base or Global')
 
+    if model_type_old == 'Base':
+        model_v0 = gpTransformerBase(
+            gene_counts_df=gene_counts_df,
+            database=gpdb_old,
+            do_ensembl_conversion=do_ensembl_conversion,
+            n_blocks=n_blocks,
+            mgm_mask_ratio=mgm,
+            num_heads=n_heads,
+            gp_latent_size=gp_latent_size,
+            attn_dropout=attn_dropout,
+            gp_inputs=gp_inputs_old,
+            add_remaining_var=add_remaining_var_old,
+            use_flash=use_flash,
+            learn_new_gp=learn_new_gp,
+            geneformer_model=geneformer_model_path,
+            hvg_list=hvg_list,
+        )
+    elif model_type_old == 'Global':
+        model_v0 = gpTransformerGlobal(
+            gene_counts_df=gene_counts_df,
+            database=gpdb_old,
+            do_ensembl_conversion=do_ensembl_conversion,
+            n_blocks=n_blocks,
+            mgm_mask_ratio=mgm,
+            num_heads=n_heads,
+            gp_latent_size=gp_latent_size,
+            attn_dropout=attn_dropout,
+            gp_inputs=gp_inputs_old,
+            add_remaining_var=add_remaining_var_old,
+            supervised_labels=supervised_labels_old,
+            global_attn_heads=global_attn_heads,
+            global_loss=global_loss,
+            global_masking_rate=global_masking_rate,
+            global_n_blocks=global_n_blocks,
+            reconstruction_loss=reconstruction_loss,
+            total_n_genes=total_n_genes,
+            use_flash=use_flash,
+            geneformer_model=geneformer_model_path,
+            hvg_list=hvg_list,
+        )
+
     use_gp_similarity_loss = gp_similarity_file is not None
 
     # Set up gpTransformer main module
-    if strategy.startswith('deepspeed'):
-        # use deepspeed optimizer if using deepspeed strategy
-        gp_transformer = scGPL(
-            model,
-            model_type,
-            global_loss=global_loss,
-            total_epochs=n_epochs,
-            lr=lr,
-            finetune_lr=finetune_lr,
-            use_finetune_lr=global_training == 'finetune',
-            lr_scheduler=lr_scheduler,
-            optimizer=DeepSpeedCPUAdam,  # FusedAdam
-            use_gp_similarity_loss=use_gp_similarity_loss,
-            gp_similarity=gp_similarity,
-            output_dir=output_dir,
-            lambda_gp_similarity=lambda_gp_similarity,
-            n_condition_combined=n_condition_combined,
-            total_n_genes=total_n_genes,
-            weight_decay=weight_decay,
-            set_gpfinder_weight_decay=set_gpfinder_weight_decay,
-        )
-    else:
-        # otherwise defaults to pytorch AdamW
-        gp_transformer = scGPL(
-            model,
-            model_type,
-            global_loss=global_loss,
-            lr=lr,
-            finetune_lr=finetune_lr,
-            use_finetune_lr=global_training == 'finetune',
-            total_epochs=n_epochs,
-            lr_scheduler=lr_scheduler,
-            use_gp_similarity_loss=use_gp_similarity_loss,
-            gp_similarity=gp_similarity,
-            output_dir=output_dir,
-            lambda_gp_similarity=lambda_gp_similarity,
-            n_condition_combined=n_condition_combined,
-            total_n_genes=total_n_genes,
-            weight_decay=weight_decay,
-            set_gpfinder_weight_decay=set_gpfinder_weight_decay,
-        )
+    # for pretrained mode
+    gp_transformer_v0 = scGPL(
+        model_v0,
+        model_type_old,
+        global_loss=global_loss,
+        lr=lr,
+        finetune_lr=finetune_lr,
+        use_finetune_lr=global_training == 'finetune',
+        total_epochs=n_epochs,
+        lr_scheduler=lr_scheduler,
+        use_gp_similarity_loss=use_gp_similarity_loss,
+        gp_similarity=gp_similarity,
+        output_dir=output_dir,
+        lambda_gp_similarity=lambda_gp_similarity,
+        n_condition_combined=n_condition_combined,
+        total_n_genes=total_n_genes,
+        weight_decay=weight_decay,
+        set_gpfinder_weight_decay=set_gpfinder_weight_decay,
+    )
 
-    # For continuing training from checkpoint
-    if resume_training:
-        latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-        checkpoint_path = os.path.join(output_dir, latest_ckpt)
-        checkpoint = torch.load(checkpoint_path)
-        gp_transformer.load_state_dict(checkpoint['state_dict'])
-        n_epochs = checkpoint['epoch'] + n_epochs
+    gp_transformer = scGPL(
+        model_v1,
+        model_type,
+        global_loss=global_loss,
+        lr=lr,
+        finetune_lr=finetune_lr,
+        use_finetune_lr=global_training == 'finetune',
+        total_epochs=n_epochs,
+        lr_scheduler=lr_scheduler,
+        use_gp_similarity_loss=use_gp_similarity_loss,
+        gp_similarity=gp_similarity,
+        output_dir=output_dir,
+        lambda_gp_similarity=lambda_gp_similarity,
+        n_condition_combined=n_condition_combined,
+        total_n_genes=total_n_genes,
+        weight_decay=weight_decay,
+        set_gpfinder_weight_decay=set_gpfinder_weight_decay,
+        calc_gp_loss=calc_gp_loss,
+    )
 
-    # For training global model after base model
-    if global_training == 'sequential':
-        if path_to_base_model is None:
-            raise ValueError(
-                'Please provide path to pre-trained'
-                'gpTransformer Base model for sequential training'
-            )
-        # look for Base model to load
-        # if not found, this will raise an error
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        print('Loading from checkpoint', checkpoint_path)
-        checkpoint = torch.load(latest_ckpt)
-        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-        # n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
+    # ----- Load pretrained model -------
 
-        # reset output directory
-        gp_transformer.output_dir = output_dir
+    latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type_old)
+    checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+    gp_transformer_v0.load_state_dict(checkpoint['state_dict'])
 
-        # freeze base model
-        for name, param in gp_transformer.model.named_parameters():
-            if (
-                ('cell_token_learner' in name)
-                | ('clf_head' in name)
-                | ('count_head' in name)
-            ):
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+    # ----- Transfer weights -------
+    for i, gp in enumerate(gp_transformer.model.gp_inputs):
+        if gp in gp_transformer_v0.model.gp_inputs:
+            # find index in original model
+            idx = gp_transformer_v0.model.gp_inputs.index(gp)
+
+            # transfer weights
+            gp_transformer.model.multi_gp_encoder.encoder[
+                i
+            ] = gp_transformer_v0.model.multi_gp_encoder.encoder[idx]
+
+            # freeze weights for this block
+            for name, param in gp_transformer.model.named_parameters():
+                if f'multi_gp_encoder.encoder.{i}' in name:
+                    param.requires_grad = False
+        else:
+            continue
+
+    # ----- Select which GP to finetune -------
+
+    # TO DO: IMPLEMENT OTHER TRAINING APPROACHES HERW
 
     # For training global model after base model
     if supervised_rem_var is not None:
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        print('Loading from checkpoint', checkpoint_path)
-        checkpoint = torch.load(latest_ckpt)
-        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-        n_epochs = checkpoint['epoch'] + n_epochs
-
         # reset set_gpfinder_weight_decay
         gp_transformer.set_gpfinder_weight_decay = set_gpfinder_weight_decay
 
@@ -538,58 +555,6 @@ def run_training(
                         torch.nn.init.normal_(param, 0, 0.02)
                 if 'bias' in name:
                     torch.nn.init.zeros_(param)
-
-    # but finetuning original GP blocks
-    if (global_training == 'finetune') | (global_training == 'finetune_global'):
-        if path_to_base_model is None:
-            raise ValueError(
-                'Please provide path to pre-trained'
-                'gpTransformer Base model for finetuning'
-            )
-        # look for Base model to load
-        # if not found, this will raise an error
-        tag = 'Base' if global_training == 'finetune' else 'Global'
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, tag)
-        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        print('Loading from checkpoint', checkpoint_path)
-        checkpoint = torch.load(latest_ckpt)
-        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-        n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
-
-        # reset output directory
-        gp_transformer.output_dir = output_dir
-
-        # reset supervised labels
-        gp_transformer.model.supervised_labels = supervised_labels
-
-    # Learning new GP
-    if learn_new_gp:
-        # load pretrained model
-        checkpoint_path = find_latest_file(path_to_base_model, tissue, model_type)
-        checkpoint = torch.load(checkpoint_path)
-        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-        n_epochs = checkpoint['epoch'] + n_epochs
-        gp_transformer.output_dir = output_dir
-
-        # get indices of GP to learn
-        if isinstance(gp_to_learn, str):
-            gp_to_learn = [gp_to_learn]
-        gp_idx = [
-            gp_transformer.model.gp_inputs.index(gp)
-            for gp in gp_to_learn
-            if gp in gp_transformer.model.gp_inputs
-        ]
-
-        # freeze all GP
-        for name, param in gp_transformer.model.named_parameters():
-            if 'multi_gp_encoder' in name:
-                param.requires_grad = False
-
-        # unfreeze new GP
-        for i in gp_idx:
-            for name, param in gp_transformer.model.named_parameters():
-                if f'multi_gp_encoder.encoder.{i}' in name:
-                    param.requires_grad = True
 
     # check number of available GPUs
     num_gpus = torch.cuda.device_count()

@@ -13,6 +13,7 @@ import pandas as pd
 import scanpy as sc
 from datasets import concatenate_datasets, load_from_disk
 from geneformer import TranscriptomeTokenizer
+from scipy.sparse import issparse
 
 from ..Utils.utils import do_balanced_downsampling_anndata, encode_labels
 from .gp_curation import make_gpdb
@@ -42,6 +43,8 @@ def pp_and_tokenize(
     save_intermediate: Optional[bool] = False,
     hvg_batch_key: Optional[str] = None,
     save_gp_genes_object: Optional[bool] = False,
+    pp_cellxgene: Optional[bool] = False,
+    calculate_hvg: Optional[bool] = True,
 ):
     """
     Preprocess and tokenize data for scGPL
@@ -107,6 +110,13 @@ def pp_and_tokenize(
                 lambda x: '_'.join(x), axis=1
             )
 
+        if pp_cellxgene:
+            adata.var['ensembl_id'] = adata.var.index
+            if issparse(adata.X):
+                adata.obs['n_counts'] = adata.X.sum(axis=1).A1
+            else:
+                adata.obs['n_counts'] = adata.X.sum(axis=1)
+
         # optionally downsample
         if subsample_by is not None:
             print('Subsampling anndata object')
@@ -130,7 +140,7 @@ def pp_and_tokenize(
             os.makedirs(os.path.join(root_dir, 'data/input_h5ad'), exist_ok=True)
             adata.write_h5ad(os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad'))
 
-        if 'highly_variable' not in adata.var.columns:
+        if calculate_hvg and ('highly_variable' not in adata.var.columns):
             if hvg_batch_key is None:
                 if batch_keys is not None:
                     hvg_batch_key = 'batch_key'
@@ -301,7 +311,7 @@ def pp_and_tokenize(
         if not gp_genes_union:
             raise ValueError(
                 'No GP genes found in the dataset'
-                'Do GP genes format match adata indices?'
+                '\nDo GP genes format match adata indices?'
             )
         adata = adata[:, list(gp_genes_union)]
 
