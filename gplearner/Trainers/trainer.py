@@ -559,6 +559,7 @@ class scGPL(pl.LightningModule):
 
         if self.model_type == 'Global':
             if self.global_loss == 'supervised':
+                mean_acc = 0
                 for t in self.model.supervised_tasks:
                     # calculate accuracy
                     pred = torch.stack(self.val_clf_pred[t], dim=-1).T
@@ -575,6 +576,18 @@ class scGPL(pl.LightningModule):
                         logger=True,
                         sync_dist=True,
                     )
+
+                    mean_acc += acc
+
+                self.log(
+                    'val/accuracy',
+                    mean_acc / len(self.model.supervised_tasks),
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
 
                 self.val_clf_pred = {t: [] for t in self.model.supervised_tasks}
                 self.val_clf_true = {t: [] for t in self.model.supervised_tasks}

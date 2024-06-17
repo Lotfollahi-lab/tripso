@@ -76,8 +76,8 @@ def run_training_from_select_gps(
     seed: Optional[int] = 0,
     supervised_rem_var: Optional[str] = None,
     set_gpfinder_weight_decay: Optional[float] = None,
-    hvg_df: Optional[str] = None, #noqa
-    calc_gp_loss: Optional[bool] = True, #noqa
+    hvg_df: Optional[str] = None,  # noqa
+    calc_gp_loss: bool = True,
 ):
     """
     Wrapper function for training gpLearner model
@@ -362,8 +362,8 @@ def run_training_from_select_gps(
         gene_counts_df = pd.read_csv(gene_counts_df)
 
     if hvg_df is not None:
-        hvg_df = pd.read_csv(hvg_df)
-        hvg_list = hvg_df['hvg'].tolist()
+        hvg_input = pd.read_csv(hvg_df)
+        hvg_list = hvg_input['hvg'].tolist()
     else:
         hvg_list = None
 
