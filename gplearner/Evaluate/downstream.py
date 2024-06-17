@@ -135,6 +135,7 @@ class gpEval:
         path_to_trained_model: Optional[str] = None,
         seed: Optional[int] = 0,
         hvg_path: Optional[str] = None,
+        hparam_save: Optional[str] = 'all',
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -262,11 +263,15 @@ class gpEval:
         # for compatability with gpGlobal init
         self.global_loss = global_loss
 
+        # to avoid error when using geneformer finetuned model
+        self.hparam_save = hparam_save
+
         # Set up gpTransformer lightning module
         self.model_type = model_type
         return_classification_report = True if supervised_labels is not None else False
         self.gp_transformer = self._init_trainer(
-            return_classification_report=return_classification_report
+            return_classification_report=return_classification_report,
+            hparam_save=self.hparam_save,
         )
 
     def _init_trainer(
@@ -281,10 +286,9 @@ class gpEval:
         test_random_baseline=False,
         save_emb=False,
         split_label=None,
+        hparam_save='ignore_model',  # fine for test time?
     ):
-        if (
-            self.model_type != 'Mean'
-        ):  # no training required if just averaging geneformer embeddings
+        if self.model_type != 'Mean':
             gp_transformer = scGPL(
                 self.model,
                 self.model_type,
@@ -299,7 +303,8 @@ class gpEval:
                 test_random_baseline=test_random_baseline,
                 save_emb=save_emb,
                 split_label=split_label,
-            ).load_from_checkpoint(self.checkpoint_path)
+                hparam_save=hparam_save,
+            ).load_from_checkpoint(self.checkpoint_path, hparam_save=hparam_save)
         else:
             gp_transformer = scGPL(
                 self.model,
@@ -335,7 +340,9 @@ class gpEval:
         Save embeddings as Dataset
         '''
 
-        gp_transformer = self._init_trainer(save_emb=True, split_label=split)
+        gp_transformer = self._init_trainer(
+            save_emb=True, split_label=split, hparam_save=self.hparam_save
+        )
 
         txdata = txDataModule(
             folder=self.dataset_path,
