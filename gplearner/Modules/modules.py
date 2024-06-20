@@ -397,12 +397,13 @@ class gpTransformerEncoder(nn.Module):
         output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
 
         if attn is not None:
-            # TO DO - OPTION TO RETURN INTERMEDIATE ATTENTION LAYERS
-            # TO DO - OPTION TO RETURN FULL ATTENTION MATRIX NOT JUST CLS
+            # Now returns full attention matrix not just CLS
+            # for attributions, use gradcam
+            # could implement method for cls attention scores as well
             # print('Attention shape', attn.shape)
             # (batch, heads, 1 + tokens, 1 + tokens)
             # print('<cls>', attn[:, :, 0, :].shape)
-            output['attention'] = attn[:, :, 0, :]
+            output['attention'] = attn
 
         if return_gene_embeddings:
             output['gene_embeddings'] = x[:, 1:, :]

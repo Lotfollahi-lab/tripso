@@ -33,6 +33,7 @@ from ..Utils.losses import (
 from ..Utils.utils import (
     CosineLRwithWarmUp,
     ensembl_to_name,
+    get_gp_tokens,
     one_hot_encoder,
     token_to_gene,
     wrangle_classification_report,
@@ -101,9 +102,16 @@ class scGPL(pl.LightningModule):
         global_loss: str = 'supervised',
         lambda_clf_loss=1,
         output_dir: str = '/path/to/output',
+        # GP similarity -> force cosine similarity of <GP> towards
+        # similarity (defined by GP overlap)
         use_gp_similarity_loss: bool = False,
         lambda_gp_similarity=1e-2,
         gp_similarity: Optional[str] = None,
+        # Use GO -> regularize attention matrix towards GO importance
+        use_go_similarity_loss: bool = False,
+        lambda_go_similarity=1e-2,
+        go_similarity: Optional[pd.DataFrame] = None,
+        go_similarity_gp: Optional[str] = 'hvg',  # GP to apply GO similarity loss:
         lr: float = 1e-3,
         weight_decay: float = 0,
         optimizer: Union[
@@ -156,6 +164,48 @@ class scGPL(pl.LightningModule):
 
         self.use_gp_similarity_loss = use_gp_similarity_loss
         self.gp_similarity = gp_similarity
+        self.lambda_gp_similarity = lambda_gp_similarity
+        self.go_similarity_gp = go_similarity_gp
+
+        if use_go_similarity_loss and go_similarity is None:
+            raise ValueError(
+                'If use_go_similarity_loss is True, go_similarity_file must be provided'
+            )
+
+        self.use_go_similarity_loss = use_go_similarity_loss
+        self.lambda_go_similarity = lambda_go_similarity
+        self.go_similarity_gp = go_similarity_gp
+
+        if go_similarity is not None:
+            go_similarity_tensor = torch.tensor(go_similarity.values).float()
+            self.register_buffer('go_similarity', go_similarity_tensor)
+
+            self.go_genes = go_similarity.index
+
+            # Check order of genes
+            gp_index = self.model.gp_inputs.index(go_similarity_gp)
+            gp_tokens = (
+                (getattr(self.model.multi_gp_encoder, f'gp{gp_index}_tokens'))
+                .cpu()
+                .numpy()
+            )
+
+            # Convert go genes to tokens
+            go_tokens = np.array(
+                list(
+                    get_gp_tokens(
+                        pd.Series(go_similarity.index),
+                        do_ensembl_conversion=self.model.do_ensembl_conversion,
+                        gp_name=go_similarity_gp,
+                    )
+                )
+            )
+
+            # Check identical:
+            assert np.all(gp_tokens == go_tokens), 'GO genes do not match GP tokens'
+
+        else:
+            self.go_similarity = go_similarity
 
         self.lambda_gp_similarity = lambda_gp_similarity
 
@@ -653,6 +703,11 @@ class scGPL(pl.LightningModule):
                     )
 
     def _test_step_attn(self, batch, batch_idx):
+        raise NotImplementedError(
+            'Need new function for getting attention matrix'
+            ' for cls (currently returns (gene,gene) matrix)'
+        )
+
         if self.gp == 'cell_token':
             output = self.model.get_cell_token_attention(batch)
         else:
@@ -973,6 +1028,16 @@ class scGPL(pl.LightningModule):
             gp_similarity_loss = self.compute_gp_similarity_loss(output['z'])
             loss += self.lambda_gp_similarity * gp_similarity_loss
             holder['gp_similarity_loss'] = gp_similarity_loss
+
+        if self.use_go_similarity_loss:
+            # only implemented for single GP for now
+            # otherwise would need one matrix per GP
+            gp_idx = self.model.gp_inputs.index(self.go_similarity_gp)
+            output_attn = self.model.get_last_self_attn(batch, gp_idx)
+
+            go_similarity_loss = F.mse_loss(output_attn['attn'], self.go_similarity)
+            loss += self.lambda_go_similarity * go_similarity_loss
+            holder['go_similarity_loss'] = go_similarity_loss
 
         if self.model_type == 'Global':
             if self.global_loss == 'supervised':
