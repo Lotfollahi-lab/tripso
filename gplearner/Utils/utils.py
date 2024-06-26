@@ -5,9 +5,12 @@ import os
 import pickle
 import random
 import re
+import sys
+import tarfile
 import warnings
 from collections import Counter
 from itertools import combinations
+from multiprocessing import Pool
 from typing import List, Optional
 
 import anndata as ad
@@ -17,6 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
+import requests  # type: ignore
 import scanpy as sc
 import seaborn as sns
 import torch
@@ -489,7 +493,11 @@ token_to_gene = {v: k for k, v in token_dictionary.items()}
 
 
 def get_gp_tokens(
-    GP, db, do_ensembl_conversion, gene_counts_df, gene_token_path, gene_name_path
+    gp_genes,
+    do_ensembl_conversion,
+    gp_name,
+    gene_token_path=TOKEN_DICTIONARY_FILE,
+    gene_name_path=GENE_NAME_FILE,
 ):
     """
     Get genes that belong to input GP program
@@ -505,8 +513,8 @@ def get_gp_tokens(
     do_ensembl_conversion : bool
         Whether to convert gene names to ensembl IDs before converting to tokens
 
-    gene_counts_df : pd.DataFrame
-        DataFrame containing counts of each gene in the dataset
+    gp_name : str
+        Label for the GP of interest (only used for printing)
 
     """
     with open(gene_token_path, 'rb') as f:
@@ -516,15 +524,8 @@ def get_gp_tokens(
     with open(gene_name_path, 'rb') as f:
         name_dictionary = pickle.load(f)
 
-    # Check if GP exists in the reactome columns
-    if GP not in db.columns:
-        raise ValueError(f'{GP} not found in {db.columns}.')
-
-    # Extract the column 'GP' from the DataFrame
-    gp_column = db[GP]
-
     # Remove missing values (NaN) from the column
-    genes = list(gp_column.dropna())
+    genes = list(gp_genes.dropna())
 
     # Convert gene names to Ensembl IDs
     if do_ensembl_conversion:
@@ -539,7 +540,7 @@ def get_gp_tokens(
 
     # Unknown values later cause issues for indexing -> remove
     if 'Unknown' in gp_tokens:
-        print(f"In {GP}, dropped {gp_tokens.count('Unknown')} unknown genes")
+        print(f"In {gp_name}, dropped {gp_tokens.count('Unknown')} unknown genes")
         while 'Unknown' in gp_tokens:
             gp_tokens.remove('Unknown')
 
@@ -1197,6 +1198,149 @@ def intersection_heatmap(df, save_to=None):
 
     if save_to:
         plt.savefig(save_to, dpi=300)
+
+
+# ------------------------------------------------------------------
+# Gears utils functions
+# from https://github.com/snap-stanford/GEARS/blob/master/gears/utils.py
+# Accessed 17/06/2024
+# ------------------------------------------------------------------
+
+
+def print_sys(s):
+    """system print
+
+    Args:
+        s (str): the string to print
+    """
+    print(s, flush=True, file=sys.stderr)
+
+
+def tar_data_download_wrapper(url, save_path, data_path):
+    """
+    Wrapper for tar file download
+
+    Args:
+        url (str): the url of the dataset
+        save_path (str): the path where the file is donwloaded
+        data_path (str): the path to save the extracted dataset
+
+    """
+
+    if os.path.exists(save_path):
+        print_sys('Found local copy...')
+    else:
+        dataverse_download(url, save_path + '.tar.gz')
+        print_sys('Extracting tar file...')
+        with tarfile.open(save_path + '.tar.gz') as tar:
+            tar.extractall(path=data_path)
+        print_sys('Done!')
+
+
+def dataverse_download(url, save_path):
+    """
+    Dataverse download helper with progress bar
+
+    Args:
+        url (str): the url of the dataset
+        path (str): the path to save the dataset
+    """
+
+    if os.path.exists(save_path):
+        print_sys('Found local copy...')
+    else:
+        print_sys('Downloading...')
+        response = requests.get(url, stream=True)
+        total_size_in_bytes = int(response.headers.get('content-length', 0))
+        block_size = 1024
+        progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
+        with open(save_path, 'wb') as file:
+            for data in response.iter_content(block_size):
+                progress_bar.update(len(data))
+                file.write(data)
+        progress_bar.close()
+
+
+def make_GO(data_path, pert_list, data_name, num_workers=25, save=True):
+    """
+    Creates Gene Ontology graph from a custom set of genes
+    """
+
+    # fname = './data/go_essential_' + data_name + '.csv'
+    fname = 'go_essential_' + data_name + '.csv'
+    if os.path.exists(fname):
+        return pd.read_csv(fname)
+
+    with open(os.path.join(data_path, 'gene2go_all.pkl'), 'rb') as f:
+        gene2go = pickle.load(f)
+
+    gene2go = {i: gene2go[i] for i in pert_list if i in gene2go.keys()}
+    print(f'{len(pert_list) - len(gene2go)} genes not found in gene2go file')
+
+    print('Creating custom GO graph, this can take a few minutes')
+    with Pool(num_workers) as p:
+        all_edge_list = list(
+            tqdm(
+                p.imap(get_GO_edge_list, ((g, gene2go) for g in gene2go.keys())),
+                total=len(gene2go.keys()),
+            )
+        )
+    edge_list = []
+    for i in all_edge_list:
+        edge_list = edge_list + i
+
+    df_edge_list = pd.DataFrame(edge_list).rename(
+        columns={0: 'source', 1: 'target', 2: 'importance'}
+    )
+
+    if save:
+        print('Saving edge_list to file')
+        df_edge_list.to_csv(fname, index=False)
+
+    return df_edge_list
+
+
+def get_GO_edge_list(args):
+    """
+    Get gene ontology edge list
+    """
+    g1, gene2go = args
+    edge_list = []
+    for g2 in gene2go.keys():
+        score = len(gene2go[g1].intersection(gene2go[g2])) / len(
+            gene2go[g1].union(gene2go[g2])
+        )
+        if score > 0.1:
+            edge_list.append((g1, g2, score))
+    return edge_list
+
+
+def get_similarity_network(
+    data_path, data_name, k, default_pert_graph=True, pert_list=None
+):
+    '''
+    Modified to only include GO version
+    '''
+
+    if default_pert_graph:
+        server_path = 'https://dataverse.harvard.edu/api/access/datafile/6934319'
+        tar_data_download_wrapper(
+            server_path, os.path.join(data_path, 'go_essential_all'), data_path
+        )
+        df_jaccard = pd.read_csv(
+            os.path.join(data_path, 'go_essential_all/go_essential_all.csv')
+        )
+
+    else:
+        df_jaccard = make_GO(data_path, pert_list, data_name)
+
+    df_out = (
+        df_jaccard.groupby('target')
+        .apply(lambda x: x.nlargest(k + 1, ['importance']))
+        .reset_index(drop=True)
+    )
+
+    return df_out
 
 
 #################

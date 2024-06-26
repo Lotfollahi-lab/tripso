@@ -109,10 +109,10 @@ class gpWrapper(nn.Module):
 
         for i, gpi in enumerate(self.gp_inputs):
             gp_tokens = get_gp_tokens(
-                gpi,
-                database,
+                database[gpi],
                 do_ensembl_conversion,
-                gene_counts_df,
+                gpi,
+                # gene_counts_df, # could edit to rm rare tokens?
                 gene_token_path,
                 gene_name_path,
             )
@@ -456,27 +456,26 @@ class gpWrapper(nn.Module):
         return output
 
     def get_last_self_attn(self, gf_emb, input_dataset, gp_idx):
-        # randomly mask genes only during training :
-        inference = False
+        '''
+        If multilpe blocks, get attn matrix from last transformer block
+        '''
+        if self.training:
+            inference = False
+        else:
+            inference = True
+
+        gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
 
         # Extract embeddings for the gene program of interest
         emb_pad, tokens_pad, _, attn_mask = self.build_input_matrix(
             gf_emb,  # geneformer embeddings
             input_dataset['input_ids'],
-            getattr(self, f'gp{gp_idx}_tokens'),
-            gp_idx=gp_idx,
+            gp_tokens,
         )
 
-        # Encode tokens
-        tokens_pad = (
-            tokens_pad.cpu()
-            .apply_(
-                lambda x: getattr(self, f'gp{gp_idx}_tokens_encoded')[x]
-                if x in getattr(self, f'gp{gp_idx}_tokens_encoded').keys()
-                else -100
-            )
-            .to(emb_pad.device)
-        )
+        # Encode tokens for MLM
+        tokens_pad_unencoded = tokens_pad
+        tokens_pad = getattr(self, f'gp{gp_idx}_tokens_lookup')[tokens_pad].long()
 
         # get token GP representation, logits for gene level prediction,
         # and gene_labels where masked genes = -100
@@ -488,57 +487,63 @@ class gpWrapper(nn.Module):
             return_attention=True,
         )
 
-        # Reorder attention matrix so genes are in the same order in each cell
         attn = encoder_output['attention']
 
         # Average attention across heads
         attn = attn.mean(dim=1)
 
-        # For the padding tokens, attention will be 0
-        # so we can randomly reassign gene tokens to help with ranking
-        all_gp_tokens = set(getattr(self, f'gp{gp_idx}_tokens_encoded').values())
-        # add one for cls
-        all_gp_tokens.add(max(all_gp_tokens) + 1)
+        # Drop cls for gene-gene attention scores
+        attn = attn[:, 1:, 1:]
 
-        holder = []
+        # Reorder attention matrix so GP genes are in the same order in each cell
+        # Step 0 : Encode reference tokens for indexing
+        genes = getattr(self, f'gp{gp_idx}_tokens_lookup')[gp_tokens].long()
 
-        for i in range(tokens_pad.shape[0]):
-            # because we've not done any masking,
-            # all the -100 tokens will be at the end
-            x = tokens_pad[i, :]
-            labeled_genes_idx = x != -100
+        # Step 1: Replace padding tokens (-100) with a unique index value
+        # that can be ignored during reordering
+        n = genes.shape[0]
+        unique_padding_index = n
+        tokens_pad = tokens_pad.clone()
+        tokens_pad[tokens_pad == -100] = unique_padding_index
 
-            values_to_fill_in = all_gp_tokens - set(
-                x[labeled_genes_idx].cpu().numpy().tolist()
-            )
-            new_labels = torch.tensor(list(values_to_fill_in)).to(x.device)
+        # Step 2: Create a tensor to hold the new order indices
+        # Use advanced indexing to map the new order according to hvg
+        gene_map = torch.full((n + 1,), unique_padding_index, dtype=torch.long).to(
+            tokens_pad.device
+        )
+        gene_map[:n] = genes
 
-            new_padded = torch.concat([x[labeled_genes_idx], new_labels], dim=0)
+        new_order_indices = gene_map[tokens_pad]
 
-            # cls is at first position in embedding
-            # so we move the label the first position
-            new_padded = torch.cat([new_padded[-1].unsqueeze(0), new_padded[:-1]])
+        # Step 3: Use the reordered indices to permute the attn tensor
+        # Mask out padding tokens before reordering
+        valid_mask = new_order_indices != unique_padding_index
 
-            holder.append(new_padded)
+        # Create the batch index tensor
+        b = attn.shape[0]
+        batch_indices = torch.arange(b).unsqueeze(1).expand(b, n)
 
-        tokens_pad = torch.stack(holder).long().to(attn.device)
+        # Permute rows
+        attn_reordered = attn[
+            batch_indices,
+            new_order_indices.where(valid_mask, torch.zeros_like(new_order_indices)),
+        ]
+
+        # Permute columns
+        attn_reordered = attn_reordered.transpose(1, 2)[
+            batch_indices,
+            new_order_indices.where(valid_mask, torch.zeros_like(new_order_indices)),
+        ].transpose(1, 2)
+
+        # Set attention scores for padding tokens to 0
+        padding_mask = tokens_pad_unencoded == unique_padding_index
+
+        attn_reordered[padding_mask.unsqueeze(2).expand_as(attn_reordered)] = 0
+        attn_reordered[padding_mask.unsqueeze(1).expand_as(attn_reordered)] = 0
 
         # Reorder attention matrix so genes are in the same order in each cell
-        # Create an index tensor to sort tokens_pad
-        _, indices = torch.sort(tokens_pad, dim=1)
-
-        # Apply sorting to the corresponding rows in x
-        attn = torch.gather(attn, 1, indices)
-        tokens_pad = torch.gather(tokens_pad, 1, indices)
-
-        # the cls label is 1 + number of gp
-        # so sorting will move it to last position
-        # bring back to the start
-        attn = torch.cat([attn[:, -1].unsqueeze(1), attn[:, :-1]], dim=1)
-        tokens_pad = torch.cat([tokens_pad[-1].unsqueeze(0), tokens_pad[:-1]])
-
         output = {
-            'attn': csr_matrix(attn.detach().cpu().numpy()),
+            'attn': attn_reordered,
         }
 
         return output
@@ -966,14 +971,17 @@ class gpTransformerBase(nn.Module):
 
         return output
 
-    def get_last_self_attn(self, input_dataset, gp):
-        gp_idx = self.gp_inputs.index(gp)
-        # input is tokenized dataset
-        emb_out = self.gf_wrapper(input_dataset)
+    def get_last_self_attn(self, input_dataset, gp_idx):
+        if self.training:
+            inference = False
+        else:
+            inference = True
 
-        # Extract attention matrix for our GP of interest
+        # Get Geneformer embeddings
+        gf_emb = self.gf_wrapper(input_dataset, inference)
+
         output = self.multi_gp_encoder.get_last_self_attn(
-            emb_out, input_dataset, gp_idx=gp_idx
+            gf_emb, input_dataset, gp_idx=gp_idx
         )
 
         return output

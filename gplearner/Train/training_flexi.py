@@ -78,6 +78,10 @@ def run_training_from_select_gps(
     set_gpfinder_weight_decay: Optional[float] = None,
     hvg_df: Optional[str] = None,  # noqa
     calc_gp_loss: bool = True,
+    use_go_similarity_loss: bool = False,
+    lambda_go_similarity: float = 1e-2,
+    go_similarity_path: Optional[str] = None,
+    go_similarity_gp: Optional[str] = 'hvg',
 ):
     """
     Wrapper function for training gpLearner model
@@ -266,6 +270,14 @@ def run_training_from_select_gps(
                 'lambda_gp_similarity': lambda_gp_similarity,
                 'use_flash': use_flash,
                 'weight_decay': weight_decay,
+                'use_weighted_sampler': use_weighted_sampler,
+                'sample_by': sample_by,
+                'geneformer_model': geneformer_model_path,
+                'seed': seed,
+                'use_go_similarity_loss': use_go_similarity_loss,
+                'lambda_go_similarity': lambda_go_similarity,
+                'go_similarity_path': go_similarity_path,
+                'go_similarity_gp': go_similarity_gp,
             }
         )
 
@@ -357,6 +369,10 @@ def run_training_from_select_gps(
 
     # to do - maybe helpful to add back here?
     gp_similarity = None
+
+    # GO similarity
+    if use_go_similarity_loss:
+        go_similarity = pd.read_csv(go_similarity_path, index_col=0)
 
     if gene_counts_df is not None:
         gene_counts_df = pd.read_csv(gene_counts_df)
@@ -498,6 +514,10 @@ def run_training_from_select_gps(
         weight_decay=weight_decay,
         set_gpfinder_weight_decay=set_gpfinder_weight_decay,
         calc_gp_loss=calc_gp_loss,
+        use_go_similarity_loss=use_go_similarity_loss,
+        go_similarity=go_similarity,
+        lambda_go_similarity=lambda_go_similarity,
+        go_similarity_gp=go_similarity_gp,
     )
 
     # ----- Load pretrained model -------
@@ -527,7 +547,7 @@ def run_training_from_select_gps(
 
     # ----- Select which GP to finetune -------
 
-    # TO DO: IMPLEMENT OTHER TRAINING APPROACHES HERW
+    # TO DO: IMPLEMENT OTHER TRAINING APPROACHES HERE
 
     # For training global model after base model
     if supervised_rem_var is not None:
