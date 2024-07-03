@@ -42,7 +42,7 @@ class AnnDataset(Dataset):
         )
 
         self.n_condition_combined = len(
-            np.unique(self.dataloader.get_label_weights('batch_key'))
+            np.unique(self.dataloader.get_merged_labels('batch_key'))
         )
 
     def __len__(self):

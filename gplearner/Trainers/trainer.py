@@ -981,9 +981,13 @@ class scGPL(pl.LightningModule):
         for i in range(len(self.model.gp_inputs)):
             # Loss
             if self.calc_gp_loss and (
-                self.model.multi_gp_encoder.encoder[i]
-                .blocks[0]
-                .attn.qkv.weight.requires_grad
+                (
+                    self.model.multi_gp_encoder.encoder[i]
+                    .blocks[0]
+                    .attn.qkv.weight.requires_grad
+                    # add back training for PEFT
+                )
+                or (self.model.multi_gp_encoder.num_virtual_tokens > 0)
             ):
                 loss_i = F.cross_entropy(
                     output['logits_lm_list'][i].reshape(

@@ -318,10 +318,23 @@ class gpTransformerEncoder(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def random_gene_masking(self, x, gene_labels):
+    def random_gene_masking(self, x, gene_labels, unmask_last_n=0):
         x = x.clone()
         gene_labels = gene_labels.clone()
+
+        # Ensure the last n tokens are never masked
+        if unmask_last_n > 0:
+            # Create a mask to prevent masking of the last n tokens
+            protect_mask = torch.zeros_like(gene_labels, dtype=torch.bool)
+            protect_mask[:, -unmask_last_n:] = True
+
         full_mask, mask, random_mask = self.mask_generator(gene_labels)
+
+        # Apply the protect_mask to ensure last n tokens are not masked
+        if unmask_last_n > 0:
+            full_mask &= ~protect_mask
+            mask &= ~protect_mask
+            random_mask &= ~protect_mask
 
         # Apply the mask to the target tensor
         # if mask = 1, we want to 0 out the token embedding
@@ -377,10 +390,13 @@ class gpTransformerEncoder(nn.Module):
         attn_mask,
         return_attention,
         return_gene_embeddings=False,
+        num_virtual_tokens=0,
     ):
         # Random masking:
         if inference is False:
-            x, gene_labels = self.random_gene_masking(x, gene_labels)
+            x, gene_labels = self.random_gene_masking(
+                x, gene_labels, unmask_last_n=num_virtual_tokens
+            )
 
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
@@ -406,7 +422,11 @@ class gpTransformerEncoder(nn.Module):
             output['attention'] = attn
 
         if return_gene_embeddings:
-            output['gene_embeddings'] = x[:, 1:, :]
+            output['gene_embeddings'] = (
+                x[:, 1:-num_virtual_tokens, :]
+                if num_virtual_tokens > 0
+                else x[:, 1:, :]
+            )
 
         return output
 
@@ -445,6 +465,71 @@ class PretrainedEmbeddings(nn.Module):
     def forward(self):
         embeddings = self.word_embeddings + self.position_embeddings
         return embeddings
+
+
+class PromptEncoder(torch.nn.Module):
+    """
+    The prompt encoder network that is used to generate the
+    virtual token embeddings for p-tuning.
+
+    Adapted from
+    https://github.com/huggingface/peft/blob/main/src/peft/tuners/p_tuning/model.py
+
+    Accessed 26.06.2024
+
+    **Attributes**:
+        - **embedding** (`torch.nn.Embedding`) --
+            The embedding layer of the prompt encoder.
+        - **mlp_head** (`torch.nn.Sequential`) --
+            The MLP head of the prompt encoder if `inference_mode=False`.
+        - **lstm_head** (`torch.nn.LSTM`) --
+            The LSTM head of the prompt encoder if `inference_mode=False` and
+        `encoder_reparameterization_type="LSTM"`.
+        - **token_dim** (`int`) --
+            The hidden embedding dimension of the base transformer model.
+        - **input_size** (`int`) -- The input size of the prompt encoder.
+        - **output_size** (`int`) -- The output size of the prompt encoder.
+        - **hidden_size** (`int`) -- The hidden size of the prompt encoder.
+        - **total_virtual_tokens** (`int`): The total number of virtual tokens of the
+        prompt encoder.
+        - **encoder_type** --> here MLP only (recommended)
+
+    Input shape: (`batch_size`, `total_virtual_tokens`)
+
+    Output shape: (`batch_size`, `total_virtual_tokens`, `token_dim`)
+    """
+
+    def __init__(
+        self,
+        token_dim: int,
+        encoder_hidden_size: int,
+        num_virtual_tokens: int,
+    ):
+        super().__init__()
+        self.token_dim = token_dim
+        self.input_size = token_dim
+        self.output_size = token_dim
+        self.hidden_size = encoder_hidden_size
+        self.total_virtual_tokens = num_virtual_tokens
+
+        # embedding
+        self.embedding = torch.nn.Embedding(self.total_virtual_tokens, self.token_dim)
+
+        layers = [
+            torch.nn.Linear(self.input_size, self.hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(self.hidden_size, self.hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(self.hidden_size, self.output_size),
+        ]
+        self.mlp_head = torch.nn.Sequential(*layers)
+
+    def forward(self, indices):
+        input_embeds = self.embedding(indices)
+
+        output_embeds = self.mlp_head(input_embeds)
+
+        return output_embeds
 
 
 if __name__ == '__main__':

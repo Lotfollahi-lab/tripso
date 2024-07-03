@@ -17,6 +17,7 @@ from transformers import BertForMaskedLM
 from ..Modules.modules import (
     Mlp,
     PretrainedEmbeddings,
+    PromptEncoder,
     gpTransformerEncoder,
 )
 from ..Utils.geneformer_utils import EmbExtractor
@@ -84,6 +85,7 @@ class gpWrapper(nn.Module):
         model_type,
         learn_new_gp,
         hvg_list,
+        num_virtual_tokens,
     ):
         super().__init__()
 
@@ -210,6 +212,19 @@ class gpWrapper(nn.Module):
                 )
             )
 
+        self.num_virtual_tokens = num_virtual_tokens
+
+        if self.num_virtual_tokens > 0:
+            # freeze all other parameters
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+
+            self.prompt_encoder = PromptEncoder(
+                token_dim=self.gp_latent_size,
+                encoder_hidden_size=self.gp_latent_size,
+                num_virtual_tokens=self.num_virtual_tokens,
+            )
+
     def build_input_matrix(
         self, gf, input_ids, gp_tokens, crop_to_gp_len=True, is_gpfinder=False
     ):
@@ -328,6 +343,13 @@ class gpWrapper(nn.Module):
             [torch.ones_like(attn_mask)[:, 0].unsqueeze(-1), attn_mask], dim=-1
         )
 
+        # never mask prompt tokens
+        if self.num_virtual_tokens > 0:
+            attn_mask = torch.cat(
+                [attn_mask, torch.ones_like(attn_mask)[:, : self.num_virtual_tokens]],
+                dim=-1,
+            )
+
         return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
 
     def forward(
@@ -379,6 +401,33 @@ class gpWrapper(nn.Module):
                 tokens_pad_unencoded = tokens_pad
                 tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
 
+                # Optionally append tokens for PEFT
+                if self.num_virtual_tokens > 0:
+                    virtual_tokens = self.prompt_encoder(
+                        torch.arange(self.num_virtual_tokens, device=emb_pad.device)
+                    )
+
+                    # Expand virtual tokens to match emb_pad
+                    virtual_tokens = virtual_tokens.unsqueeze(0).expand(
+                        emb_pad.shape[0], -1, -1
+                    )
+
+                    emb_pad = torch.cat([virtual_tokens, emb_pad], dim=1)
+
+                    # Add to labels as well
+                    tokens_pad = torch.cat(
+                        [
+                            torch.tensor(
+                                [-100] * self.num_virtual_tokens,
+                                device=tokens_pad.device,
+                            )
+                            .unsqueeze(0)
+                            .expand(tokens_pad.shape[0], -1),
+                            tokens_pad,
+                        ],
+                        dim=1,
+                    )
+
                 # get token GP representation, logits for gene level prediction,
                 # and gene_labels where masked genes = -100
                 encoder_output = self.encoder[i](
@@ -388,6 +437,7 @@ class gpWrapper(nn.Module):
                     inference=inference,
                     return_attention=return_attention,
                     return_gene_embeddings=return_gene_embeddings,
+                    num_virtual_tokens=self.num_virtual_tokens,
                 )
 
                 gp_token_list.append(encoder_output['cls'])
@@ -826,6 +876,7 @@ class gpTransformerBase(nn.Module):
         learn_new_gp=False,
         gp_of_interest=None,
         hvg_list=None,
+        num_virtual_tokens=0,
     ):
         """
         database :
@@ -928,6 +979,7 @@ class gpTransformerBase(nn.Module):
             model_type=model_type,
             learn_new_gp=learn_new_gp,
             hvg_list=hvg_list,
+            num_virtual_tokens=num_virtual_tokens,
         )
 
     def forward(

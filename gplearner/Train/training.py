@@ -60,7 +60,7 @@ def run_training(
     supervised_labels: Optional[dict] = None,
     global_masking_rate: Optional[float] = 0.15,
     global_training: str = 'simultaneous',
-    path_to_base_model: str = 'path/to/pretrained/model',
+    path_to_base_model: Optional[str] = None,  # 'path/to/pretrained/model',
     learn_new_gp: Optional[bool] = False,
     gp_to_learn: list = ['novel_gp'],
     global_n_blocks: int = 1,
@@ -75,6 +75,7 @@ def run_training(
     supervised_rem_var: Optional[str] = None,
     set_gpfinder_weight_decay: Optional[float] = None,
     hvg_df: Optional[str] = None,
+    num_virtual_tokens: int = 0,
 ):
     """
     Wrapper function for training gpLearner model
@@ -276,6 +277,7 @@ def run_training(
                 'lambda_gp_similarity': lambda_gp_similarity,
                 'use_flash': use_flash,
                 'weight_decay': weight_decay,
+                'num_virtual_tokens': num_virtual_tokens,
             }
         )
 
@@ -403,6 +405,7 @@ def run_training(
             learn_new_gp=learn_new_gp,
             geneformer_model=geneformer_model_path,
             hvg_list=hvg_list,
+            num_virtual_tokens=num_virtual_tokens,
         )
 
     elif model_type == 'Global':
@@ -432,6 +435,7 @@ def run_training(
             use_flash=use_flash,
             geneformer_model=geneformer_model_path,
             hvg_list=hvg_list,
+            num_virtual_tokens=num_virtual_tokens,
         )
 
     else:
@@ -482,10 +486,43 @@ def run_training(
             set_gpfinder_weight_decay=set_gpfinder_weight_decay,
         )
 
+    if num_virtual_tokens > 0:
+        if path_to_base_model is None:
+            raise ValueError(
+                'Please provide path to pre-trained gpTransformer Base model'
+            )
+        # for adding prompt tokens
+        # try finding with relevant model
+        # TO DO : tidy this up
+        try:
+            latest_ckpt = find_latest_file(
+                path_to_base_model, tissue, model_type
+            )  # type: ignore[arg-type]
+        except Exception as e:
+            print(f"Error encountered: {e}. Retrying with model_type='Base'")
+            latest_ckpt = find_latest_file(
+                path_to_base_model, tissue, 'Base'
+            )  # type: ignore[arg-type]
+
+        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
+
+        # freeze everything but prompt tokens
+        for name, param in gp_transformer.model.named_parameters():
+            if 'prompt' in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
+        n_epochs = checkpoint['epoch'] + n_epochs
+
     # For continuing training from checkpoint
     if resume_training:
         latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-        checkpoint_path = os.path.join(output_dir, latest_ckpt)
+        checkpoint_path = os.path.join(
+            path_to_base_model, latest_ckpt  # type: ignore[arg-type]
+        )
         checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
         gp_transformer.load_state_dict(checkpoint['state_dict'])
         n_epochs = checkpoint['epoch'] + n_epochs

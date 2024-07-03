@@ -136,6 +136,7 @@ class gpEval:
         seed: Optional[int] = 0,
         hvg_path: Optional[str] = None,
         hparam_save: Optional[str] = 'all',
+        num_virtual_tokens: Optional[int] = 0,
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -197,6 +198,7 @@ class gpEval:
                 add_remaining_var=add_remaining_var,
                 geneformer_model=geneformer_model_path,
                 hvg_list=hvg_list,
+                num_virtual_tokens=num_virtual_tokens,
             )
 
         elif model_type == 'Global':
@@ -216,6 +218,7 @@ class gpEval:
                 reconstruction_loss=reconstruction_loss,
                 geneformer_model=geneformer_model_path,
                 hvg_list=hvg_list,
+                num_virtual_tokens=num_virtual_tokens,
             )
 
             self.reconstruction_loss = reconstruction_loss
@@ -861,6 +864,7 @@ def calculate_gp_attribution_scores(
     global_loss='supervised',
     hvg_path=None,
     use_flash=False,
+    num_virtual_tokens=0,
 ):
     '''
     Calculate attribution scores for each gene program
@@ -944,6 +948,7 @@ def calculate_gp_attribution_scores(
             add_remaining_var=add_remaining_var,
             hvg_list=hvg_list,
             use_flash=use_flash,
+            num_virtual_tokens=num_virtual_tokens,
         )
     elif model_type == 'Global':
         model = gpTransformerGlobal(
@@ -959,6 +964,7 @@ def calculate_gp_attribution_scores(
             supervised_labels=supervised_labels,
             hvg_list=hvg_list,
             use_flash=use_flash,
+            num_virtual_tokens=num_virtual_tokens,
         )
 
     gp_transformer = scGPL(
@@ -1138,6 +1144,7 @@ def calculate_cell_token_attribution_scores(
     gene_counts_df=None,
     add_remaining_var=None,
     gene_format='symbol',
+    num_virtual_tokens=0,
 ):
     # --------------------------
     # Set seed
@@ -1213,6 +1220,7 @@ def calculate_cell_token_attribution_scores(
         reconstruction_loss=reconstruction_loss,
         supervised_labels=supervised_labels,
         gene_counts_df=gene_counts_df,
+        num_virtual_tokens=num_virtual_tokens,
     )
 
     gp_transformer = scGPL(
