@@ -401,6 +401,41 @@ class gpTransformerEncoder(nn.Module):
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
 
+        # # Optionally move virtual tokens to start of the sequence
+        # if num_virtual_tokens > 0:
+        #     # Extract the <cls> token
+        #     # shapes indicate shape of line below
+        #     # Shape: [batch_size, 1, feature_dim]
+        #     cls_token = x[:, :1, :]
+        #     # Extract the virtual tokens from the end
+        #     # Shape: [batch_size, num_virtual_tokens, feature_dim]
+        #     virtual_tokens = x[:, -num_virtual_tokens:, :]
+        #     # Extract the gene tokens from the remaining part
+        #     # [batch_size, sequence_length - num_virtual_tokens - 1, feature_dim]
+        #     gene_tokens = x[:, 1:-num_virtual_tokens, :]
+        #     # Concatenate the parts in the required order:
+        #     # [<cls>, <virtual tokens>, <gene_tokens>]
+        #     # Shape: [batch_size, sequence_length, feature_dim]
+        #     x = torch.cat([cls_token, virtual_tokens, gene_tokens], dim=1)
+
+        #     # And the same for gene labels
+        #     cls_label = gene_labels[:, :1]  # Shape: [batch_size, 1]
+        #     # Shape: [batch_size, num_virtual_tokens]
+        #     virtual_labels = gene_labels[:, -num_virtual_tokens:]
+        #     # Shape: [batch_size, sequence_length - num_virtual_tokens - 1]
+        #     g_labels = gene_labels[:, 1:-num_virtual_tokens]
+        #     # Shape: [batch_size, sequence_length]
+        #     gene_labels = torch.cat([cls_label, virtual_labels, g_labels], dim=1)
+
+        #     # And attention mask
+        #     cls_mask = attn_mask[:, :1]  # Shape: [batch_size, 1]
+        #     # Shape: [batch_size, num_virtual_tokens]
+        #     virtual_mask = attn_mask[:, -num_virtual_tokens:]
+        #     # Shape: [batch_size, sequence_length - num_virtual_tokens - 1]
+        #     g_mask = attn_mask[:, 1:-num_virtual_tokens]
+        #     # Shape: [batch_size, sequence_length]
+        #     attn_mask = torch.cat([cls_mask, virtual_mask, g_mask], dim=1)
+
         for blk in self.blocks:
             x, attn = blk(x, attn_mask=attn_mask, return_attention=return_attention)
 

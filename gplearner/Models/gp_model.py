@@ -221,7 +221,7 @@ class gpWrapper(nn.Module):
 
             self.prompt_encoder = PromptEncoder(
                 token_dim=self.gp_latent_size,
-                encoder_hidden_size=self.gp_latent_size,
+                encoder_hidden_size=int(self.gp_latent_size * 0.5),
                 num_virtual_tokens=self.num_virtual_tokens,
             )
 
@@ -428,6 +428,9 @@ class gpWrapper(nn.Module):
                         dim=1,
                     )
 
+                else:
+                    virtual_tokens = None
+
                 # get token GP representation, logits for gene level prediction,
                 # and gene_labels where masked genes = -100
                 encoder_output = self.encoder[i](
@@ -461,6 +464,7 @@ class gpWrapper(nn.Module):
             'gene_emb_list': gene_emb_list,
             'gene_original_labels_list': gene_original_labels_list,
             'num_genes_per_cell_list': num_genes_per_cell_list,
+            'virtual_tokens': virtual_tokens,
         }
 
         if return_gene_embeddings:
@@ -608,6 +612,7 @@ class cellWrapper(nn.Module):
         gp_latent_size,
         global_masking_rate,
         use_flash,
+        num_virtual_tokens,
     ):
         super().__init__()
 
@@ -615,6 +620,7 @@ class cellWrapper(nn.Module):
         self.num_heads = num_heads
         self.gp_inputs = gp_inputs
         self.gp_latent_size = gp_latent_size
+        self.num_virtual_tokens = num_virtual_tokens
 
         self.encoder = gpTransformerEncoder(
             n_gp_tokens=len(self.gp_inputs),
@@ -680,6 +686,36 @@ class cellWrapper(nn.Module):
         z, gp_labels, attn_mask = self.build_input_matrix(
             z=x['z'], num_genes_per_cell_list=x['num_genes_per_cell_list']
         )
+
+        # Optionally append virtual tokens
+        if self.num_virtual_tokens > 0:
+            virtual_tokens = x['virtual_tokens']
+
+            z = torch.cat([virtual_tokens, z], dim=1)
+
+            # Add to labels as well
+            gp_labels = torch.cat(
+                [
+                    torch.tensor(
+                        [-100] * self.num_virtual_tokens, device=gp_labels.device
+                    )
+                    .unsqueeze(0)
+                    .expand(gp_labels.shape[0], -1),
+                    gp_labels,
+                ],
+                dim=1,
+            )
+
+            # And attention mask
+            attn_mask = torch.cat(
+                [
+                    attn_mask,
+                    torch.ones(attn_mask.shape[0], self.num_virtual_tokens).to(
+                        attn_mask.device
+                    ),
+                ],
+                dim=1,
+            )
 
         encoder_output = self.encoder(
             z,
@@ -1055,9 +1091,15 @@ class gpTransformerGlobal(gpTransformerBase):
         global_n_blocks=1,
         use_flash=False,
         n_bins=10,
+        num_virtual_tokens=0,
         **kwargs,
     ):
-        super().__init__(use_flash=use_flash, model_type='Global', **kwargs)
+        super().__init__(
+            use_flash=use_flash,
+            model_type='Global',
+            num_virtual_tokens=num_virtual_tokens,
+            **kwargs,
+        )
         self.global_attn_heads = global_attn_heads
 
         self.global_loss = global_loss
@@ -1069,6 +1111,7 @@ class gpTransformerGlobal(gpTransformerBase):
             num_heads=self.global_attn_heads,
             global_masking_rate=global_masking_rate,
             use_flash=use_flash,
+            num_virtual_tokens=num_virtual_tokens,
         )
 
         if self.global_loss == 'supervised':

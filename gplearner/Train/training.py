@@ -69,13 +69,17 @@ def run_training(
     use_flash: Optional[bool] = False,
     weight_decay: float = 0.0,
     use_weighted_sampler: Optional[bool] = False,
-    sample_by: Optional[str] = 'cell_type',
+    sample_by: Optional[str] = None,
     geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
     seed: Optional[int] = 0,
     supervised_rem_var: Optional[str] = None,
     set_gpfinder_weight_decay: Optional[float] = None,
     hvg_df: Optional[str] = None,
     num_virtual_tokens: int = 0,
+    num_nodes: int = 1,
+    # for large scale pretraining:
+    limit_val_batches: Optional[float] = 1.0,
+    val_check_interval: Optional[float] = 1.0,
 ):
     """
     Wrapper function for training gpLearner model
@@ -166,6 +170,21 @@ def run_training(
     use_flash:
         whether to use flash attention in transformer block
 
+    limit_val_batches : float
+        (Union[int, float, None]) How often to check the validation set.
+        Pass a float in the range [0.0, 1.0] to check after a fraction of
+        the training epoch. Pass an int to check after a fixed number of
+        training batches. An int value can only be higher than the number
+        of training batches when check_val_every_n_epoch=None, which
+        validates after every N training batches across epochs or during
+        iteration-based training. Default: 1.0.
+    val_check_interval : float
+        (Optional[int]) Perform a validation loop every after every N
+        training epochs. If None, validation will be done solely based
+        on the number of training batches, requiring val_check_interval
+        to be an integer value. Default: 1.
+        from https://github.com/EveryVoiceTTS/EveryVoice/issues/204
+
     """
     ##########################################
     # Setup
@@ -230,8 +249,8 @@ def run_training(
             )
     elif model_type == 'Base':
         early_stopping_callback = EarlyStopping(
-            monitor='train/loss_epoch',
-            patience=5,
+            monitor='train/loss_step',
+            patience=50,
             mode='min',
         )
 
@@ -488,21 +507,21 @@ def run_training(
 
     if num_virtual_tokens > 0:
         if path_to_base_model is None:
-            raise ValueError(
-                'Please provide path to pre-trained gpTransformer Base model'
-            )
-        # for adding prompt tokens
-        # try finding with relevant model
-        # TO DO : tidy this up
-        try:
-            latest_ckpt = find_latest_file(
-                path_to_base_model, tissue, model_type
-            )  # type: ignore[arg-type]
-        except Exception as e:
-            print(f"Error encountered: {e}. Retrying with model_type='Base'")
-            latest_ckpt = find_latest_file(
-                path_to_base_model, tissue, 'Base'
-            )  # type: ignore[arg-type]
+            raise ValueError('Please provide path to pre-trained GPformer model')
+        # # for adding prompt tokens
+        # # try finding with relevant model
+        # # TO DO : tidy this up
+        # try:
+        #     latest_ckpt = find_latest_file(
+        #         path_to_base_model, tissue, model_type
+        #     )  # type: ignore[arg-type]
+        # except Exception as e:
+        #     print(f"Error encountered: {e}. Retrying with model_type='Base'")
+        #     latest_ckpt = find_latest_file(
+        #         path_to_base_model, tissue, 'Base'
+        #     )  # type: ignore[arg-type]
+
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Global')
 
         checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
         checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
@@ -515,71 +534,75 @@ def run_training(
             else:
                 param.requires_grad = False
 
-        n_epochs = checkpoint['epoch'] + n_epochs
-
-    # For continuing training from checkpoint
-    if resume_training:
-        latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-        checkpoint_path = os.path.join(
-            path_to_base_model, latest_ckpt  # type: ignore[arg-type]
-        )
-        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-        gp_transformer.load_state_dict(checkpoint['state_dict'])
-        n_epochs = checkpoint['epoch'] + n_epochs
+        # n_epochs = checkpoint['epoch'] + n_epochs
 
     else:
-        # For training global model after base model
-        if global_training == 'sequential':
-            if path_to_base_model is None:
-                raise ValueError(
-                    'Please provide path to pre-trained'
-                    'gpTransformer Base model for sequential training'
-                )
-            # look for Base model to load
-            # if not found, this will raise an error
-            latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-            checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-            print('Loading from checkpoint', checkpoint_path)
-            checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
-            gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-            # n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
+        # For continuing training from checkpoint
+        if resume_training:
+            latest_ckpt = find_latest_file(output_dir, tissue, model_type)
+            checkpoint_path = os.path.join(
+                path_to_base_model, latest_ckpt  # type: ignore[arg-type]
+            )
+            checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+            gp_transformer.load_state_dict(checkpoint['state_dict'])
+            # n_epochs = checkpoint['epoch'] + n_epochs
 
-            # reset output directory
-            gp_transformer.output_dir = output_dir
+        else:
+            # For training global model after base model
+            if global_training == 'sequential':
+                if path_to_base_model is None:
+                    raise ValueError(
+                        'Please provide path to pre-trained'
+                        'gpTransformer Base model for sequential training'
+                    )
+                # look for Base model to load
+                # if not found, this will raise an error
+                latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+                checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+                print('Loading from checkpoint', checkpoint_path)
+                checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
+                gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
 
-            # freeze base model
-            for name, param in gp_transformer.model.named_parameters():
-                if (
-                    ('cell_token_learner' in name)
-                    | ('clf_head' in name)
-                    | ('count_head' in name)
-                ):
-                    param.requires_grad = True
-                else:
-                    param.requires_grad = False
+                # reset output directory
+                gp_transformer.output_dir = output_dir
 
-        # finetuning original GP blocks
-        elif (global_training == 'finetune') | (global_training == 'finetune_global'):
-            if path_to_base_model is None:
-                raise ValueError(
-                    'Please provide path to pre-trained'
-                    'gpTransformer Base model for finetuning'
-                )
-            # look for Base model to load
-            # if not found, this will raise an error
-            tag = 'Base' if global_training == 'finetune' else 'Global'
-            latest_ckpt = find_latest_file(path_to_base_model, tissue, tag)
-            checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-            print('Loading from checkpoint', checkpoint_path)
-            checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
-            gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-            n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
+                # freeze base model
+                for name, param in gp_transformer.model.named_parameters():
+                    if (
+                        ('cell_token_learner' in name)
+                        | ('clf_head' in name)
+                        | ('count_head' in name)
+                    ):
+                        param.requires_grad = True
+                    else:
+                        param.requires_grad = False
 
-            # reset output directory
-            gp_transformer.output_dir = output_dir
+            # finetuning original GP blocks
+            elif (global_training == 'finetune') | (
+                global_training == 'finetune_global'
+            ):
+                if path_to_base_model is None:
+                    raise ValueError(
+                        'Please provide path to pre-trained'
+                        'gpTransformer Base model for finetuning'
+                    )
+                # look for Base model to load
+                # if not found, this will raise an error
+                tag = 'Base' if global_training == 'finetune' else 'Global'
+                latest_ckpt = find_latest_file(path_to_base_model, tissue, tag)
+                checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+                print('Loading from checkpoint', checkpoint_path)
+                checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
+                gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
+                # n_epochs = (
+                #     checkpoint['epoch'] + n_epochs
+                # )  # TO DO : do we need this line?
 
-            # reset supervised labels
-            gp_transformer.model.supervised_labels = supervised_labels
+                # reset output directory
+                gp_transformer.output_dir = output_dir
+
+                # reset supervised labels
+                gp_transformer.model.supervised_labels = supervised_labels
 
     # For training global model after base model
     if supervised_rem_var is not None:
@@ -668,7 +691,9 @@ def run_training(
             if strategy == 'ddp_find_unused_parameters_true'
             else 16,
             profiler='advanced',
-            # num_nodes=2,
+            num_nodes=num_nodes,
+            limit_val_batches=limit_val_batches,
+            val_check_interval=val_check_interval,
         )
     else:
         trainer = pl.Trainer(
@@ -685,6 +710,8 @@ def run_training(
             precision='bf16-mixed',
             # profiler='advanced',
             strategy=strategy,
+            limit_val_batches=limit_val_batches,
+            val_check_interval=val_check_interval,
         )
 
     # Ready to train with new learning rate

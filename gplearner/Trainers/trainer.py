@@ -311,6 +311,12 @@ class scGPL(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         loss_output = self.compute_loss(batch)
 
+        # # for debugging - log prompt encoder parameter values
+        # self.log(
+        #     'prompt_encoder/weight',
+        #     self.model.multi_gp_encoder.prompt_encoder.embedding.weight.sum(),
+        # )
+
         # exit function if we've already saved embeddings
         if loss_output is None:
             return None
@@ -325,7 +331,7 @@ class scGPL(pl.LightningModule):
                     self.model.multi_gp_encoder.encoder[i]
                     .blocks[0]
                     .attn.qkv.weight.requires_grad
-                ):
+                ) or (self.model.multi_gp_encoder.num_virtual_tokens > 0):
                     self.train_loss_per_gp[gp] = loss_per_gp[gp].unsqueeze(0)
                     self.log(
                         f'train/{gp}_MGM_loss',
