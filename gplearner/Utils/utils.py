@@ -1424,6 +1424,17 @@ class CosineLRwithWarmUp(torch.optim.lr_scheduler._LRScheduler):
                 param_group['lr'] = lr
 
 
+class FrequentLoggingCallback(pl.Callback):
+    def on_batch_end(self, trainer, pl_module):
+        # Ensure that train/val_loss is logged after validation step
+        pl_module.log(
+            'val/intermediate_loss',
+            pl_module.current_val_loss,
+            on_step=True,
+            on_epoch=False,
+        )
+
+
 ###################################
 # Attributions helper functions
 ###################################

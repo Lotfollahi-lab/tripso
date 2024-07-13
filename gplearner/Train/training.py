@@ -203,7 +203,7 @@ def run_training(
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # wandb.login()
+    wandb.login()
 
     # get date for today in YYYY-MM-DD format
     today = datetime.datetime.today().strftime('%Y-%m-%d')
@@ -262,11 +262,13 @@ def run_training(
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         # monitor='val/loss',
-        monitor='train/loss_epoch',
+        monitor='train/loss_step',
         dirpath=checkpoint_dir,
         filename=save_id,
         save_top_k=1,
         mode='min',
+        save_last=True,
+        every_n_train_steps=1000,  # save every 1000 steps
     )
 
     lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='step')
@@ -506,33 +508,21 @@ def run_training(
         )
 
     if num_virtual_tokens > 0:
-        if path_to_base_model is None:
-            raise ValueError('Please provide path to pre-trained GPformer model')
-        # # for adding prompt tokens
-        # # try finding with relevant model
-        # # TO DO : tidy this up
-        # try:
-        #     latest_ckpt = find_latest_file(
-        #         path_to_base_model, tissue, model_type
-        #     )  # type: ignore[arg-type]
-        # except Exception as e:
-        #     print(f"Error encountered: {e}. Retrying with model_type='Base'")
-        #     latest_ckpt = find_latest_file(
-        #         path_to_base_model, tissue, 'Base'
-        #     )  # type: ignore[arg-type]
+        if path_to_base_model is not None:
+            try:
+                latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type)
+            except FileNotFoundError:
+                latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+            checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+            checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+            gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
 
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Global')
-
-        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-
-        # freeze everything but prompt tokens
-        for name, param in gp_transformer.model.named_parameters():
-            if 'prompt' in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+            # freeze everything but prompt tokens
+            for name, param in gp_transformer.model.named_parameters():
+                if 'prompt' in name:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
 
         # n_epochs = checkpoint['epoch'] + n_epochs
 
@@ -682,6 +672,7 @@ def run_training(
                 early_stopping_callback,
                 checkpoint_callback,
                 lr_monitor,
+                # FrequentLoggingCallback(),
             ],
             logger=wandb_logger,
             devices=-1,
@@ -729,4 +720,4 @@ def run_training(
     df = run.history()
     df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
 
-    wandb.finish()
+    # wandb.finish()

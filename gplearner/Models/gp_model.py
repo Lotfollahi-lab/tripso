@@ -96,6 +96,7 @@ class gpWrapper(nn.Module):
         self.gp_inputs = gp_inputs
         self.model_type = model_type
         self.learning_new_gp = learn_new_gp
+        self.num_virtual_tokens = num_virtual_tokens
 
         # Get vocab size
         with open(gene_token_path, 'rb') as f:
@@ -136,6 +137,15 @@ class gpWrapper(nn.Module):
             # Use tensor indexing to assign values
             lookup_tensor[gp_tokens_tensor.long()] = indices
             self.register_buffer(f'gp{i}_tokens_lookup', lookup_tensor)
+
+            if self.num_virtual_tokens > 0:
+                prompt_encoder = PromptEncoder(
+                    token_dim=self.gp_latent_size,
+                    encoder_hidden_size=int(self.gp_latent_size * 0.5),
+                    num_virtual_tokens=self.num_virtual_tokens,
+                )
+
+                setattr(self, f'prompt_encoder_gp{i}', prompt_encoder)
 
         self.encoder = nn.ModuleList(
             [
@@ -212,13 +222,12 @@ class gpWrapper(nn.Module):
                 )
             )
 
-        self.num_virtual_tokens = num_virtual_tokens
-
         if self.num_virtual_tokens > 0:
-            # freeze all other parameters
-            for param in self.encoder.parameters():
-                param.requires_grad = False
+            # # freeze all other parameters
+            # for param in self.encoder.parameters():
+            #     param.requires_grad = False
 
+            # add encoder for shared token
             self.prompt_encoder = PromptEncoder(
                 token_dim=self.gp_latent_size,
                 encoder_hidden_size=int(self.gp_latent_size * 0.5),
@@ -346,7 +355,11 @@ class gpWrapper(nn.Module):
         # never mask prompt tokens
         if self.num_virtual_tokens > 0:
             attn_mask = torch.cat(
-                [attn_mask, torch.ones_like(attn_mask)[:, : self.num_virtual_tokens]],
+                # times 2 because 1 GP-specific token + 1 non-specific token
+                [
+                    attn_mask,
+                    torch.ones_like(attn_mask)[:, : 2 * self.num_virtual_tokens],
+                ],
                 dim=-1,
             )
 
@@ -403,6 +416,31 @@ class gpWrapper(nn.Module):
 
                 # Optionally append tokens for PEFT
                 if self.num_virtual_tokens > 0:
+                    # get GP-specific token
+                    gp_virtual_token = getattr(self, f'prompt_encoder_gp{i}')(
+                        torch.arange(self.num_virtual_tokens, device=emb_pad.device)
+                    )
+
+                    gp_virtual_token = gp_virtual_token.unsqueeze(0).expand(
+                        emb_pad.shape[0], -1, -1
+                    )
+
+                    emb_pad = torch.cat([emb_pad, gp_virtual_token], dim=1)
+
+                    tokens_pad = torch.cat(
+                        [
+                            tokens_pad,
+                            torch.tensor(
+                                [-100] * self.num_virtual_tokens,
+                                device=tokens_pad.device,
+                            )
+                            .unsqueeze(0)
+                            .expand(tokens_pad.shape[0], -1),
+                        ],
+                        dim=1,
+                    )
+
+                    # Get shared token
                     virtual_tokens = self.prompt_encoder(
                         torch.arange(self.num_virtual_tokens, device=emb_pad.device)
                     )
