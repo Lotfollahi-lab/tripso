@@ -77,6 +77,9 @@ def run_training(
     hvg_df: Optional[str] = None,
     num_virtual_tokens: int = 0,
     num_nodes: int = 1,
+    num_prototypes: int = 0,
+    prototype_labels_key: Optional[str] = None,
+    lambda_prototype_loss: float = 1e-2,
     # for large scale pretraining:
     limit_val_batches: Optional[float] = 1.0,
     val_check_interval: Optional[float] = 1.0,
@@ -340,6 +343,15 @@ def run_training(
                     }
                 )
 
+            if num_prototypes > 0:
+                wandb_logger.experiment.config.update(
+                    {
+                        'num_prototypes': num_prototypes,
+                        'prototype_labels_key': prototype_labels_key,
+                        'lambda_prototype_loss': lambda_prototype_loss,
+                    }
+                )
+
     ############################################################################
     # Dataset Preparation
     ############################################################################
@@ -457,6 +469,7 @@ def run_training(
             geneformer_model=geneformer_model_path,
             hvg_list=hvg_list,
             num_virtual_tokens=num_virtual_tokens,
+            num_prototypes=num_prototypes,
         )
 
     else:
@@ -485,6 +498,8 @@ def run_training(
             total_n_genes=total_n_genes,
             weight_decay=weight_decay,
             set_gpfinder_weight_decay=set_gpfinder_weight_decay,
+            prototype_labels_key=prototype_labels_key,
+            lambda_prototype_loss=lambda_prototype_loss,
         )
     else:
         # otherwise defaults to pytorch AdamW
@@ -505,6 +520,7 @@ def run_training(
             total_n_genes=total_n_genes,
             weight_decay=weight_decay,
             set_gpfinder_weight_decay=set_gpfinder_weight_decay,
+            lambda_prototype_loss=lambda_prototype_loss,
         )
 
     if num_virtual_tokens > 0:
@@ -517,9 +533,15 @@ def run_training(
             checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
             gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
 
-            # freeze everything but prompt tokens
+            # freeze everything but prompt tokens and global head
             for name, param in gp_transformer.model.named_parameters():
                 if 'prompt' in name:
+                    param.requires_grad = True
+                elif (
+                    ('cell_token_learner' in name)
+                    | ('clf_head' in name)
+                    | ('count_head' in name)
+                ):
                     param.requires_grad = True
                 else:
                     param.requires_grad = False
@@ -660,6 +682,11 @@ def run_training(
             for name, param in gp_transformer.model.named_parameters():
                 if f'multi_gp_encoder.encoder.{i}' in name:
                     param.requires_grad = True
+
+    # Optionally reset any trainer parameters
+    gp_transformer.prototype_labels_key = prototype_labels_key
+    gp_transformer.num_prototypes = num_prototypes
+    gp_transformer.lambda_prototype_loss = lambda_prototype_loss
 
     # check number of available GPUs
     num_gpus = torch.cuda.device_count()

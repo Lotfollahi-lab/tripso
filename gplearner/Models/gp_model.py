@@ -1130,6 +1130,7 @@ class gpTransformerGlobal(gpTransformerBase):
         use_flash=False,
         n_bins=10,
         num_virtual_tokens=0,
+        num_prototypes=0,
         **kwargs,
     ):
         super().__init__(
@@ -1185,6 +1186,19 @@ class gpTransformerGlobal(gpTransformerBase):
                 self.count_head = CountHead(
                     loss_mode=reconstruction_loss, n_genes=total_n_genes
                 )
+
+        self.num_prototypes = num_prototypes
+        if num_prototypes > 0:
+            self.prototypes = nn.Parameter(
+                torch.empty(
+                    num_prototypes,  # use 1 prototype per class = set as same number
+                    # num_prototypes,
+                    self.gp_latent_size,
+                ),
+                requires_grad=True,
+            )
+
+            nn.init.xavier_normal_(self.prototypes)
 
     def forward(
         self,

@@ -139,6 +139,8 @@ class scGPL(pl.LightningModule):
         hparam_save: str = 'all',
         set_gpfinder_weight_decay: Optional[float] = None,
         calc_gp_loss: bool = True,
+        lambda_prototype_loss: float = 10,  # 1e-2,
+        prototype_labels_key: Optional[str] = None,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -175,6 +177,8 @@ class scGPL(pl.LightningModule):
         self.use_go_similarity_loss = use_go_similarity_loss
         self.lambda_go_similarity = lambda_go_similarity
         self.go_similarity_gp = go_similarity_gp
+        self.lambda_prototype_loss = lambda_prototype_loss
+        self.prototype_labels_key = prototype_labels_key
 
         if go_similarity is not None:
             go_similarity_tensor = torch.tensor(go_similarity.values).float()
@@ -422,6 +426,18 @@ class scGPL(pl.LightningModule):
                     logger=True,
                     sync_dist=True,
                 )
+
+                if self.model.num_prototypes > 0:
+                    prototype_loss = loss_output['prototype_loss']
+                    self.log(
+                        'train/prototype_loss',
+                        prototype_loss,
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=True,
+                        logger=True,
+                        sync_dist=True,
+                    )
 
         if self.use_gp_similarity_loss:
             gp_similarity_loss = loss_output['gp_similarity_loss']
@@ -1097,6 +1113,15 @@ class scGPL(pl.LightningModule):
                     self.train_pred_counts_list.append(output['count_output'])
                     self.train_true_counts_list.append(output['true_bins'])
 
+            if self.model.num_prototypes > 0:
+                labels = batch[self.prototype_labels_key]
+                prototype_loss = self.compute_prototype_loss(
+                    output['cell_token'], labels
+                )
+
+                loss += self.lambda_prototype_loss * prototype_loss
+                holder['prototype_loss'] = prototype_loss
+
         holder['total_loss'] = loss
 
         return holder
@@ -1185,6 +1210,78 @@ class scGPL(pl.LightningModule):
             raise ValueError(
                 'Reconstruction loss not supported' 'Please choose from mse, nb or zinb'
             )
+
+    def compute_prototype_loss(self, Z, labels):
+        # following DeepGSEA : prototype loss has 3 terms
+        # p2p = loss for the pairwise prototype distance
+        # where d_min is the minimum acceptable distance between prototypes
+        # (in deep gsea defined as 1)
+        # we use coarse cell type labels = use version with labels
+
+        # Compute the pairwise distances between prototypes
+        prototypes_flat = self.model.prototypes.view(-1, self.model.prototypes.size(-1))
+        distances = torch.cdist(prototypes_flat, prototypes_flat)
+
+        # Ensure we only consider each pair once by using
+        # the upper triangular part of the distance matrix
+        mask = torch.triu(torch.ones_like(distances), diagonal=1)
+        masked_distances = distances * mask
+
+        # Calculate the hinge loss
+        distance_threshold = 1
+        p2p_loss = torch.clamp(distance_threshold - masked_distances, min=0)
+        p2p_loss = p2p_loss[mask.bool()].mean()
+
+        # Step 2 : c2p = cell to prototype loss
+        # encourages the model to minimize the distance from each cell
+        # to the closest prototype with the same phenotype
+
+        # Retrieve the prototype for each cell based on the labels
+        prototypes_for_cells = self.model.prototypes[
+            labels
+        ]  # Shape: (batch_size, gp_latent_size)
+
+        # Calculate the distances between each cell representation
+        # and its corresponding prototype
+        distances = torch.norm(Z - prototypes_for_cells, dim=1)  # Shape: (batch_size,)
+
+        # Define the loss function to minimize
+        # these distances (e.g., mean squared error)
+        c2p_loss = distances.mean()
+
+        # Finally, encourage the model to minimize the distance
+        # from each prototype to the center of cells to which it is the closest
+        num_prototypes = self.model.prototypes.size(0)
+        gp_latent_size = self.model.prototypes.size(1)
+
+        # Initialize a tensor to store
+        # the sum of cell representations for each prototype
+        prototype_sums = torch.zeros(num_prototypes, gp_latent_size, device=Z.device)
+        # Initialize a tensor to store the count of cells assigned to each prototype
+        prototype_counts = torch.zeros(num_prototypes, device=Z.device)
+
+        # Accumulate sums and counts for each prototype based on cell labels
+        for i in range(num_prototypes):
+            mask = labels == i
+            if mask.sum() > 0:
+                prototype_sums[i] = Z[mask].sum(dim=0)
+                prototype_counts[i] = mask.sum()
+
+        # Compute the centers for each prototype
+        prototype_centers = prototype_sums / prototype_counts.clamp(min=1).unsqueeze(1)
+
+        # Compute the distances from each prototype to its center
+        prototype_distances = torch.norm(
+            self.model.prototypes - prototype_centers, dim=1
+        )
+
+        # Define the loss function to minimize these distances
+        p2c_loss = prototype_distances.mean()
+
+        # Combine the loss terms
+        loss = p2p_loss + c2p_loss + p2c_loss
+
+        return loss
 
     def configure_optimizers(self):
         # Define optimizer and may be consider weight decay
