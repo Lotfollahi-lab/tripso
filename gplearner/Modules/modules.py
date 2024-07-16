@@ -391,6 +391,7 @@ class gpTransformerEncoder(nn.Module):
         return_attention,
         return_gene_embeddings=False,
         num_virtual_tokens=0,
+        using_gp_specific_token=False,
     ):
         # Random masking:
         if inference is False:
@@ -462,6 +463,17 @@ class gpTransformerEncoder(nn.Module):
                 if num_virtual_tokens > 0
                 else x[:, 1:, :]
             )
+
+        if num_virtual_tokens > 0:
+            if using_gp_specific_token:
+                output['gp_virtual_tokens'] = x[
+                    :, -num_virtual_tokens : -int(num_virtual_tokens / 2), :
+                ]
+                output['shared_virtual_tokens'] = x[
+                    :, -int(num_virtual_tokens / 2) :, :
+                ]
+            else:
+                output['shared_virtual_tokens'] = x[:, -num_virtual_tokens:, :]
 
         return output
 

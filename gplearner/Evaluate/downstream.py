@@ -271,10 +271,12 @@ class gpEval:
 
         # Set up gpTransformer lightning module
         self.model_type = model_type
+        self.num_virtual_tokens = num_virtual_tokens
         return_classification_report = True if supervised_labels is not None else False
         self.gp_transformer = self._init_trainer(
             return_classification_report=return_classification_report,
             hparam_save=self.hparam_save,
+            num_virtual_tokens=num_virtual_tokens,
         )
 
     def _init_trainer(
@@ -290,6 +292,8 @@ class gpEval:
         save_emb=False,
         split_label=None,
         hparam_save='ignore_model',  # fine for test time?
+        num_virtual_tokens=0,
+        return_virtual_tokens=False,
     ):
         if self.model_type != 'Mean':
             gp_transformer = scGPL(
@@ -307,6 +311,7 @@ class gpEval:
                 save_emb=save_emb,
                 split_label=split_label,
                 hparam_save=hparam_save,
+                return_virtual_tokens=return_virtual_tokens,
             ).load_from_checkpoint(self.checkpoint_path, hparam_save=hparam_save)
         else:
             gp_transformer = scGPL(
@@ -321,6 +326,7 @@ class gpEval:
                 save_emb=save_emb,
                 split_label=split_label,
                 hparam_save='ignore_model',
+                return_virtual_tokens=return_virtual_tokens,
             )
 
         # reset attributes overwritten by loading from checkpoint
@@ -335,6 +341,9 @@ class gpEval:
         gp_transformer.test_random_baseline = test_random_baseline
         gp_transformer.save_emb = save_emb
         gp_transformer.split_label = split_label
+        gp_transformer.model.multi_gp_encoder.num_virtual_tokens = num_virtual_tokens
+        gp_transformer.model.cell_token_learner.num_virtual_tokens = num_virtual_tokens
+        gp_transformer.return_virtual_tokens = return_virtual_tokens
 
         return gp_transformer
 
@@ -344,7 +353,10 @@ class gpEval:
         '''
 
         gp_transformer = self._init_trainer(
-            save_emb=True, split_label=split, hparam_save=self.hparam_save
+            save_emb=True,
+            split_label=split,
+            hparam_save=self.hparam_save,
+            num_virtual_tokens=self.num_virtual_tokens,
         )
 
         txdata = txDataModule(
@@ -683,6 +695,7 @@ class gpEval:
             genes_to_keep=genes_to_keep,
             gp=pathway,
             split_label=split,
+            num_virtual_tokens=self.num_virtual_tokens,
         )
 
         txdata = txDataModule(
@@ -786,7 +799,9 @@ class gpEval:
         # Initialize trainer
         txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
 
-        gp_transformer = self._init_trainer(return_attention=True, gp=gp)
+        gp_transformer = self._init_trainer(
+            return_attention=True, gp=gp, num_virtual_tokens=self.num_virtual_tokens
+        )
 
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
 
@@ -817,7 +832,9 @@ class gpEval:
             seed=self.seed,
         )
 
-        gp_transformer = self._init_trainer(test_random_baseline=True)
+        gp_transformer = self._init_trainer(
+            test_random_baseline=True, num_virtual_tokens=self.num_virtual_tokens
+        )
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
         trainer.test(gp_transformer, txdata)
 
@@ -832,6 +849,28 @@ class gpEval:
 
         trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
         trainer.test(self.gp_transformer, txdata)
+
+    def generate_virtual_tokens(self, split='test'):
+        '''
+        Extract virtual tokens
+        '''
+        gp_transformer = self._init_trainer(
+            split_label=split,
+            hparam_save=self.hparam_save,
+            num_virtual_tokens=self.num_virtual_tokens,
+            return_virtual_tokens=True,
+        )
+
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_val_step=split,
+            seed=self.seed,
+        )
+
+        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+
+        trainer.validate(gp_transformer, txdata)
 
 
 ################################

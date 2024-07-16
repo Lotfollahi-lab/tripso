@@ -141,6 +141,7 @@ class scGPL(pl.LightningModule):
         calc_gp_loss: bool = True,
         lambda_prototype_loss: float = 10,  # 1e-2,
         prototype_labels_key: Optional[str] = None,
+        return_virtual_tokens: bool = False,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -293,6 +294,7 @@ class scGPL(pl.LightningModule):
         self.return_gene_embeddings = return_gene_embeddings
         self.tokens_to_keep = tokens_to_keep
         self.genes_to_keep = genes_to_keep
+        self.return_virtual_tokens = return_virtual_tokens
 
         self.gene_dir_tag = gene_dir_tag
         self.return_attention = return_attention
@@ -301,6 +303,7 @@ class scGPL(pl.LightningModule):
         # for saving embeddings
         self.emb_dataset = None
         self.gene_dataset = None
+        self.token_dataset = None
 
     def forward(self, x):
         out = self.model(
@@ -346,6 +349,28 @@ class scGPL(pl.LightningModule):
                         prog_bar=True,
                         sync_dist=True,
                     )
+
+                if self.model.multi_gp_encoder.num_virtual_tokens > 0:
+                    self.log(
+                        f'train/{gp}_prompt_loss',
+                        loss_per_gp[f'{gp}_prompt'],
+                        on_step=True,
+                        on_epoch=True,
+                        logger=True,
+                        prog_bar=True,
+                        sync_dist=True,
+                    )
+
+                    self.log(
+                        f'train/{gp}_shared_prompt_loss',
+                        loss_per_gp[f'{gp}_shared_prompt'],
+                        on_step=True,
+                        on_epoch=True,
+                        logger=True,
+                        prog_bar=True,
+                        sync_dist=True,
+                    )
+
         else:
             for i, gp in enumerate(self.model.gp_inputs):
                 if (
@@ -438,6 +463,18 @@ class scGPL(pl.LightningModule):
                         logger=True,
                         sync_dist=True,
                     )
+
+            if self.model.multi_gp_encoder.num_virtual_tokens > 0:
+                global_prompt_loss = loss_output['global_prompt_loss']
+                self.log(
+                    'train/global_prompt_loss',
+                    global_prompt_loss,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
 
         if self.use_gp_similarity_loss:
             gp_similarity_loss = loss_output['gp_similarity_loss']
@@ -559,6 +596,32 @@ class scGPL(pl.LightningModule):
 
             return None
 
+        if self.return_virtual_tokens:
+            output = self.forward(batch)
+
+            token_dict = {}
+
+            # Get embeddings of the relevant genes
+            for i, gp in enumerate(self.model.gp_inputs):
+                token_dict[gp] = output['gp_virtual_tokens'][i].detach().cpu()
+                token_dict[f'shared_token_in_{gp}'] = (
+                    output['shared_virtual_tokens'][i].detach().cpu()
+                )
+
+            # metadata
+            for k, v in batch.items():
+                if k != 'input_ids':
+                    token_dict[k] = v
+
+            emb = Dataset.from_dict(token_dict)
+
+            if self.token_dataset is None:
+                self.token_dataset = emb
+            else:
+                self.token_dataset = concatenate_datasets([self.token_dataset, emb])
+
+            return None
+
         if self.model_type == 'Base':
             loss_output = self.compute_loss(batch)
             loss = loss_output['total_loss']
@@ -627,6 +690,14 @@ class scGPL(pl.LightningModule):
             output_name = os.path.join(output_path, f'{self.split_label}_set')
             self.gene_dataset.save_to_disk(output_name)
             self.gene_dataset = None
+            return None
+
+        if self.return_virtual_tokens:
+            output_path = os.path.join(self.output_dir, 'virtual_tokens')
+            os.makedirs(output_path, exist_ok=True)
+            output_name = os.path.join(output_path, f'{self.split_label}_set')
+            self.token_dataset.save_to_disk(output_name)
+            self.token_dataset = None
             return None
 
         if self.model_type == 'Global':
@@ -1018,27 +1089,36 @@ class scGPL(pl.LightningModule):
                     output['gene_labels_list'][i].reshape(-1),
                 )
 
-                # if torch.isnan(loss_i):
-                #     # usually happens if all labels are masked
-                #     print(f'Loss is NaN in {self.model.gp_inputs[i]}')
-                #     print('Predictions:')
-                #     print(output['logits_lm_list'][i])
-                #     print('')
-                #     print('True labels:')
-                #     print(output['gene_labels_list'][i])
-                #     print('')
-                #     print('Number of NaNs in predictions:')
-                #     print(torch.isnan(output['logits_lm_list'][i]).sum())
-                #     print('')
-                #     print('Number of NaNs in true labels:')
-                #     print(torch.isnan(output['gene_labels_list'][i]).sum())
-                #     gp_loss_dict[self.model.gp_inputs[i]] = (
-                #         torch.tensor(0).to(loss_i.device).float()
-                #     )
-
-                # else:
                 gp_loss_dict[self.model.gp_inputs[i]] = loss_i
                 loss += loss_i
+
+                # calculate prompt classification loss
+                if (self.model.multi_gp_encoder.num_virtual_tokens > 0) and (
+                    self.model.multi_gp_encoder.virtual_tokens_label is not None
+                ):
+                    true_labels = batch[
+                        self.model.multi_gp_encoder.virtual_tokens_label
+                    ]
+                    virtual_token_gp_i = output['gp_virtual_token_logits'][i]
+
+                    prompt_loss_i = F.cross_entropy(
+                        virtual_token_gp_i.squeeze(),
+                        true_labels,
+                    )
+
+                    gp_loss_dict[f'{self.model.gp_inputs[i]}_prompt'] = prompt_loss_i
+
+                    shared_token = output['shared_virtual_token_logits'][i]
+                    prompt_loss_shared = F.cross_entropy(
+                        shared_token.squeeze(),
+                        true_labels,
+                    )
+
+                    gp_loss_dict[
+                        f'{self.model.gp_inputs[i]}_shared_prompt'
+                    ] = prompt_loss_shared
+
+                    loss += prompt_loss_i + prompt_loss_shared
 
             else:
                 gp_loss_dict[self.model.gp_inputs[i]] = (
@@ -1121,6 +1201,19 @@ class scGPL(pl.LightningModule):
 
                 loss += self.lambda_prototype_loss * prototype_loss
                 holder['prototype_loss'] = prototype_loss
+
+            if self.model.multi_gp_encoder.num_virtual_tokens > 0:
+                # calculate prompt classification loss
+                true_labels = batch[self.model.multi_gp_encoder.virtual_tokens_label]
+                virtual_token = output['global_virtual_token_logit']
+
+                prompt_loss = F.cross_entropy(
+                    virtual_token.squeeze(),
+                    true_labels,
+                )
+
+                loss += prompt_loss
+                holder['global_prompt_loss'] = prompt_loss
 
         holder['total_loss'] = loss
 

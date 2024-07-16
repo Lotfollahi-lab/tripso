@@ -76,6 +76,8 @@ def run_training(
     set_gpfinder_weight_decay: Optional[float] = None,
     hvg_df: Optional[str] = None,
     num_virtual_tokens: int = 0,
+    virtual_tokens_label: Optional[str] = None,
+    num_prompt_classes: Optional[int] = 0,
     num_nodes: int = 1,
     num_prototypes: int = 0,
     prototype_labels_key: Optional[str] = None,
@@ -439,6 +441,8 @@ def run_training(
             geneformer_model=geneformer_model_path,
             hvg_list=hvg_list,
             num_virtual_tokens=num_virtual_tokens,
+            virtual_tokens_label=virtual_tokens_label,
+            num_prompt_classes=num_prompt_classes,
         )
 
     elif model_type == 'Global':
@@ -470,6 +474,8 @@ def run_training(
             hvg_list=hvg_list,
             num_virtual_tokens=num_virtual_tokens,
             num_prototypes=num_prototypes,
+            virtual_tokens_label=virtual_tokens_label,
+            num_prompt_classes=num_prompt_classes,
         )
 
     else:

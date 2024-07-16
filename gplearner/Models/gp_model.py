@@ -86,6 +86,8 @@ class gpWrapper(nn.Module):
         learn_new_gp,
         hvg_list,
         num_virtual_tokens,
+        virtual_tokens_label,
+        num_prompt_classes,
     ):
         super().__init__()
 
@@ -233,6 +235,10 @@ class gpWrapper(nn.Module):
                 encoder_hidden_size=int(self.gp_latent_size * 0.5),
                 num_virtual_tokens=self.num_virtual_tokens,
             )
+
+        if virtual_tokens_label is not None:
+            self.virtual_tokens_label = virtual_tokens_label
+            self.prompt_clf = nn.Linear(self.gp_latent_size, num_prompt_classes)
 
     def build_input_matrix(
         self, gf, input_ids, gp_tokens, crop_to_gp_len=True, is_gpfinder=False
@@ -387,6 +393,10 @@ class gpWrapper(nn.Module):
         gene_original_labels_list = []
         num_genes_per_cell_list = []
         gene_emb_list = []
+        gp_virtual_token_logit_list = []
+        shared_virtual_token_logit_list = []
+        gp_virtual_token_list = []
+        shared_virtual_token_list = []
 
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
@@ -478,12 +488,29 @@ class gpWrapper(nn.Module):
                     inference=inference,
                     return_attention=return_attention,
                     return_gene_embeddings=return_gene_embeddings,
-                    num_virtual_tokens=self.num_virtual_tokens,
+                    num_virtual_tokens=self.num_virtual_tokens
+                    * 2,  # *2 for shared and GP-specific tokens
+                    using_gp_specific_token=self.num_virtual_tokens > 0,
                 )
 
                 gp_token_list.append(encoder_output['cls'])
                 logits_lm_list.append(encoder_output['logits_lm'])
                 gene_labels_list.append(encoder_output['gene_labels'])
+                gp_virtual_token_list.append(encoder_output['gp_virtual_tokens'])
+                shared_virtual_token_list.append(
+                    encoder_output['shared_virtual_tokens']
+                )
+
+                if self.num_virtual_tokens > 0:
+                    gpi_token_logits = self.prompt_clf(
+                        encoder_output['gp_virtual_tokens']
+                    )
+                    gp_virtual_token_logit_list.append(gpi_token_logits)
+
+                    shared_token_logits = self.prompt_clf(
+                        encoder_output['shared_virtual_tokens']
+                    )
+                    shared_virtual_token_logit_list.append(shared_token_logits)
 
                 if return_gene_embeddings:
                     gene_emb_list = encoder_output['gene_embeddings']
@@ -502,8 +529,16 @@ class gpWrapper(nn.Module):
             'gene_emb_list': gene_emb_list,
             'gene_original_labels_list': gene_original_labels_list,
             'num_genes_per_cell_list': num_genes_per_cell_list,
-            'virtual_tokens': virtual_tokens,
         }
+
+        if self.num_virtual_tokens > 0:
+            output['virtual_tokens'] = virtual_tokens  # for global model
+            output['gp_virtual_token_logits'] = gp_virtual_token_logit_list
+            output['shared_virtual_token_logits'] = shared_virtual_token_logit_list
+
+            # for saving embeddings
+            output['gp_virtual_tokens'] = gp_virtual_token_list
+            output['shared_virtual_tokens'] = shared_virtual_token_list
 
         if return_gene_embeddings:
             output = self.wrangle_gene_embeddings(output, tokens_to_keep)
@@ -761,6 +796,7 @@ class cellWrapper(nn.Module):
             attn_mask=attn_mask,
             inference=inference,
             return_attention=False,
+            num_virtual_tokens=self.num_virtual_tokens,
         )
 
         output = {
@@ -768,6 +804,9 @@ class cellWrapper(nn.Module):
             'gp_logits_lm': encoder_output['logits_lm'],
             'gp_labels': encoder_output['gene_labels'],
         }
+
+        if self.num_virtual_tokens > 0:
+            output['virtual_token'] = encoder_output['shared_virtual_tokens']
 
         return output
 
@@ -951,6 +990,8 @@ class gpTransformerBase(nn.Module):
         gp_of_interest=None,
         hvg_list=None,
         num_virtual_tokens=0,
+        virtual_tokens_label=None,
+        num_prompt_classes=0,
     ):
         """
         database :
@@ -1054,6 +1095,8 @@ class gpTransformerBase(nn.Module):
             learn_new_gp=learn_new_gp,
             hvg_list=hvg_list,
             num_virtual_tokens=num_virtual_tokens,
+            virtual_tokens_label=virtual_tokens_label,
+            num_prompt_classes=num_prompt_classes,
         )
 
     def forward(
@@ -1254,6 +1297,10 @@ class gpTransformerGlobal(gpTransformerBase):
                     )
                     binned = torch.tensor(binned).to(count_output.device)
                     base_output['true_bins'] = binned
+
+        if self.cell_token_learner.num_virtual_tokens > 0:
+            logits = self.multi_gp_encoder.prompt_clf(cell_output['virtual_token'])
+            base_output['global_virtual_token_logit'] = logits
 
         return base_output
 
