@@ -82,6 +82,7 @@ def run_training(
     num_prototypes: int = 0,
     prototype_labels_key: Optional[str] = None,
     lambda_prototype_loss: float = 1e-2,
+    prbm_path: Optional[str] = None,
     # for large scale pretraining:
     limit_val_batches: Optional[float] = 1.0,
     val_check_interval: Optional[float] = 1.0,
@@ -273,7 +274,8 @@ def run_training(
         save_top_k=1,
         mode='min',
         save_last=True,
-        every_n_train_steps=1000,  # save every 1000 steps
+        # save every n steps --> issue if dataset has < n steps
+        every_n_train_steps=100,
     )
 
     lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='step')
@@ -420,6 +422,11 @@ def run_training(
     else:
         hvg_list = None
 
+    if prbm_path is not None:
+        prbm = pd.read_csv(prbm_path)
+    else:
+        prbm = None
+
     ############################################################################
     # Train model
     ############################################################################
@@ -476,6 +483,7 @@ def run_training(
             num_prototypes=num_prototypes,
             virtual_tokens_label=virtual_tokens_label,
             num_prompt_classes=num_prompt_classes,
+            prbm=prbm,
         )
 
     else:
@@ -753,4 +761,4 @@ def run_training(
     df = run.history()
     df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
 
-    # wandb.finish()
+    wandb.finish()

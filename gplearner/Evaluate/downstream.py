@@ -137,6 +137,7 @@ class gpEval:
         hvg_path: Optional[str] = None,
         hparam_save: Optional[str] = 'all',
         num_virtual_tokens: Optional[int] = 0,
+        cond_to_shift: Optional[Dict] = None,
     ):
         # check only one GPU
         assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
@@ -219,9 +220,11 @@ class gpEval:
                 geneformer_model=geneformer_model_path,
                 hvg_list=hvg_list,
                 num_virtual_tokens=num_virtual_tokens,
+                cond_to_shift=cond_to_shift,
             )
 
             self.reconstruction_loss = reconstruction_loss
+            self.cond_to_shift = cond_to_shift
 
         elif model_type == 'Mean':
             self.model = gfGlobal(
@@ -344,6 +347,11 @@ class gpEval:
         gp_transformer.model.multi_gp_encoder.num_virtual_tokens = num_virtual_tokens
         gp_transformer.model.cell_token_learner.num_virtual_tokens = num_virtual_tokens
         gp_transformer.return_virtual_tokens = return_virtual_tokens
+        gp_transformer.model.cond_to_shift = self.cond_to_shift
+
+        # for backwards compatibility
+        if not hasattr(gp_transformer.model, 'use_prbm'):
+            gp_transformer.model.use_prbm = False
 
         return gp_transformer
 

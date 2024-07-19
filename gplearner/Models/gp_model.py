@@ -11,7 +11,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
-from scipy.sparse import csr_matrix
 from transformers import BertForMaskedLM
 
 from ..Modules.modules import (
@@ -239,6 +238,8 @@ class gpWrapper(nn.Module):
         if virtual_tokens_label is not None:
             self.virtual_tokens_label = virtual_tokens_label
             self.prompt_clf = nn.Linear(self.gp_latent_size, num_prompt_classes)
+        else:
+            self.virtual_tokens_label = None
 
     def build_input_matrix(
         self, gf, input_ids, gp_tokens, crop_to_gp_len=True, is_gpfinder=False
@@ -496,21 +497,26 @@ class gpWrapper(nn.Module):
                 gp_token_list.append(encoder_output['cls'])
                 logits_lm_list.append(encoder_output['logits_lm'])
                 gene_labels_list.append(encoder_output['gene_labels'])
-                gp_virtual_token_list.append(encoder_output['gp_virtual_tokens'])
-                shared_virtual_token_list.append(
-                    encoder_output['shared_virtual_tokens']
-                )
 
                 if self.num_virtual_tokens > 0:
-                    gpi_token_logits = self.prompt_clf(
-                        encoder_output['gp_virtual_tokens']
-                    )
-                    gp_virtual_token_logit_list.append(gpi_token_logits)
-
-                    shared_token_logits = self.prompt_clf(
+                    gp_virtual_token_list.append(encoder_output['gp_virtual_tokens'])
+                    shared_virtual_token_list.append(
                         encoder_output['shared_virtual_tokens']
                     )
-                    shared_virtual_token_logit_list.append(shared_token_logits)
+
+                    if (
+                        hasattr(self, 'virtual_tokens_label')
+                        and self.virtual_tokens_label is not None
+                    ):
+                        gpi_token_logits = self.prompt_clf(
+                            encoder_output['gp_virtual_tokens']
+                        )
+                        gp_virtual_token_logit_list.append(gpi_token_logits)
+
+                        shared_token_logits = self.prompt_clf(
+                            encoder_output['shared_virtual_tokens']
+                        )
+                        shared_virtual_token_logit_list.append(shared_token_logits)
 
                 if return_gene_embeddings:
                     gene_emb_list = encoder_output['gene_embeddings']
@@ -675,6 +681,151 @@ class gpWrapper(nn.Module):
 
         return output
 
+    def get_cls_attn(self, gf_emb, input_dataset, gp_idx, gene_names):
+        '''
+        If multilpe blocks, get attn matrix from last transformer block
+        '''
+        if self.training:
+            inference = False
+        else:
+            inference = True
+
+        gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
+
+        # Extract embeddings for the gene program of interest
+        emb_pad, tokens_pad, _, attn_mask = self.build_input_matrix(
+            gf_emb,  # geneformer embeddings
+            input_dataset['input_ids'],
+            gp_tokens,
+        )
+
+        # Encode tokens for MLM
+        tokens_pad_unencoded = tokens_pad
+        tokens_pad = getattr(self, f'gp{gp_idx}_tokens_lookup')[tokens_pad].long()
+
+        # get token GP representation
+        # Optionally append tokens for PEFT
+        if self.num_virtual_tokens > 0:
+            # get GP-specific token
+            gp_virtual_token = getattr(self, f'prompt_encoder_gp{gp_idx}')(
+                torch.arange(self.num_virtual_tokens, device=emb_pad.device)
+            )
+
+            gp_virtual_token = gp_virtual_token.unsqueeze(0).expand(
+                emb_pad.shape[0], -1, -1
+            )
+
+            emb_pad = torch.cat([emb_pad, gp_virtual_token], dim=1)
+
+            tokens_pad = torch.cat(
+                [
+                    tokens_pad,
+                    torch.tensor(
+                        [-100] * self.num_virtual_tokens,
+                        device=tokens_pad.device,
+                    )
+                    .unsqueeze(0)
+                    .expand(tokens_pad.shape[0], -1),
+                ],
+                dim=1,
+            )
+
+            # Get shared token
+            virtual_tokens = self.prompt_encoder(
+                torch.arange(self.num_virtual_tokens, device=emb_pad.device)
+            )
+
+            # Expand virtual tokens to match emb_pad
+            virtual_tokens = virtual_tokens.unsqueeze(0).expand(
+                emb_pad.shape[0], -1, -1
+            )
+
+            emb_pad = torch.cat([virtual_tokens, emb_pad], dim=1)
+
+            # Add to labels as well
+            tokens_pad = torch.cat(
+                [
+                    torch.tensor(
+                        [-100] * self.num_virtual_tokens,
+                        device=tokens_pad.device,
+                    )
+                    .unsqueeze(0)
+                    .expand(tokens_pad.shape[0], -1),
+                    tokens_pad,
+                ],
+                dim=1,
+            )
+
+        else:
+            virtual_tokens = None
+
+        encoder_output = self.encoder[gp_idx](
+            emb_pad,
+            attn_mask=attn_mask,
+            gene_labels=tokens_pad,
+            inference=inference,
+            return_attention=True,
+            num_virtual_tokens=self.num_virtual_tokens * 2,
+            using_gp_specific_token=self.num_virtual_tokens > 0,
+        )
+
+        attn = encoder_output['attention']
+
+        # Average attention across heads
+        attn = attn.mean(dim=1)
+
+        output = {}
+
+        # Select cls attention
+        attn = attn[:, 0, :]
+
+        output['cls'] = attn[:, 0].cpu().detach().numpy()
+
+        if self.num_virtual_tokens > 0:
+            for i in range(self.num_virtual_tokens):
+                output[f'gp_virtual_token_{i}'] = (
+                    attn[:, -2 * (i + 1)].cpu().detach().numpy()
+                )
+                output[f'shared_virtual_token_{i}'] = (
+                    attn[:, -1 * (i + 1)].cpu().detach().numpy()
+                )
+
+            # drop virtual tokens
+            attn = attn[:, : -2 * self.num_virtual_tokens]
+
+        # keep only gene scores
+        attn = attn[:, 1:]
+
+        for i, gene in enumerate(gp_tokens):
+            # Ensure the data types match
+            gene = gene.to(tokens_pad_unencoded.dtype)
+
+            # zero out other genes
+            mask = (tokens_pad_unencoded == gene).to(torch.int)
+
+            masked_score = attn * mask
+
+            # Find the indices of the non-zero scores
+            non_zero_mask = masked_score != 0
+
+            indices = non_zero_mask.nonzero(as_tuple=True)
+
+            # Initialize the result tensor with zeros
+            result = torch.zeros(attn.shape[0], attn.shape[-1]).to(attn.device)
+
+            # Check if there are any non-zero rows, and update the result tensor
+            if indices[0].nelement() != 0:
+                result[indices] = masked_score[indices]
+
+                # for debugging
+                for row_idx in torch.unique(indices[0]):
+                    if non_zero_mask[row_idx].sum() > 1:
+                        raise ValueError('Multiple non-zero scores for the same gene')
+
+            output[gene_names[i]] = result.cpu().detach().numpy().sum(axis=-1)
+
+        return output
+
 
 class cellWrapper(nn.Module):
     def __init__(
@@ -820,12 +971,43 @@ class cellWrapper(nn.Module):
             z=x['z'], num_genes_per_cell_list=x['num_genes_per_cell_list']
         )
 
+        # Optionally append virtual tokens
+        if self.num_virtual_tokens > 0:
+            virtual_tokens = x['virtual_tokens']
+
+            z = torch.cat([virtual_tokens, z], dim=1)
+
+            # Add to labels as well
+            gp_labels = torch.cat(
+                [
+                    torch.tensor(
+                        [-100] * self.num_virtual_tokens, device=gp_labels.device
+                    )
+                    .unsqueeze(0)
+                    .expand(gp_labels.shape[0], -1),
+                    gp_labels,
+                ],
+                dim=1,
+            )
+
+            # And attention mask
+            attn_mask = torch.cat(
+                [
+                    attn_mask,
+                    torch.ones(attn_mask.shape[0], self.num_virtual_tokens).to(
+                        attn_mask.device
+                    ),
+                ],
+                dim=1,
+            )
+
         encoder_output = self.encoder(
             z,
             gene_labels=gp_labels,
             attn_mask=attn_mask,
             inference=True,
             return_attention=True,
+            num_virtual_tokens=self.num_virtual_tokens,
         )
 
         # Reorder attention matrix so GP are in the same order in each cell
@@ -834,49 +1016,50 @@ class cellWrapper(nn.Module):
         # Average attention across heads
         attn = attn.mean(dim=1)
 
-        # For the padding tokens, attention will be 0
-        # + 1 for cls
-        all_gp = set([i for i in range(len(self.gp_inputs) + 1)])
+        # And focus on cls attention scores
+        attn = attn[:, 0, :]
 
-        holder = []
+        output = {}
 
-        for i in range(gp_labels.shape[0]):
-            # because GP are ranked by number of genes per cell
-            # all the -100 tokens will be at the end
-            x = gp_labels[i, :]
-            labeled_gp_idx = x != -100
+        output['cls'] = attn[:, 0].cpu().detach().numpy()
 
-            values_to_fill_in = all_gp - set(x[labeled_gp_idx].cpu().numpy().tolist())
+        # drop cls token
+        attn = attn[:, 1:]
 
-            new_labels = torch.tensor(list(values_to_fill_in)).to(x.device)
+        if self.num_virtual_tokens > 0:
+            for i in range(self.num_virtual_tokens):
+                output[f'virtual_token_{i}'] = (
+                    attn[:, -1 * (i + 1)].cpu().detach().numpy()
+                )
 
-            new_padded = torch.concat([x[labeled_gp_idx], new_labels], dim=0)
+            # drop virtual tokens
+            attn = attn[:, : -self.num_virtual_tokens]
+            gp_labels = gp_labels[:, : -self.num_virtual_tokens]
 
-            # cls is at first position in embedding
-            # so we move the label the first position
-            new_padded = torch.cat([new_padded[-1].unsqueeze(0), new_padded[:-1]])
+        for i, gp in enumerate(self.gp_inputs):
+            # zero out other GP
+            mask = (gp_labels == i).to(torch.int)
 
-            holder.append(new_padded)
+            masked_score = attn * mask
 
-        gp_labels = torch.stack(holder).long().to(attn.device)
+            # Find the indices of the non-zero scores
+            non_zero_mask = masked_score != 0
 
-        # Reorder attention matrix so GP are in the same order in each cell
-        # Create an index tensor to sort tokens_pad
-        _, indices = torch.sort(gp_labels, dim=1)
+            indices = non_zero_mask.nonzero(as_tuple=True)
 
-        # Apply sorting to the corresponding rows in x
-        attn = torch.gather(attn, 1, indices)
-        gp_labels = torch.gather(gp_labels, 1, indices)
+            # Initialize the result tensor with zeros
+            result = torch.zeros(attn.shape[0], attn.shape[-1]).to(attn.device)
 
-        # the cls label is 1 + number of gp
-        # so sorting will move it to last position
-        # bring back to the start
-        attn = torch.cat([attn[:, -1].unsqueeze(1), attn[:, :-1]], dim=1)
-        gp_labels = torch.cat([gp_labels[-1].unsqueeze(0), gp_labels[:-1]])
+            # Check if there are any non-zero rows, and update the result tensor
+            if indices[0].nelement() != 0:
+                result[indices] = masked_score[indices]
 
-        output = {
-            'attn': csr_matrix(attn.detach().cpu().numpy()),
-        }
+                # for debugging
+                for row_idx in torch.unique(indices[0]):
+                    if non_zero_mask[row_idx].sum() > 1:
+                        raise ValueError('Multiple non-zero scores for the same gene')
+
+            output[gp] = result.cpu().detach().numpy().sum(axis=-1)
 
         return output
 
@@ -1155,6 +1338,25 @@ class gpTransformerBase(nn.Module):
 
         return output
 
+    def get_cls_attn(self, input_dataset, gp):
+        if self.training:
+            inference = False
+        else:
+            inference = True
+
+        # Get gp index
+        gp_idx = self.gp_inputs.index(gp)
+        gene_names = self.gpdb.iloc[:, gp_idx].tolist()
+
+        # Get Geneformer embeddings
+        gf_emb = self.gf_wrapper(input_dataset, inference)
+
+        output = self.multi_gp_encoder.get_cls_attn(
+            gf_emb, input_dataset, gp_idx=gp_idx, gene_names=gene_names
+        )
+
+        return output
+
 
 class gpTransformerGlobal(gpTransformerBase):
     """
@@ -1174,6 +1376,8 @@ class gpTransformerGlobal(gpTransformerBase):
         n_bins=10,
         num_virtual_tokens=0,
         num_prototypes=0,
+        prbm=None,
+        cond_to_shift=None,
         **kwargs,
     ):
         super().__init__(
@@ -1185,6 +1389,21 @@ class gpTransformerGlobal(gpTransformerBase):
         self.global_attn_heads = global_attn_heads
 
         self.global_loss = global_loss
+
+        # If using PRBM, set up the buffers on GPU
+        if prbm is not None:
+            self.use_prbm = True
+            prbm = prbm[self.gp_inputs]
+            prbm_tensor = torch.tensor(prbm.values.T).to(torch.float32)
+            self.register_buffer('prbm', prbm_tensor)
+        else:
+            self.use_prbm = False
+
+        self.cond_to_shift = cond_to_shift
+
+        # for backwards compatibility
+        if not hasattr(self, 'use_prbm'):
+            self.use_prbm = False
 
         self.cell_token_learner = cellWrapper(
             gp_inputs=self.gp_inputs,
@@ -1273,6 +1492,30 @@ class gpTransformerGlobal(gpTransformerBase):
 
         if return_gene_embeddings:
             return base_output
+
+        # for each GP, optionally sum the reference mean embedding tensor
+        if self.use_prbm:
+            if self.cond_to_shift is not None:
+                # cond_to_shift is of form {'name' : ['value']}
+                condition_key = list(self.cond_to_shift.keys())[0]
+                condition_values = self.cond_to_shift[condition_key]
+
+                mask = torch.tensor(
+                    [name in condition_values for name in input_dataset[condition_key]],
+                    dtype=torch.bool,
+                )
+                mask = (
+                    mask.unsqueeze(-1).unsqueeze(-1).to(base_output['z'].device)
+                )  # Ensure correct broadcasting
+                prbm_expanded = self.prbm.unsqueeze(0).expand_as(base_output['z'])
+
+                base_output['z'] = torch.where(
+                    mask,
+                    base_output['z'] + (base_output['z'] - prbm_expanded),
+                    base_output['z'],
+                )
+            else:
+                base_output['z'] = base_output['z'] + (base_output['z'] - prbm_expanded)
 
         cell_output = self.cell_token_learner(base_output, inference=inference)
 

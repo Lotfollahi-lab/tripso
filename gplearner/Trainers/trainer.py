@@ -1,5 +1,4 @@
 import os
-import warnings
 from typing import (
     Dict,
     List,
@@ -7,6 +6,7 @@ from typing import (
     Union,
 )
 
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
@@ -17,7 +17,6 @@ import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
 
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
-from scipy.sparse import vstack
 from sklearn.metrics import classification_report
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
@@ -32,10 +31,8 @@ from ..Utils.losses import (
 )
 from ..Utils.utils import (
     CosineLRwithWarmUp,
-    ensembl_to_name,
     get_gp_tokens,
     one_hot_encoder,
-    token_to_gene,
     wrangle_classification_report,
 )
 
@@ -304,6 +301,7 @@ class scGPL(pl.LightningModule):
         self.emb_dataset = None
         self.gene_dataset = None
         self.token_dataset = None
+        self.attn_adata = None
 
     def forward(self, x):
         out = self.model(
@@ -796,26 +794,38 @@ class scGPL(pl.LightningModule):
                     )
 
     def _test_step_attn(self, batch, batch_idx):
-        raise NotImplementedError(
-            'Need new function for getting attention matrix'
-            ' for cls (currently returns (gene,gene) matrix)'
-        )
-
         if self.gp == 'cell_token':
             output = self.model.get_cell_token_attention(batch)
         else:
-            output = self.model.get_last_self_attn(batch, gp=self.gp)
+            output = self.model.get_cls_attn(batch, gp=self.gp)
 
-        # store attention scores here
-        self.attn_scores.append(output['attn'])
+        output_df = pd.DataFrame(output)
 
-        # and metadata for obs
+        # Add metadata
+        meta = {}
         for k, v in batch.items():
             if k != 'input_ids':
-                if k in self.cell_metadata:
-                    self.cell_metadata[k].append(v)
-                else:
-                    self.cell_metadata[k] = [v]
+                # optionally move tensors to cpu
+                if isinstance(v, torch.Tensor):
+                    v = v.cpu().numpy()
+                meta[k] = v
+
+        meta_df = pd.DataFrame(meta)
+
+        odata = sc.AnnData(
+            X=output_df.values,
+            obs=meta_df,
+        )
+
+        odata.var_names = output_df.columns
+        odata.obs = odata.obs.set_index('idx')
+
+        if self.attn_adata is None:
+            self.attn_adata = odata
+        else:
+            self.attn_adata = ad.concat([self.attn_adata, odata])
+
+        return None
 
     def test_step(
         self,
@@ -1004,59 +1014,12 @@ class scGPL(pl.LightningModule):
         self.cell_token = []
 
     def _end_test_epoch_attn(self):
-        attn = vstack(self.attn_scores)
-
-        # convert to dataframe, first sending tensors back to cpu as numpy arrays
-        meta_dict = self.cell_metadata
-        for k, v in meta_dict.items():
-            if isinstance(v[0], torch.Tensor):
-                meta_dict[k] = torch.cat(v).cpu().numpy().tolist()
-            else:
-                # flatten list of lists
-                meta_dict[k] = [item for sublist in v for item in sublist]
-
-        meta = pd.DataFrame(meta_dict)
-        adata = sc.AnnData(X=attn, obs=meta)
-
-        # Set the var_names attribute of the AnnData object to the gp tokens
-        if self.gp != 'cell_token':
-            gp_idx = self.model.gp_inputs.index(self.gp)
-            tokens = pd.Series(
-                getattr(
-                    self.model.multi_gp_encoder, f'gp{gp_idx}_tokens_encoded'
-                ).keys()
-            )
-            ensembl_ids = tokens.map(token_to_gene)
-            gene_names = ensembl_ids.map(ensembl_to_name)
-
-        if self.gp == 'cell_token':
-            if self.model_type == 'Global':
-                adata.var_names = ['cls'] + list(self.model.gp_inputs)
-            else:
-                adata.var_names = list(self.model.gp_inputs)
-        else:
-            if self.model_type == 'Mean':
-                adata.var_names = list(ensembl_ids)
-                adata.var['token'] = pd.Series(list(tokens), dtype=str).tolist()
-                adata.var['ensembl'] = list(ensembl_ids)
-                adata.var['gene'] = list(gene_names)
-            else:
-                adata.var_names = ['cls'] + list(ensembl_ids)
-                adata.var['token'] = ['cls'] + pd.Series(
-                    list(tokens), dtype=str
-                ).tolist()
-                adata.var['ensembl'] = ['cls'] + list(ensembl_ids)
-                adata.var['gene'] = ['cls'] + list(gene_names)
-
-        warnings.warn('Converting X array to dense format for writing to disk')
-        adata.X = adata.X.toarray()
-
-        adata.write_h5ad(
-            os.path.join(self.output_dir, f'adata_{self.gp}_attn_scores.h5ad')
+        output_path = os.path.join(self.output_dir, 'attention')
+        os.makedirs(output_path, exist_ok=True)
+        self.attn_adata.write_h5ad(
+            os.path.join(output_path, f'{self.gp}_attention.h5ad')
         )
-
-        # reset
-        self.attn_scores = []
+        self.attn_adata = None
 
     def on_test_epoch_end(self):
         if self.return_attention:
