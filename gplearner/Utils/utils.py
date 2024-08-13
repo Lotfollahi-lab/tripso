@@ -266,14 +266,14 @@ def encode_labels(input_data, input_col, new_col):
     Encode labels as integers
     works on Huggingface dataset class
     """
-    label_values = list(set(input_data[input_col]))
+    label_values = input_data.unique(input_col)
     label_dict = {l: i for i, l in enumerate(label_values)}
 
     def classes_to_ids(example):
         example[new_col] = label_dict[example[input_col]]
         return example
 
-    labeled_dataset = input_data.map(classes_to_ids, num_proc=16)
+    labeled_dataset = input_data.map(classes_to_ids, num_proc=4)
 
     return labeled_dataset
 
@@ -525,7 +525,10 @@ def get_gp_tokens(
         name_dictionary = pickle.load(f)
 
     # Remove missing values (NaN) from the column
-    genes = list(gp_genes.dropna())
+    if isinstance(gp_genes, pd.Series):
+        genes = list(gp_genes.dropna())
+    else:
+        genes = gp_genes
 
     # Convert gene names to Ensembl IDs
     if do_ensembl_conversion:

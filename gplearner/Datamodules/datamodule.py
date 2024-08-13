@@ -18,6 +18,7 @@ from torch.utils.data import (
     WeightedRandomSampler,
     random_split,
 )
+from transformers import BertForMaskedLM
 
 from ..Models.gp_model import (
     GENE_NAME_FILE,
@@ -78,7 +79,10 @@ class tkDataset(Dataset):
                 path to anndata object
 
         """
-        gdata = load_from_disk(folder)
+        if isinstance(folder, str):
+            gdata = load_from_disk(folder)
+        else:
+            gdata = folder
 
         if filter_key is not None:
             if isinstance(filter_value, str):
@@ -179,7 +183,11 @@ class EmbDataset(Dataset):
     ):
         self.data_type = data_type
         if self.data_type == 'dataset':
-            emb = load_from_disk(folder_path)
+            if isinstance(folder_path, str):
+                emb = load_from_disk(folder_path)
+            else:
+                emb = folder_path
+
             if filter_key is not None:
                 if isinstance(filter_value, str):
                     emb = emb.filter(lambda x: x[filter_key] == filter_value)
@@ -308,6 +316,7 @@ class txDataModule(LightningDataModule):
         frac_for_training=1,
         data_split_to_pass_to_val_step='val',
         seed=42,
+        load_exp=False,
     ):
         """Create a datamodule from a tokenized Geneformer dataset
 
@@ -336,6 +345,7 @@ class txDataModule(LightningDataModule):
         self.filter_value = filter_value
         self.frac_for_generation = frac_for_generation
         self.seed = seed
+        self.load_exp = load_exp
 
         with open(token_dictionary_file, 'rb') as f:
             self.gene_token_dict = pickle.load(f)
@@ -347,8 +357,9 @@ class txDataModule(LightningDataModule):
 
     def prepare_data(self):
         # Check if the folder path exists
-        folder_path = Path(self.folder)
-        assert folder_path.exists(), 'tokenized folder does not exist'
+        if isinstance(self.folder, str):
+            folder_path = Path(self.folder)
+            assert folder_path.exists(), 'tokenized folder does not exist'
 
         if self.adata_path is not None:
             adata_path = Path(self.adata_path)
@@ -502,12 +513,18 @@ class txDataModule(LightningDataModule):
             'length': length.clone().detach(),
         }
 
+        if self.load_exp:
+            norm_exp = [torch.tensor(d['norm_exp']) for d in tokenized_batch]
+            output_dict['norm_exp'] = torch.stack(norm_exp)
+
         # Keep track of metadata
         for m in self.metadata:
             if m.endswith('_id'):
                 output_dict[m] = torch.tensor(
                     [d[m] for d in tokenized_batch], dtype=torch.long
                 )
+            elif m == 'norm_exp':
+                continue
             else:
                 output_dict[m] = [d[m] for d in tokenized_batch]
 
@@ -543,6 +560,7 @@ class iTxDataModule(txDataModule):
         gpdb,
         do_ensembl_conversion,
         geneformer_model=GENEFORMER_MODEL_PATH,
+        peft_config_path=None,
         gene_token_path=TOKEN_DICTIONARY_FILE,
         gene_name_path=GENE_NAME_FILE,
         gf_layer_to_quant=-1,
@@ -556,7 +574,9 @@ class iTxDataModule(txDataModule):
 
         # Initialize geneformer model for getting geneformer embeddings
         self.gf_wrapper = gfWrapper(
-            geneformer_model=geneformer_model, gf_layer_to_quant=gf_layer_to_quant
+            geneformer_model=geneformer_model,
+            gf_layer_to_quant=gf_layer_to_quant,
+            peft_config_path=peft_config_path,
         )
 
         # Get vocab size
@@ -567,10 +587,9 @@ class iTxDataModule(txDataModule):
         # Set up encoded GP tokens
         if add_remaining_var is None:
             gp_tokens = get_gp_tokens(
-                gp,
-                gpdb,
+                gpdb[gp],
                 do_ensembl_conversion,
-                gene_counts_df,
+                gp,
                 gene_token_path,
                 gene_name_path,
             )
@@ -682,18 +701,18 @@ class iTxDataModule(txDataModule):
         # count number of genes per cell
         num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
 
-        # Make tensor for forward pass
-        masked_labels_output = torch.tensor(masked_labels_output).to(gf.device)
-        # comment the line below to leave 0s because they are actually informative
-        # (this gene was not in the top 1000 of this cell)
+        # # Make tensor for forward pass
+        # masked_labels_output = torch.tensor(masked_labels_output).to(gf.device)
+        # # comment the line below to leave 0s because they are actually informative
+        # # (this gene was not in the top 1000 of this cell)
         masked_labels_output[masked_labels_output == 0] = -100
 
-        # We know that at most, the non zero genes is the number of genes in the GP
-        # for known GP we keep all genes
-        # TO DO : ADD OPTION FOR GPFINDER HERE
-        n_genes_to_keep = gp_tokens.shape[0]
-        result_matrix = result_matrix[:, :n_genes_to_keep, :]
-        masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
+        # # We know that at most, the non zero genes is the number of genes in the GP
+        # # for known GP we keep all genes
+        # # TO DO : ADD OPTION FOR GPFINDER HERE
+        # n_genes_to_keep = gp_tokens.shape[0]
+        # result_matrix = result_matrix[:, :n_genes_to_keep, :]
+        # masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
 
         # Set up attention mask
         # to avoid attention to padding tokens
@@ -776,6 +795,7 @@ class EmbDataModule(LightningDataModule):
         encode_covariate=False,
         # for development
         frac_for_training=1,
+        mode=None,
     ):
         super().__init__()
         self.folder_path = folder_path
@@ -795,6 +815,17 @@ class EmbDataModule(LightningDataModule):
         self.clf_label = clf_label
         self.encode_covariate = encode_covariate
         self.frac_for_training = frac_for_training
+        self.mode = mode
+
+        self.geneformer = BertForMaskedLM.from_pretrained(GENEFORMER_MODEL_PATH)
+        # Access the embedding layer
+        embedding_layer = self.geneformer.bert.embeddings.word_embeddings
+
+        # get pad token id
+        pad_token_id = torch.tensor([0])
+
+        # Retrieve the embedding for the pad token
+        self.pad_token_embedding = embedding_layer.weight[pad_token_id]
 
     def prepare_data(self):
         folder_path = Path(self.folder_path)
@@ -881,6 +912,58 @@ class EmbDataModule(LightningDataModule):
             if isinstance(self.emb_to_keep, str):
                 emb = [torch.tensor(d[self.emb_to_keep]) for d in batch]
 
+                if self.mode == 'ignore_0':
+                    zero_arr = np.array(
+                        [d[f'{self.emb_to_keep}_num_genes'] for d in batch]
+                    )
+                    zero_idx = zero_arr == 0  # This should be a boolean array
+                    emb = [
+                        torch.tensor(d[self.emb_to_keep])
+                        for i, d in enumerate(batch)
+                        if not zero_idx[i]
+                    ]
+
+                elif self.mode == 'set_to_0':
+                    emb = []
+                    for d in batch:
+                        if d[f'{self.emb_to_keep}_num_genes'] == 0:
+                            emb.append(
+                                torch.zeros(torch.tensor(d[self.emb_to_keep]).shape)
+                            )
+                        else:
+                            emb.append(torch.tensor(d[self.emb_to_keep]))
+
+                elif self.mode == 'set_to_nan':
+                    emb = []
+                    for d in batch:
+                        if d[f'{self.emb_to_keep}_num_genes'] == 0:
+                            nan_tensor = torch.full(
+                                torch.tensor(d[self.emb_to_keep]).shape, float('nan')
+                            )
+                            emb.append(nan_tensor)
+                        else:
+                            emb.append(torch.tensor(d[self.emb_to_keep]))
+
+                elif self.mode == 'set_to_random':
+                    emb = []
+                    for d in batch:
+                        if d[f'{self.emb_to_keep}_num_genes'] == 0:
+                            x_tensor = torch.randn(
+                                torch.tensor(d[self.emb_to_keep]).shape
+                            )
+                            emb.append(x_tensor)
+                        else:
+                            emb.append(torch.tensor(d[self.emb_to_keep]))
+
+                elif self.mode == 'pad_embedding':
+                    emb = []
+                    for d in batch:
+                        if d[f'{self.emb_to_keep}_num_genes'] == 0:
+                            x_tensor = self.pad_token_embedding.detach().squeeze()
+                            emb.append(x_tensor)
+                        else:
+                            emb.append(torch.tensor(d[self.emb_to_keep]))
+
                 output_dict = {
                     self.emb_to_keep: torch.stack(emb),
                 }
@@ -897,20 +980,47 @@ class EmbDataModule(LightningDataModule):
             for m in self.meta_labels:
                 if m == self.clf_label:
                     if self.encode_covariate:
-                        output_dict[f'{m}_id'] = torch.tensor(
-                            [self.train_dataset.label_dict[d[m]] for d in batch],
+                        if self.mode == 'ignore_0':
+                            output_dict[f'{m}_id'] = torch.tensor(
+                                [
+                                    self.train_dataset.label_dict[d[m]]
+                                    for i, d in enumerate(batch)
+                                    if not zero_idx[i]
+                                ],
+                                dtype=torch.long,
+                            )
+
+                            output_dict[m] = [
+                                d[m] for i, d in enumerate(batch) if not zero_idx[i]
+                            ]
+
+                        else:
+                            output_dict[f'{m}_id'] = torch.tensor(
+                                [self.train_dataset.label_dict[d[m]] for d in batch],
+                                dtype=torch.long,
+                            )
+
+                            output_dict[m] = [d[m] for d in batch]
+
+                elif m.endswith('_id'):
+                    if self.mode is None:
+                        output_dict[m] = torch.tensor(
+                            [d[m] for d in batch], dtype=torch.long
+                        )
+                    elif self.mode == 'ignore_0':
+                        output_dict[m] = torch.tensor(
+                            [d[m] for i, d in enumerate(batch) if not zero_idx[i]],
                             dtype=torch.long,
                         )
-
-                        output_dict[m] = [d[m] for d in batch]
-                elif m.endswith('_id'):
-                    output_dict[m] = torch.tensor(
-                        [d[m] for d in batch], dtype=torch.long
-                    )
                 elif m in self.continuous_cov:
                     output_dict[m] = torch.tensor([d[m] for d in batch])
                 else:
-                    output_dict[m] = [d[m] for d in batch]
+                    if self.mode == 'ignore_0':
+                        output_dict[m] = [
+                            d[m] for i, d in enumerate(batch) if not zero_idx[i]
+                        ]
+                    else:
+                        output_dict[m] = [d[m] for d in batch]
 
         elif self.data_type == 'h5ad':
             # only keep embedding of interest

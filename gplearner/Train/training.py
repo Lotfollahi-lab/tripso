@@ -71,6 +71,7 @@ def run_training(
     use_weighted_sampler: Optional[bool] = False,
     sample_by: Optional[str] = None,
     geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
+    peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
     supervised_rem_var: Optional[str] = None,
     set_gpfinder_weight_decay: Optional[float] = None,
@@ -83,9 +84,16 @@ def run_training(
     prototype_labels_key: Optional[str] = None,
     lambda_prototype_loss: float = 1e-2,
     prbm_path: Optional[str] = None,
+    use_baseline_tk: Optional[bool] = False,
+    tk_vocab_size: Optional[int] = 0,
     # for large scale pretraining:
     limit_val_batches: Optional[float] = 1.0,
     val_check_interval: Optional[float] = 1.0,
+    mean_emb_dict: Optional[str] = None,
+    gene2vec: Optional[str] = None,
+    use_pos_emb: Optional[bool] = True,
+    use_onehot_wrapper: Optional[bool] = False,
+    vocab_gene_names: Optional[list] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -271,7 +279,7 @@ def run_training(
         monitor='train/loss_step',
         dirpath=checkpoint_dir,
         filename=save_id,
-        save_top_k=1,
+        save_top_k=3,
         mode='min',
         save_last=True,
         # save every n steps --> issue if dataset has < n steps
@@ -306,6 +314,10 @@ def run_training(
                 'use_flash': use_flash,
                 'weight_decay': weight_decay,
                 'num_virtual_tokens': num_virtual_tokens,
+                'condition_on_z_mean': mean_emb_dict is not None,
+                'use_baseline_tk': use_baseline_tk,
+                'use_onehot_wrapper': use_onehot_wrapper,
+                'use_pos_emb': use_pos_emb,
             }
         )
 
@@ -381,6 +393,8 @@ def run_training(
             '\nMake sure you pass anndata object with normalized counts'
         )
 
+    load_exp = use_onehot_wrapper is True
+
     txdata = txDataModule(
         folder=dataset_path,
         batch_size=batch_size,
@@ -389,6 +403,7 @@ def run_training(
         use_weighted_sampler=use_weighted_sampler,
         label_key=sample_by,
         seed=seed,
+        load_exp=load_exp,
     )
 
     # Load gpdb
@@ -450,6 +465,14 @@ def run_training(
             num_virtual_tokens=num_virtual_tokens,
             virtual_tokens_label=virtual_tokens_label,
             num_prompt_classes=num_prompt_classes,
+            peft_config_path=peft_config_path,
+            mean_emb_dict=mean_emb_dict,
+            use_baseline_tk=use_baseline_tk,
+            tk_vocab_size=tk_vocab_size,
+            gene2vec=gene2vec,
+            use_pos_emb=use_pos_emb,
+            use_onehot_wrapper=use_onehot_wrapper,
+            vocab_gene_names=vocab_gene_names,
         )
 
     elif model_type == 'Global':
@@ -484,6 +507,14 @@ def run_training(
             virtual_tokens_label=virtual_tokens_label,
             num_prompt_classes=num_prompt_classes,
             prbm=prbm,
+            peft_config_path=peft_config_path,
+            mean_emb_dict=mean_emb_dict,
+            use_baseline_tk=use_baseline_tk,
+            tk_vocab_size=tk_vocab_size,
+            gene2vec=gene2vec,
+            use_pos_emb=use_pos_emb,
+            use_onehot_wrapper=use_onehot_wrapper,
+            vocab_gene_names=vocab_gene_names,
         )
 
     else:
@@ -566,12 +597,15 @@ def run_training(
         # For continuing training from checkpoint
         if resume_training:
             latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-            checkpoint_path = os.path.join(
-                path_to_base_model, latest_ckpt  # type: ignore[arg-type]
-            )
-            checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-            gp_transformer.load_state_dict(checkpoint['state_dict'])
-            # n_epochs = checkpoint['epoch'] + n_epochs
+
+            # print('latest_ckpt', latest_ckpt)
+
+            # checkpoint_path = os.path.join(
+            #     path_to_base_model, latest_ckpt  # type: ignore[arg-type]
+            # )
+            # print('Loading from checkpoint', checkpoint_path)
+            # use lightning function to load back optimizer/scheduler as well
+            # gp_transformer = gp_transformer.load_from_checkpoint(latest_ckpt)
 
         else:
             # For training global model after base model
@@ -586,11 +620,17 @@ def run_training(
                 latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
                 checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
                 print('Loading from checkpoint', checkpoint_path)
+
                 checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
                 gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
 
-                # reset output directory
-                gp_transformer.output_dir = output_dir
+                # load_from_checkpoint is not in place
+                # if have new params (eg global) ignores them
+                # only use for resume training?
+                # gp_transformer = gp_transformer.load_from_checkpoint(
+                #     checkpoint_path,
+                #     output_dir=output_dir
+                #     )
 
                 # freeze base model
                 for name, param in gp_transformer.model.named_parameters():
@@ -620,15 +660,10 @@ def run_training(
                 print('Loading from checkpoint', checkpoint_path)
                 checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
                 gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-                # n_epochs = (
-                #     checkpoint['epoch'] + n_epochs
-                # )  # TO DO : do we need this line?
-
-                # reset output directory
-                gp_transformer.output_dir = output_dir
-
-                # reset supervised labels
-                gp_transformer.model.supervised_labels = supervised_labels
+                # gp_transformer = gp_transformer.load_from_checkpoint(checkpoint_path,
+                #                                     output_dir=output_dir,
+                #                                     supervised_labels=supervised_labels
+                #                                     )
 
     # For training global model after base model
     if supervised_rem_var is not None:
@@ -747,7 +782,10 @@ def run_training(
         )
 
     # Ready to train with new learning rate
-    trainer.fit(gp_transformer, txdata)
+    if resume_training:
+        trainer.fit(gp_transformer, txdata, ckpt_path=latest_ckpt)
+    else:
+        trainer.fit(gp_transformer, txdata)
 
     # save logs to csv for custom plotting
     # Fetch logged data from wandb

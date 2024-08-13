@@ -23,6 +23,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange, repeat
 
 from ..Utils import (
     drop_path,
@@ -134,17 +135,20 @@ class Attention(nn.Module):
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
 
-            # apply attention mask for padding tokens
-            # Mask rows:
-            attn = attn * attn_mask.unsqueeze(1).unsqueeze(
-                -1
-            )  # unsqueeze to add head dimension
-            # Mask columns:
-            attn = attn * attn_mask.unsqueeze(1).unsqueeze(1)
+            mask = rearrange(attn_mask, 'b ... -> b (...)')
+            max_neg_value = -torch.finfo(attn.dtype).max
 
+            # Repeat the mask for each head
+            mask = repeat(mask, 'b j -> b h () j', h=self.num_heads)
+
+            # Apply the mask to the attention scores
+            attn.masked_fill_(mask == 0, max_neg_value)
+
+            # Apply softmax to get attention weights
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
 
+            # Calculate the weighted sum of values
             x = (attn @ v).transpose(1, 2).reshape(B, N, C)
 
         x = self.proj(x)
@@ -210,21 +214,24 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
-        position = torch.arange(max_len).unsqueeze(1)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
+            torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)
         )
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
         """
         Arguments:
             x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
         """
-        x = x + self.pe[: x.size(0)]
+
+        pe = self.pe[:, : x.size(1)]  # (1, seq_len, 256)
+        x = x + pe  # (batch, seq_len, 256)
+
         return self.dropout(x)
 
 
@@ -357,7 +364,12 @@ class gpTransformerEncoder(nn.Module):
         B = x.shape[0]  # batch size
 
         # add the [CLS] token to the embed patch tokens
-        cls_tokens = self.cls_token.expand(B, -1, -1)
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # (256, 1, 256)
+
+        # print('cls token --> when concatenated')
+        # print(cls_tokens.shape) # 256
+        # print(cls_tokens[:5, 0, :10])
+
         x = torch.cat((cls_tokens, x), dim=1)
 
         # add dummy label for cls
@@ -380,6 +392,8 @@ class gpTransformerEncoder(nn.Module):
 
         #     print('x shape after pos emb', x.shape)
 
+        # print(x[:5, 0, :10])
+
         return self.pos_drop(x), gene_labels
 
     def forward(
@@ -401,6 +415,9 @@ class gpTransformerEncoder(nn.Module):
 
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
+
+        # print('After adding cls token and positional encoding --> ALL 0 CELLS')
+        # print(x[idx][:5, 0, :10])
 
         # # Optionally move virtual tokens to start of the sequence
         # if num_virtual_tokens > 0:
@@ -440,8 +457,13 @@ class gpTransformerEncoder(nn.Module):
         for blk in self.blocks:
             x, attn = blk(x, attn_mask=attn_mask, return_attention=return_attention)
 
+        # print('ALL 0 CELLS - output of attention block')
+        # print(x[idx][:5, 0, :10])
+
         x = self.norm(x)
 
+        # print('after normalization')
+        # print(x[idx][:5, 0, :10])
         token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
 
         logits_lm = self.decoder(x)

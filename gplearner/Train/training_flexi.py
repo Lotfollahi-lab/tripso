@@ -57,6 +57,7 @@ def run_training_from_select_gps(
     frac_for_training: Optional[float] = 1.0,
     lambda_gp_similarity: Optional[float] = 1e-2,
     global_loss: str = 'supervised',
+    global_loss_old: str = 'reconstruction',
     classification_labels: Optional[list] = None,
     global_attn_heads: Optional[int] = 8,
     supervised_labels: Optional[dict] = None,
@@ -373,6 +374,8 @@ def run_training_from_select_gps(
     # GO similarity
     if use_go_similarity_loss:
         go_similarity = pd.read_csv(go_similarity_path, index_col=0)
+    else:
+        go_similarity = None
 
     if gene_counts_df is not None:
         gene_counts_df = pd.read_csv(gene_counts_df)
@@ -450,6 +453,8 @@ def run_training_from_select_gps(
             hvg_list=hvg_list,
         )
     elif model_type_old == 'Global':
+        if global_loss_old is None:
+            global_loss_old = global_loss
         model_v0 = gpTransformerGlobal(
             gene_counts_df=gene_counts_df,
             database=gpdb_old,
@@ -463,7 +468,7 @@ def run_training_from_select_gps(
             add_remaining_var=add_remaining_var_old,
             supervised_labels=supervised_labels_old,
             global_attn_heads=global_attn_heads,
-            global_loss=global_loss,
+            global_loss=global_loss_old,
             global_masking_rate=global_masking_rate,
             global_n_blocks=global_n_blocks,
             reconstruction_loss=reconstruction_loss,
@@ -480,7 +485,7 @@ def run_training_from_select_gps(
     gp_transformer_v0 = scGPL(
         model_v0,
         model_type_old,
-        global_loss=global_loss,
+        global_loss=global_loss_old,
         lr=lr,
         finetune_lr=finetune_lr,
         use_finetune_lr=global_training == 'finetune',
@@ -544,6 +549,15 @@ def run_training_from_select_gps(
                     param.requires_grad = False
         else:
             continue
+
+    # ----- Optionally transfer cell encoder -------
+    if (model_type == 'Global') & (model_type_old == 'Global'):
+        gp_transformer.model.cell_encoder = gp_transformer_v0.model.cell_encoder
+
+        # # freeze cell encoder
+        # for name, param in gp_transformer.model.named_parameters():
+        #     if 'cell_encoder' in name:
+        #         param.requires_grad = False
 
     # ----- Select which GP to finetune -------
 

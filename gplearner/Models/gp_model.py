@@ -7,10 +7,12 @@ import warnings
 from typing import Dict, Optional
 
 # imports
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from peft import PeftConfig, get_peft_model
 from transformers import BertForMaskedLM
 
 from ..Modules.modules import (
@@ -32,18 +34,86 @@ GENEFORMER_MODEL_PATH = (
 )
 
 
+class BaselineWrapper(nn.Module):
+    def __init__(
+        self,
+        vocab_size,
+        gene2vec,
+    ):
+        super().__init__()
+
+        if gene2vec is None:
+            self.gene_embeddings = nn.Embedding(vocab_size, 256)
+        else:
+            # Load gene embeddings gene2vec
+            # nn.Embedding from pretrained automatically turns off gradient
+            gene2vec = pd.read_csv(gene2vec, index_col=0)
+            gene2vec_tensor = torch.tensor(gene2vec.values, dtype=torch.float32)
+            self.gene_embeddings = nn.Embedding.from_pretrained(gene2vec_tensor)
+            print('Loaded gene2vec embeddings', gene2vec_tensor.shape)
+
+    def forward(self, input_dataset, inference):
+        # input is tokenized dataset
+        # print(input_dataset['input_ids'][0])
+        # print('maximum input id', input_dataset['input_ids'].max())
+        # print('min input id', input_dataset['input_ids'].min())
+        # print('Embedding shape', self.gene_embeddings.weight.shape)
+
+        emb_out = self.gene_embeddings(input_dataset['input_ids'])
+
+        return emb_out
+
+
+class OneHotWrapper(nn.Module):
+    def __init__(self, gene_names):
+        super().__init__()
+        self.ref_gene_names = gene_names
+        self.gene_to_index = {gene: idx for idx, gene in enumerate(gene_names)}
+
+    def forward(self, input_dataset, inference):
+        b, s = input_dataset['input_ids'].shape
+        e = len(self.ref_gene_names)
+
+        # Convert gene names in input_ids to indices based on all_genes
+        gene_indices = input_dataset['input_ids']
+
+        # remove padding tokens
+        gene_indices = gene_indices[:, : len(self.ref_gene_names)]
+
+        b, s = gene_indices.shape
+        e = len(self.ref_gene_names)
+
+        # Initialize embedding tensor with zeros
+        emb = torch.zeros((b, s, e), dtype=torch.float32).to(gene_indices.device)
+
+        # Use advanced indexing to set the appropriate positions
+        batch_indices = torch.arange(b).view(b, 1).expand(b, s)
+        sequence_indices = torch.arange(s).view(1, s).expand(b, s)
+        emb[batch_indices, sequence_indices, gene_indices] = input_dataset['norm_exp']
+
+        return emb
+
+
 class gfWrapper(nn.Module):
     def __init__(
         self,
         geneformer_model,
         gf_layer_to_quant,
+        peft_config_path,
     ):
         super().__init__()
 
         # Initialize geneformer model for getting geneformer embeddings
-        self.gf = BertForMaskedLM.from_pretrained(
+        model = BertForMaskedLM.from_pretrained(
             geneformer_model, output_attentions=False, output_hidden_states=True
-        )  # .to("cuda")
+        )
+
+        if peft_config_path:
+            # Load the PEFT configuration from the checkpoint
+            peft_config = PeftConfig.from_pretrained(peft_config_path)
+            self.gf = get_peft_model(model, peft_config)
+        else:
+            self.gf = model
 
         # Freeze weights for geneformer model
         for name, param in self.gf.named_parameters():
@@ -87,6 +157,8 @@ class gpWrapper(nn.Module):
         num_virtual_tokens,
         virtual_tokens_label,
         num_prompt_classes,
+        mean_emb_dict,
+        use_pos_emb,
     ):
         super().__init__()
 
@@ -157,6 +229,7 @@ class gpWrapper(nn.Module):
                     num_heads=self.num_heads,
                     mlm_masking_prob=self.mgm_mask_ratio,
                     use_flash=use_flash,
+                    use_pos_emb=use_pos_emb,
                 )
                 for i in range(len(gp_inputs))
             ]
@@ -241,6 +314,27 @@ class gpWrapper(nn.Module):
         else:
             self.virtual_tokens_label = None
 
+        self.mean_emb_dict = mean_emb_dict
+        if self.mean_emb_dict is not None:
+            # Load precomputed GP gene embeddings
+            # Load the embeddings from the pickle file
+            with open(mean_emb_dict, 'rb') as f:
+                z_mean = pickle.load(f)
+
+            # Convert strings to integers
+            z_mean = {int(k): v for k, v in z_mean.items()}
+
+            # Convert z_mean dictionary to a tensor for efficient indexing
+            max_token_id = max(z_mean.keys())
+            z_mean_tensor = torch.zeros(
+                (max_token_id + 1, next(iter(z_mean.values())).shape[0])
+            )
+
+            for token_id, embedding in z_mean.items():
+                z_mean_tensor[token_id] = torch.tensor(embedding)
+
+            self.register_buffer('z_mean', z_mean_tensor)
+
     def build_input_matrix(
         self, gf, input_ids, gp_tokens, crop_to_gp_len=True, is_gpfinder=False
     ):
@@ -271,6 +365,13 @@ class gpWrapper(nn.Module):
         # convert gp_tokens bf16 tensor to integers
         # gp_tokens = gp_tokens.to(torch.int)
         gp_tokens = gp_tokens.long()
+
+        # FOR ONE HOT ENCODER VERSION ONLY
+        b1, s1 = input_ids.shape
+        b2, s2, e2 = gf.shape
+
+        if s1 != s2:
+            input_ids = input_ids[:, :s2]
 
         # Create a binary mask (h, i, k)
         # In cell h, is the gene at position i in our GP at position k?
@@ -369,6 +470,32 @@ class gpWrapper(nn.Module):
                 ],
                 dim=-1,
             )
+
+        # Optionally condition on mean gene representation from geneformer
+        # Use input_ids to index into z_mean_tensor and get embeddings
+        if self.mean_emb_dict:
+            # in masked_labels, temporarily convert to 0 (padding token)
+            masked_labels_output[masked_labels_output == -100] = 0
+
+            z_mean_embeddings = self.z_mean[masked_labels_output]  # Shape: (b, e, e2)
+
+            result_matrix = torch.cat([result_matrix, z_mean_embeddings], dim=-1)
+
+            # Convert back
+            masked_labels_output[masked_labels_output == 0] = -100
+
+        # # Explore cells with no genes
+        # idx = num_genes_per_cell == 0
+        # if idx.sum() > 0:
+        #     print('Number of cells with no genes', idx.sum())
+        #     print('Result matrix')
+        #     print(result_matrix[idx].sum()) # 0
+        #     print('Masked labels')
+        #     print(masked_labels_output[idx].sum()) # 0
+        #     print('Num genes per cell')
+        #     print(num_genes_per_cell[idx].sum()) # 0
+        #     print('Attention mask')
+        #     print(attn_mask[idx].sum()) # 44 (1 for each cls)
 
         return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
 
@@ -493,6 +620,34 @@ class gpWrapper(nn.Module):
                     * 2,  # *2 for shared and GP-specific tokens
                     using_gp_specific_token=self.num_virtual_tokens > 0,
                 )
+
+                # # Encoder output for cells with 0 GP genes
+                # idx = num_genes_per_cell == 0
+                # if idx.sum() > 0:
+                #     cls = encoder_output['cls']
+                #     logits_lm = encoder_output['logits_lm']
+                #     gene_labels = encoder_output['gene_labels']
+
+                #     print('Number of cells with no genes', idx.sum())
+                #     print('CLS') # different for each cell
+                #     if len(idx) > 1:
+                #         print(cls[idx][:5])
+                #     else:
+                #         print(cls[idx])
+
+                #     print('Logits')
+                #     if len(idx) > 1:
+                #         print(logits_lm[idx][:5])
+                #     else:
+                #         print(logits_lm[idx])
+
+                #     print('Gene labels') # -100
+                #     if len(idx) > 1:
+                #         print(gene_labels[idx][:5])
+                #     else:
+                #         print(gene_labels[idx])
+
+                #     raise ValueError('Cells with no genes')
 
                 gp_token_list.append(encoder_output['cls'])
                 logits_lm_list.append(encoder_output['logits_lm'])
@@ -1165,6 +1320,7 @@ class gpTransformerBase(nn.Module):
         mgm_mask_ratio=0.5,
         use_flash=False,
         geneformer_model=GENEFORMER_MODEL_PATH,
+        peft_config_path=None,
         gf_layer_to_quant=-1,
         gene_token_path=TOKEN_DICTIONARY_FILE,
         gene_name_path=GENE_NAME_FILE,
@@ -1175,6 +1331,13 @@ class gpTransformerBase(nn.Module):
         num_virtual_tokens=0,
         virtual_tokens_label=None,
         num_prompt_classes=0,
+        mean_emb_dict=None,
+        use_baseline_tk=False,
+        tk_vocab_size=0,
+        gene2vec=None,
+        use_pos_emb=True,
+        use_onehot_wrapper=False,
+        vocab_gene_names=None,
     ):
         """
         database :
@@ -1227,9 +1390,16 @@ class gpTransformerBase(nn.Module):
         super().__init__()
 
         # Initialize geneformer model for getting geneformer embeddings
-        self.gf_wrapper = gfWrapper(
-            geneformer_model=geneformer_model, gf_layer_to_quant=gf_layer_to_quant
-        )
+        if use_baseline_tk:
+            self.gf_wrapper = BaselineWrapper(tk_vocab_size, gene2vec)
+        elif use_onehot_wrapper:
+            self.gf_wrapper = OneHotWrapper(gene_names=vocab_gene_names)
+        else:
+            self.gf_wrapper = gfWrapper(
+                geneformer_model=geneformer_model,
+                gf_layer_to_quant=gf_layer_to_quant,
+                peft_config_path=peft_config_path,
+            )
 
         # Optionally: extract Geneformer cell embeddings
         self.gf_cell_encoder = AverageNonZero()
@@ -1261,6 +1431,7 @@ class gpTransformerBase(nn.Module):
             gp_of_interest = [gp_of_interest]
         self.gp_of_interest = gp_of_interest
 
+        # ADD UNITTEST
         self.multi_gp_encoder = gpWrapper(
             database=self.gpdb,
             do_ensembl_conversion=self.do_ensembl_conversion,
@@ -1280,6 +1451,8 @@ class gpTransformerBase(nn.Module):
             num_virtual_tokens=num_virtual_tokens,
             virtual_tokens_label=virtual_tokens_label,
             num_prompt_classes=num_prompt_classes,
+            mean_emb_dict=mean_emb_dict,
+            use_pos_emb=use_pos_emb,
         )
 
     def forward(
@@ -1290,6 +1463,7 @@ class gpTransformerBase(nn.Module):
         tokens_to_keep=None,
         return_gf_cell_emb=False,
         gp_of_interest=None,
+        masking=True,
     ):
         if self.training:
             inference = False
@@ -1446,7 +1620,9 @@ class gpTransformerGlobal(gpTransformerBase):
 
             else:
                 self.count_head = CountHead(
-                    loss_mode=reconstruction_loss, n_genes=total_n_genes
+                    loss_mode=reconstruction_loss,
+                    n_genes=total_n_genes,
+                    d_model=self.gp_latent_size,
                 )
 
         self.num_prototypes = num_prototypes
@@ -1682,6 +1858,7 @@ class AverageNonZero(nn.Module):
     def __init__(self, cls_tag='cls'):
         super().__init__()
         self.cls_tag = cls_tag
+        self.num_virtual_tokens = 0
 
     def forward(self, x, return_gene_embeddings=False, *args, **kwargs):
         if return_gene_embeddings:
@@ -1707,6 +1884,9 @@ class AverageNonZero(nn.Module):
 
         # Replace NaN values with 0
         x[torch.isnan(x)] = 0
+
+        if torch.isnan(x).any():
+            print('Found nan in line 1847 of AverageNZ')
 
         # output
         output = {self.cls_tag: x, 'logits_lm': [], 'gene_labels': []}
@@ -1821,6 +2001,13 @@ class gfBaseline(gpTransformerBase):
             use_flash=False,
             model_type='Mean',
             learn_new_gp=False,
+            # MAY NEED TO UPDATE THIS
+            hvg_list=None,
+            num_virtual_tokens=0,
+            virtual_tokens_label=None,
+            num_prompt_classes=0,
+            mean_emb_dict=None,
+            use_pos_emb=False,
         )
 
     def get_last_self_attn(self, input_dataset, gp):
@@ -1870,6 +2057,13 @@ class gfGlobal(gpTransformerGlobal):
             use_flash=False,
             model_type='Mean',
             learn_new_gp=False,
+            # MAY NEED TO UPDATE THIS
+            hvg_list=None,
+            num_virtual_tokens=0,
+            virtual_tokens_label=None,
+            num_prompt_classes=0,
+            mean_emb_dict=None,
+            use_pos_emb=False,
         )
 
         self.cell_token_learner = AverageNonZero(cls_tag='cell_token')

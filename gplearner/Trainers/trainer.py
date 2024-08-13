@@ -1,4 +1,5 @@
 import os
+import warnings
 from typing import (
     Dict,
     List,
@@ -17,7 +18,7 @@ import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
 
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, roc_auc_score
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 from torchmetrics.functional import pairwise_cosine_similarity
@@ -1567,6 +1568,8 @@ class EmbEvaluator(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         x = batch[self.emb_label]
+        # print('x', x)
+
         y = batch[self.y_label]
 
         label_name = self.y_label
@@ -1596,6 +1599,53 @@ class EmbEvaluator(pl.LightningModule):
 
             output_df = wrangle_classification_report(report)
 
+            output_df = output_df[
+                ~output_df['output_class'].isin(['macro avg', 'weighted avg'])
+            ]
+
+            # ---------- Calculate ROC-AUC -----------------
+            # count number of nan values
+            pred_np = pred.cpu().numpy()
+            idx = np.isnan(pred_np).any(axis=1)
+            nans = idx.sum()
+            if nans > 0:
+                print('Number of nan values:', nans)
+
+            # drop rows with nan
+            warnings.warn(
+                f'Dropping {len(idx)} nan values (out of {true_classes.shape[0]})'
+                'for ROC-AUC calculation'
+            )
+            pred = pred[~idx]
+            true_classes = true_classes[~idx]
+
+            # Apply softmax with numerical stability
+            max_pred = torch.max(pred, dim=-1, keepdim=True)[0]
+            stabilized_pred = pred - max_pred
+            class_proba = F.softmax(stabilized_pred, dim=-1).cpu().numpy()
+
+            # check if multiclass
+            if len(np.unique(true_classes)) > 2:
+                roc_auc = roc_auc_score(
+                    true_classes, class_proba, multi_class='ovr', average=None
+                )
+                roc_df = pd.DataFrame(
+                    {
+                        'class': np.unique(true_classes),
+                        'roc_auc': roc_auc,
+                    }
+                )
+
+                output_df['output_class'] = output_df['output_class'].astype(int)
+                output_df = output_df.join(roc_df.set_index('class'), on='output_class')
+
+            else:
+                # Extract the probabilities for the positive class (class 1)
+                y_score_positive_class = class_proba[:, 1]
+                roc_auc = roc_auc_score(true_classes, y_score_positive_class)
+                output_df['roc_auc'] = roc_auc
+
+            # ---------- Wrangle output -----------------
             # convert labels back to original strings
             original_labels = self.y_unencoded
             conversion_df = pd.DataFrame(
@@ -1610,11 +1660,14 @@ class EmbEvaluator(pl.LightningModule):
                 for k, v in zip(conversion_df['encoded'], conversion_df['original'])
             }
 
-            output_df = output_df[
-                ~output_df['output_class'].isin(['macro avg', 'weighted avg'])
-            ]
             output_df['output_class'] = output_df['output_class'].astype(str)
             output_df['output_class'] = output_df['output_class'].map(conversion_dict)
+
+            # check output directory exists
+            if not os.path.exists(os.path.join(self.output_dir, 'cell_metrics')):
+                os.makedirs(
+                    os.path.join(self.output_dir, 'cell_metrics'), exist_ok=True
+                )
 
             output_df.to_csv(
                 os.path.join(

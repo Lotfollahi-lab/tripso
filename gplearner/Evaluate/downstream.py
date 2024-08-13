@@ -132,15 +132,17 @@ class gpEval:
         global_loss: Optional[str] = 'supervised',
         reconstruction_loss: Optional[str] = 'zinb',
         geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
+        peft_config_path: Optional[str] = None,
         path_to_trained_model: Optional[str] = None,
         seed: Optional[int] = 0,
         hvg_path: Optional[str] = None,
         hparam_save: Optional[str] = 'all',
         num_virtual_tokens: Optional[int] = 0,
         cond_to_shift: Optional[Dict] = None,
+        mean_emb_dict: Optional[Dict] = None,
     ):
-        # check only one GPU
-        assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
+        # check only one GPU --> force only 1 device
+        # assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
 
         # set seed for reproducibility
         np.random.seed(seed)
@@ -200,6 +202,8 @@ class gpEval:
                 geneformer_model=geneformer_model_path,
                 hvg_list=hvg_list,
                 num_virtual_tokens=num_virtual_tokens,
+                peft_config_path=peft_config_path,
+                mean_emb_dict=mean_emb_dict,
             )
 
         elif model_type == 'Global':
@@ -218,9 +222,11 @@ class gpEval:
                 global_loss=global_loss,
                 reconstruction_loss=reconstruction_loss,
                 geneformer_model=geneformer_model_path,
+                peft_config_path=peft_config_path,
                 hvg_list=hvg_list,
                 num_virtual_tokens=num_virtual_tokens,
                 cond_to_shift=cond_to_shift,
+                mean_emb_dict=mean_emb_dict,
             )
 
             self.reconstruction_loss = reconstruction_loss
@@ -239,7 +245,11 @@ class gpEval:
                 num_heads=1,
                 add_remaining_var=add_remaining_var,
                 geneformer_model=geneformer_model_path,
+                peft_config_path=peft_config_path,
                 hvg_list=hvg_list,
+                num_virtual_tokens=num_virtual_tokens,
+                mean_emb_dict=mean_emb_dict,
+                use_pos_emb=False,
             )
 
         else:
@@ -265,6 +275,7 @@ class gpEval:
         self.dataset_path = dataset_path
         self.batch_size = batch_size
         self.gpdb = gpdb
+        self.cond_to_shift = cond_to_shift
 
         # for compatability with gpGlobal init
         self.global_loss = global_loss
@@ -345,9 +356,28 @@ class gpEval:
         gp_transformer.save_emb = save_emb
         gp_transformer.split_label = split_label
         gp_transformer.model.multi_gp_encoder.num_virtual_tokens = num_virtual_tokens
-        gp_transformer.model.cell_token_learner.num_virtual_tokens = num_virtual_tokens
         gp_transformer.return_virtual_tokens = return_virtual_tokens
         gp_transformer.model.cond_to_shift = self.cond_to_shift
+
+        # print('')
+        # print('***')
+        # print('INITIALIZING MODEL FROM CHECKPOINT')
+        # print('***')
+        # print('')
+
+        # for n, p in gp_transformer.model.named_parameters():
+        #     print(n, p.shape)
+
+        # print('')
+
+        # print('Hyperparameters')
+        # print(gp_transformer.hparams)
+        # print('')
+
+        if gp_transformer.model_type == 'Global':
+            gp_transformer.model.cell_token_learner.num_virtual_tokens = (
+                num_virtual_tokens
+            )
 
         # for backwards compatibility
         if not hasattr(gp_transformer.model, 'use_prbm'):
@@ -376,7 +406,7 @@ class gpEval:
             seed=self.seed,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
 
         trainer.validate(gp_transformer, txdata)
 
@@ -403,6 +433,7 @@ class gpEval:
         filter_tag=None,
         # development
         frac_for_training=1,
+        mode=None,
     ):
         '''
         Train nn.Linear layer based on embeddings
@@ -451,6 +482,7 @@ class gpEval:
             clf_label=clf_label,
             encode_covariate=encode_covariate,
             frac_for_training=frac_for_training,
+            mode=mode,
         )
 
         emb_dm.setup()
@@ -482,10 +514,10 @@ class gpEval:
         trainer = pl.Trainer(
             max_epochs=n_epochs,
             callbacks=[checkpoint_callback],
-            devices=-1,
+            devices=1,
             accelerator='auto',
             logger=logger,
-            precision=16,
+            # precision=16,
         )
 
         trainer.fit(emb_evaluator, emb_dm)
@@ -527,7 +559,7 @@ class gpEval:
             for c in label_to_plot:
                 adata = remove_single_data_points(adata, c)
 
-            sc.pp.neighbors(adata, use_rep='X')
+            sc.pp.neighbors(adata, use_rep='X', n_neighbors=15)
             sc.tl.umap(adata)
 
             for c in label_to_plot:
@@ -718,7 +750,7 @@ class gpEval:
             seed=self.seed,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
         trainer.validate(gp_transformer, txdata)
 
     def visualize_gene_embeddings(
@@ -811,7 +843,7 @@ class gpEval:
             return_attention=True, gp=gp, num_virtual_tokens=self.num_virtual_tokens
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
 
         trainer.test(gp_transformer, txdata)
 
@@ -843,7 +875,7 @@ class gpEval:
         gp_transformer = self._init_trainer(
             test_random_baseline=True, num_virtual_tokens=self.num_virtual_tokens
         )
-        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
         trainer.test(gp_transformer, txdata)
 
     def evaluate_supervised_model(self):
@@ -855,7 +887,7 @@ class gpEval:
             seed=self.seed,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
         trainer.test(self.gp_transformer, txdata)
 
     def generate_virtual_tokens(self, split='test'):
@@ -876,7 +908,7 @@ class gpEval:
             seed=self.seed,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=-1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
 
         trainer.validate(gp_transformer, txdata)
 
@@ -912,6 +944,9 @@ def calculate_gp_attribution_scores(
     hvg_path=None,
     use_flash=False,
     num_virtual_tokens=0,
+    peft_config_path=None,
+    geneformer_model=GENEFORMER_MODEL_PATH,
+    output_file_name=None,
 ):
     '''
     Calculate attribution scores for each gene program
@@ -968,6 +1003,8 @@ def calculate_gp_attribution_scores(
         filter_key=obs_key,
         filter_value=obs_value,
         gene_counts_df=gene_counts_df,
+        geneformer_model=geneformer_model,
+        peft_config_path=peft_config_path,
     )
 
     txdata.setup()
@@ -1032,6 +1069,7 @@ def calculate_gp_attribution_scores(
     # or train if not available
     ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
     clf_ckpt = f'{y_label.replace("_id", "")}_{gp}_{task}'
+
     if os.path.exists(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')):
         clf_layer = EmbEvaluator.load_from_checkpoint(
             os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
@@ -1066,6 +1104,14 @@ def calculate_gp_attribution_scores(
         gp_transformer,
         clf_layer,
         gp_of_interest=gp,
+    )
+
+    # force reset
+    warnings.warn('Resetting positional encoding')
+    from gplearner.Modules.modules import PositionalEncoding
+
+    imodel.gp_block.pos_embed = PositionalEncoding(
+        d_model=256, dropout=0, max_len=2049  # 2048
     )
 
     imodel = imodel.to(device)
@@ -1160,8 +1206,11 @@ def calculate_gp_attribution_scores(
         else:
             gene_df[ogp] = np.where(gene_df['ensembl'].isin(gpdb_og[ogp]), 1, 0)
 
+    if output_file_name is None:
+        output_file_name = f'{gp}_attribution_scores_{obs_value}.csv'
+
     gene_df.to_csv(
-        os.path.join(output_dir, f'{gp}_attribution_scores_{obs_value}.csv'),
+        os.path.join(output_dir, output_file_name),
         index=False,
     )
 
