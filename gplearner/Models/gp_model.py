@@ -20,6 +20,7 @@ from ..Modules.modules import (
     PretrainedEmbeddings,
     PromptEncoder,
     gpTransformerEncoder,
+    gpTransformerEncoderWithPrompt,
 )
 from ..Utils.geneformer_utils import EmbExtractor
 from ..Utils.utils import bin_gene_expression, get_gp_tokens
@@ -121,11 +122,14 @@ class gfWrapper(nn.Module):
 
         self.gf_emb_extractor = EmbExtractor(emb_layer=gf_layer_to_quant)
 
-    def forward(self, input_dataset, inference):
+    def forward(self, input_dataset):
         # input is tokenized dataset
 
         emb_out = self.gf_emb_extractor.extract_embs(
-            model=self.gf, input_data=input_dataset, inference=inference
+            model=self.gf,
+            input_data=input_dataset,
+            # turn off Geneformer dropout
+            inference=True,
         )
 
         return emb_out
@@ -149,15 +153,9 @@ class gpWrapper(nn.Module):
         n_blocks,
         num_heads,
         mgm_mask_ratio,
-        add_remaining_var,
         use_flash,
         model_type,
         learn_new_gp,
-        hvg_list,
-        num_virtual_tokens,
-        virtual_tokens_label,
-        num_prompt_classes,
-        mean_emb_dict,
         use_pos_emb,
     ):
         super().__init__()
@@ -169,7 +167,6 @@ class gpWrapper(nn.Module):
         self.gp_inputs = gp_inputs
         self.model_type = model_type
         self.learning_new_gp = learn_new_gp
-        self.num_virtual_tokens = num_virtual_tokens
 
         # Get vocab size
         with open(gene_token_path, 'rb') as f:
@@ -178,10 +175,6 @@ class gpWrapper(nn.Module):
 
         # Store all genes included in at least one GP
         self.all_gp_tokens = set()
-
-        # Reset 'remaining var' --> will be added back in next step if needed
-        if 'remaining_var' in self.gp_inputs:
-            self.gp_inputs.remove('remaining_var')
 
         for i, gpi in enumerate(self.gp_inputs):
             gp_tokens = get_gp_tokens(
@@ -211,15 +204,6 @@ class gpWrapper(nn.Module):
             lookup_tensor[gp_tokens_tensor.long()] = indices
             self.register_buffer(f'gp{i}_tokens_lookup', lookup_tensor)
 
-            if self.num_virtual_tokens > 0:
-                prompt_encoder = PromptEncoder(
-                    token_dim=self.gp_latent_size,
-                    encoder_hidden_size=int(self.gp_latent_size * 0.5),
-                    num_virtual_tokens=self.num_virtual_tokens,
-                )
-
-                setattr(self, f'prompt_encoder_gp{i}', prompt_encoder)
-
         self.encoder = nn.ModuleList(
             [
                 gpTransformerEncoder(
@@ -235,109 +219,7 @@ class gpWrapper(nn.Module):
             ]
         )
 
-        self.add_remaining_var = add_remaining_var
-
-        if self.add_remaining_var is not None:
-            n_gp = len(self.gp_inputs)
-            self.gp_inputs = gp_inputs + ['remaining_var']
-
-            # find non GP genes
-            if gene_counts_df is None:
-                raise ValueError(
-                    'Please provide a dataframe '
-                    'with counts of gene occurrences in dataset'
-                )
-
-            non_gp_tokens = set(gene_counts_df['token'].tolist()) - self.all_gp_tokens
-
-            if hvg_list is not None:
-                # convert to tokens
-                with open(gene_token_path, 'rb') as f:
-                    token_dict = pickle.load(f)
-
-                with open(gene_name_path, 'rb') as f:
-                    gene_name_dict = pickle.load(f)
-
-                if do_ensembl_conversion:
-                    hvg_list = [
-                        gene_name_dict[x] for x in hvg_list if x in gene_name_dict
-                    ]
-
-                hvg_list = [token_dict[x] for x in hvg_list if x in token_dict]
-
-                non_gp_tokens = non_gp_tokens.intersection(set(hvg_list))
-
-            tokens_tensor = torch.tensor(list(non_gp_tokens), dtype=torch.int32)
-
-            self.register_buffer(f'gp{n_gp}_tokens', tokens_tensor)
-
-            # Set up look up tensor
-            # for converting gene tokens to encoded values inside transformer block
-            # +2 because in geneformer 0 --> padding and 1 --> mask
-            lookup_tensor = torch.full((self.vocab_size + 2,), -100, dtype=torch.int32)
-            # Create a tensor of indices corresponding to positions in gp_tokens
-            indices = torch.arange(tokens_tensor.shape[0], dtype=torch.int32)
-
-            # Use tensor indexing to assign values
-            lookup_tensor[tokens_tensor.long()] = indices
-            self.register_buffer(f'gp{n_gp}_tokens_lookup', lookup_tensor)
-
-            self.encoder.append(
-                gpTransformerEncoder(
-                    n_gp_tokens=100
-                    if self.add_remaining_var == 'top100'
-                    else len(non_gp_tokens),  # we only keep top 100 genes
-                    vocab_size=len(non_gp_tokens),
-                    embed_dim=self.gp_latent_size,
-                    depth=self.n_blocks,
-                    num_heads=num_heads,
-                    mlm_masking_prob=self.mgm_mask_ratio,
-                    use_flash=(self.add_remaining_var == 'allgenes'),
-                )
-            )
-
-        if self.num_virtual_tokens > 0:
-            # # freeze all other parameters
-            # for param in self.encoder.parameters():
-            #     param.requires_grad = False
-
-            # add encoder for shared token
-            self.prompt_encoder = PromptEncoder(
-                token_dim=self.gp_latent_size,
-                encoder_hidden_size=int(self.gp_latent_size * 0.5),
-                num_virtual_tokens=self.num_virtual_tokens,
-            )
-
-        if virtual_tokens_label is not None:
-            self.virtual_tokens_label = virtual_tokens_label
-            self.prompt_clf = nn.Linear(self.gp_latent_size, num_prompt_classes)
-        else:
-            self.virtual_tokens_label = None
-
-        self.mean_emb_dict = mean_emb_dict
-        if self.mean_emb_dict is not None:
-            # Load precomputed GP gene embeddings
-            # Load the embeddings from the pickle file
-            with open(mean_emb_dict, 'rb') as f:
-                z_mean = pickle.load(f)
-
-            # Convert strings to integers
-            z_mean = {int(k): v for k, v in z_mean.items()}
-
-            # Convert z_mean dictionary to a tensor for efficient indexing
-            max_token_id = max(z_mean.keys())
-            z_mean_tensor = torch.zeros(
-                (max_token_id + 1, next(iter(z_mean.values())).shape[0])
-            )
-
-            for token_id, embedding in z_mean.items():
-                z_mean_tensor[token_id] = torch.tensor(embedding)
-
-            self.register_buffer('z_mean', z_mean_tensor)
-
-    def build_input_matrix(
-        self, gf, input_ids, gp_tokens, crop_to_gp_len=True, is_gpfinder=False
-    ):
+    def build_input_matrix(self, gf, input_ids, gp_tokens, crop_to_gp_len=True):
         """
         Build a matrix of shape (n_cells, n_gp_tokens, 256)
         where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
@@ -383,11 +265,7 @@ class gpWrapper(nn.Module):
         # Sum along the last dimension to count how many GP tokens each gene matches
         mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
-        if crop_to_gp_len or (
-            is_gpfinder is not None
-            and is_gpfinder
-            and self.add_remaining_var == 'top100'
-        ):
+        if crop_to_gp_len:
             # Apply the mask to the data using broadcasting
             masked_latent = gf * mask_expanded
 
@@ -420,14 +298,7 @@ class gpWrapper(nn.Module):
             masked_labels_output = torch.stack(holder)
 
             # crop
-            if (
-                is_gpfinder is not None
-                and is_gpfinder
-                and self.add_remaining_var == 'top100'
-            ):
-                n_genes_to_keep = 100
-            else:
-                n_genes_to_keep = gp_tokens.shape[0]
+            n_genes_to_keep = gp_tokens.shape[0]
             result_matrix = result_matrix[:, :n_genes_to_keep, :]
             masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
 
@@ -460,60 +331,18 @@ class gpWrapper(nn.Module):
             [torch.ones_like(attn_mask)[:, 0].unsqueeze(-1), attn_mask], dim=-1
         )
 
-        # never mask prompt tokens
-        if self.num_virtual_tokens > 0:
-            attn_mask = torch.cat(
-                # times 2 because 1 GP-specific token + 1 non-specific token
-                [
-                    attn_mask,
-                    torch.ones_like(attn_mask)[:, : 2 * self.num_virtual_tokens],
-                ],
-                dim=-1,
-            )
-
-        # Optionally condition on mean gene representation from geneformer
-        # Use input_ids to index into z_mean_tensor and get embeddings
-        if self.mean_emb_dict:
-            # in masked_labels, temporarily convert to 0 (padding token)
-            masked_labels_output[masked_labels_output == -100] = 0
-
-            z_mean_embeddings = self.z_mean[masked_labels_output]  # Shape: (b, e, e2)
-
-            result_matrix = torch.cat([result_matrix, z_mean_embeddings], dim=-1)
-
-            # Convert back
-            masked_labels_output[masked_labels_output == 0] = -100
-
-        # # Explore cells with no genes
-        # idx = num_genes_per_cell == 0
-        # if idx.sum() > 0:
-        #     print('Number of cells with no genes', idx.sum())
-        #     print('Result matrix')
-        #     print(result_matrix[idx].sum()) # 0
-        #     print('Masked labels')
-        #     print(masked_labels_output[idx].sum()) # 0
-        #     print('Num genes per cell')
-        #     print(num_genes_per_cell[idx].sum()) # 0
-        #     print('Attention mask')
-        #     print(attn_mask[idx].sum()) # 44 (1 for each cls)
-
         return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
 
     def forward(
         self,
         gf_emb,
         input_dataset,
-        return_attention,
+        masking=False,
+        return_attention=False,
         return_gene_embeddings=False,
         tokens_to_keep=None,
         gp_of_interest=None,
     ):
-        # randomly mask genes only during training :
-        if self.training:
-            inference = False
-        else:
-            inference = True
-
         # Subset GP embeddings
         gp_token_list = []
         logits_lm_list = []
@@ -521,10 +350,6 @@ class gpWrapper(nn.Module):
         gene_original_labels_list = []
         num_genes_per_cell_list = []
         gene_emb_list = []
-        gp_virtual_token_logit_list = []
-        shared_virtual_token_logit_list = []
-        gp_virtual_token_list = []
-        shared_virtual_token_list = []
 
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
@@ -538,7 +363,6 @@ class gpWrapper(nn.Module):
                     gf_emb,  # geneformer embeddings
                     input_dataset['input_ids'],
                     getattr(self, f'gp{i}_tokens'),
-                    is_gpfinder=(self.gp_inputs[i] == 'remaining_var'),
                 )
 
                 # track number of genes per cell
@@ -551,127 +375,20 @@ class gpWrapper(nn.Module):
                 # Encode tokens for MLM
                 tokens_pad_unencoded = tokens_pad
                 tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
-
-                # Optionally append tokens for PEFT
-                if self.num_virtual_tokens > 0:
-                    # get GP-specific token
-                    gp_virtual_token = getattr(self, f'prompt_encoder_gp{i}')(
-                        torch.arange(self.num_virtual_tokens, device=emb_pad.device)
-                    )
-
-                    gp_virtual_token = gp_virtual_token.unsqueeze(0).expand(
-                        emb_pad.shape[0], -1, -1
-                    )
-
-                    emb_pad = torch.cat([emb_pad, gp_virtual_token], dim=1)
-
-                    tokens_pad = torch.cat(
-                        [
-                            tokens_pad,
-                            torch.tensor(
-                                [-100] * self.num_virtual_tokens,
-                                device=tokens_pad.device,
-                            )
-                            .unsqueeze(0)
-                            .expand(tokens_pad.shape[0], -1),
-                        ],
-                        dim=1,
-                    )
-
-                    # Get shared token
-                    virtual_tokens = self.prompt_encoder(
-                        torch.arange(self.num_virtual_tokens, device=emb_pad.device)
-                    )
-
-                    # Expand virtual tokens to match emb_pad
-                    virtual_tokens = virtual_tokens.unsqueeze(0).expand(
-                        emb_pad.shape[0], -1, -1
-                    )
-
-                    emb_pad = torch.cat([virtual_tokens, emb_pad], dim=1)
-
-                    # Add to labels as well
-                    tokens_pad = torch.cat(
-                        [
-                            torch.tensor(
-                                [-100] * self.num_virtual_tokens,
-                                device=tokens_pad.device,
-                            )
-                            .unsqueeze(0)
-                            .expand(tokens_pad.shape[0], -1),
-                            tokens_pad,
-                        ],
-                        dim=1,
-                    )
-
-                else:
-                    virtual_tokens = None
-
                 # get token GP representation, logits for gene level prediction,
                 # and gene_labels where masked genes = -100
                 encoder_output = self.encoder[i](
                     emb_pad,
                     attn_mask=attn_mask,
                     gene_labels=tokens_pad,
-                    inference=inference,
+                    masking=masking,
                     return_attention=return_attention,
                     return_gene_embeddings=return_gene_embeddings,
-                    num_virtual_tokens=self.num_virtual_tokens
-                    * 2,  # *2 for shared and GP-specific tokens
-                    using_gp_specific_token=self.num_virtual_tokens > 0,
                 )
-
-                # # Encoder output for cells with 0 GP genes
-                # idx = num_genes_per_cell == 0
-                # if idx.sum() > 0:
-                #     cls = encoder_output['cls']
-                #     logits_lm = encoder_output['logits_lm']
-                #     gene_labels = encoder_output['gene_labels']
-
-                #     print('Number of cells with no genes', idx.sum())
-                #     print('CLS') # different for each cell
-                #     if len(idx) > 1:
-                #         print(cls[idx][:5])
-                #     else:
-                #         print(cls[idx])
-
-                #     print('Logits')
-                #     if len(idx) > 1:
-                #         print(logits_lm[idx][:5])
-                #     else:
-                #         print(logits_lm[idx])
-
-                #     print('Gene labels') # -100
-                #     if len(idx) > 1:
-                #         print(gene_labels[idx][:5])
-                #     else:
-                #         print(gene_labels[idx])
-
-                #     raise ValueError('Cells with no genes')
 
                 gp_token_list.append(encoder_output['cls'])
                 logits_lm_list.append(encoder_output['logits_lm'])
                 gene_labels_list.append(encoder_output['gene_labels'])
-
-                if self.num_virtual_tokens > 0:
-                    gp_virtual_token_list.append(encoder_output['gp_virtual_tokens'])
-                    shared_virtual_token_list.append(
-                        encoder_output['shared_virtual_tokens']
-                    )
-
-                    if (
-                        hasattr(self, 'virtual_tokens_label')
-                        and self.virtual_tokens_label is not None
-                    ):
-                        gpi_token_logits = self.prompt_clf(
-                            encoder_output['gp_virtual_tokens']
-                        )
-                        gp_virtual_token_logit_list.append(gpi_token_logits)
-
-                        shared_token_logits = self.prompt_clf(
-                            encoder_output['shared_virtual_tokens']
-                        )
-                        shared_virtual_token_logit_list.append(shared_token_logits)
 
                 if return_gene_embeddings:
                     gene_emb_list = encoder_output['gene_embeddings']
@@ -691,15 +408,6 @@ class gpWrapper(nn.Module):
             'gene_original_labels_list': gene_original_labels_list,
             'num_genes_per_cell_list': num_genes_per_cell_list,
         }
-
-        if self.num_virtual_tokens > 0:
-            output['virtual_tokens'] = virtual_tokens  # for global model
-            output['gp_virtual_token_logits'] = gp_virtual_token_logit_list
-            output['shared_virtual_token_logits'] = shared_virtual_token_logit_list
-
-            # for saving embeddings
-            output['gp_virtual_tokens'] = gp_virtual_token_list
-            output['shared_virtual_tokens'] = shared_virtual_token_list
 
         if return_gene_embeddings:
             output = self.wrangle_gene_embeddings(output, tokens_to_keep)
@@ -747,10 +455,6 @@ class gpWrapper(nn.Module):
         '''
         If multilpe blocks, get attn matrix from last transformer block
         '''
-        if self.training:
-            inference = False
-        else:
-            inference = True
 
         gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
 
@@ -771,7 +475,7 @@ class gpWrapper(nn.Module):
             emb_pad,
             attn_mask=attn_mask,
             gene_labels=tokens_pad,
-            inference=inference,
+            masking=False,
             return_attention=True,
         )
 
@@ -840,10 +544,6 @@ class gpWrapper(nn.Module):
         '''
         If multilpe blocks, get attn matrix from last transformer block
         '''
-        if self.training:
-            inference = False
-        else:
-            inference = True
 
         gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
 
@@ -859,69 +559,12 @@ class gpWrapper(nn.Module):
         tokens_pad = getattr(self, f'gp{gp_idx}_tokens_lookup')[tokens_pad].long()
 
         # get token GP representation
-        # Optionally append tokens for PEFT
-        if self.num_virtual_tokens > 0:
-            # get GP-specific token
-            gp_virtual_token = getattr(self, f'prompt_encoder_gp{gp_idx}')(
-                torch.arange(self.num_virtual_tokens, device=emb_pad.device)
-            )
-
-            gp_virtual_token = gp_virtual_token.unsqueeze(0).expand(
-                emb_pad.shape[0], -1, -1
-            )
-
-            emb_pad = torch.cat([emb_pad, gp_virtual_token], dim=1)
-
-            tokens_pad = torch.cat(
-                [
-                    tokens_pad,
-                    torch.tensor(
-                        [-100] * self.num_virtual_tokens,
-                        device=tokens_pad.device,
-                    )
-                    .unsqueeze(0)
-                    .expand(tokens_pad.shape[0], -1),
-                ],
-                dim=1,
-            )
-
-            # Get shared token
-            virtual_tokens = self.prompt_encoder(
-                torch.arange(self.num_virtual_tokens, device=emb_pad.device)
-            )
-
-            # Expand virtual tokens to match emb_pad
-            virtual_tokens = virtual_tokens.unsqueeze(0).expand(
-                emb_pad.shape[0], -1, -1
-            )
-
-            emb_pad = torch.cat([virtual_tokens, emb_pad], dim=1)
-
-            # Add to labels as well
-            tokens_pad = torch.cat(
-                [
-                    torch.tensor(
-                        [-100] * self.num_virtual_tokens,
-                        device=tokens_pad.device,
-                    )
-                    .unsqueeze(0)
-                    .expand(tokens_pad.shape[0], -1),
-                    tokens_pad,
-                ],
-                dim=1,
-            )
-
-        else:
-            virtual_tokens = None
-
         encoder_output = self.encoder[gp_idx](
             emb_pad,
             attn_mask=attn_mask,
             gene_labels=tokens_pad,
-            inference=inference,
+            masking=False,
             return_attention=True,
-            num_virtual_tokens=self.num_virtual_tokens * 2,
-            using_gp_specific_token=self.num_virtual_tokens > 0,
         )
 
         attn = encoder_output['attention']
@@ -935,18 +578,6 @@ class gpWrapper(nn.Module):
         attn = attn[:, 0, :]
 
         output['cls'] = attn[:, 0].cpu().detach().numpy()
-
-        if self.num_virtual_tokens > 0:
-            for i in range(self.num_virtual_tokens):
-                output[f'gp_virtual_token_{i}'] = (
-                    attn[:, -2 * (i + 1)].cpu().detach().numpy()
-                )
-                output[f'shared_virtual_token_{i}'] = (
-                    attn[:, -1 * (i + 1)].cpu().detach().numpy()
-                )
-
-            # drop virtual tokens
-            attn = attn[:, : -2 * self.num_virtual_tokens]
 
         # keep only gene scores
         attn = attn[:, 1:]
@@ -991,7 +622,6 @@ class cellWrapper(nn.Module):
         gp_latent_size,
         global_masking_rate,
         use_flash,
-        num_virtual_tokens,
     ):
         super().__init__()
 
@@ -999,7 +629,6 @@ class cellWrapper(nn.Module):
         self.num_heads = num_heads
         self.gp_inputs = gp_inputs
         self.gp_latent_size = gp_latent_size
-        self.num_virtual_tokens = num_virtual_tokens
 
         self.encoder = gpTransformerEncoder(
             n_gp_tokens=len(self.gp_inputs),
@@ -1057,7 +686,7 @@ class cellWrapper(nn.Module):
 
         return z, gp_labels, attn_mask
 
-    def forward(self, x, inference):
+    def forward(self, x, masking):
         """
         Input is the dictionary output of gpWrapper
         we need keys z and number of genes per cell
@@ -1066,43 +695,12 @@ class cellWrapper(nn.Module):
             z=x['z'], num_genes_per_cell_list=x['num_genes_per_cell_list']
         )
 
-        # Optionally append virtual tokens
-        if self.num_virtual_tokens > 0:
-            virtual_tokens = x['virtual_tokens']
-
-            z = torch.cat([virtual_tokens, z], dim=1)
-
-            # Add to labels as well
-            gp_labels = torch.cat(
-                [
-                    torch.tensor(
-                        [-100] * self.num_virtual_tokens, device=gp_labels.device
-                    )
-                    .unsqueeze(0)
-                    .expand(gp_labels.shape[0], -1),
-                    gp_labels,
-                ],
-                dim=1,
-            )
-
-            # And attention mask
-            attn_mask = torch.cat(
-                [
-                    attn_mask,
-                    torch.ones(attn_mask.shape[0], self.num_virtual_tokens).to(
-                        attn_mask.device
-                    ),
-                ],
-                dim=1,
-            )
-
         encoder_output = self.encoder(
             z,
             gene_labels=gp_labels,
             attn_mask=attn_mask,
-            inference=inference,
+            masking=masking,
             return_attention=False,
-            num_virtual_tokens=self.num_virtual_tokens,
         )
 
         output = {
@@ -1110,9 +708,6 @@ class cellWrapper(nn.Module):
             'gp_logits_lm': encoder_output['logits_lm'],
             'gp_labels': encoder_output['gene_labels'],
         }
-
-        if self.num_virtual_tokens > 0:
-            output['virtual_token'] = encoder_output['shared_virtual_tokens']
 
         return output
 
@@ -1126,43 +721,12 @@ class cellWrapper(nn.Module):
             z=x['z'], num_genes_per_cell_list=x['num_genes_per_cell_list']
         )
 
-        # Optionally append virtual tokens
-        if self.num_virtual_tokens > 0:
-            virtual_tokens = x['virtual_tokens']
-
-            z = torch.cat([virtual_tokens, z], dim=1)
-
-            # Add to labels as well
-            gp_labels = torch.cat(
-                [
-                    torch.tensor(
-                        [-100] * self.num_virtual_tokens, device=gp_labels.device
-                    )
-                    .unsqueeze(0)
-                    .expand(gp_labels.shape[0], -1),
-                    gp_labels,
-                ],
-                dim=1,
-            )
-
-            # And attention mask
-            attn_mask = torch.cat(
-                [
-                    attn_mask,
-                    torch.ones(attn_mask.shape[0], self.num_virtual_tokens).to(
-                        attn_mask.device
-                    ),
-                ],
-                dim=1,
-            )
-
         encoder_output = self.encoder(
             z,
             gene_labels=gp_labels,
             attn_mask=attn_mask,
-            inference=True,
+            masking=False,
             return_attention=True,
-            num_virtual_tokens=self.num_virtual_tokens,
         )
 
         # Reorder attention matrix so GP are in the same order in each cell
@@ -1180,16 +744,6 @@ class cellWrapper(nn.Module):
 
         # drop cls token
         attn = attn[:, 1:]
-
-        if self.num_virtual_tokens > 0:
-            for i in range(self.num_virtual_tokens):
-                output[f'virtual_token_{i}'] = (
-                    attn[:, -1 * (i + 1)].cpu().detach().numpy()
-                )
-
-            # drop virtual tokens
-            attn = attn[:, : -self.num_virtual_tokens]
-            gp_labels = gp_labels[:, : -self.num_virtual_tokens]
 
         for i, gp in enumerate(self.gp_inputs):
             # zero out other GP
@@ -1312,7 +866,6 @@ class gpTransformerBase(nn.Module):
         attn_dropout=0,
         gp_inputs=None,
         gene_counts_df=None,
-        add_remaining_var=None,
         do_ensembl_conversion=True,
         gp_latent_size=256,
         num_heads=1,
@@ -1327,11 +880,6 @@ class gpTransformerBase(nn.Module):
         model_type='Base',
         learn_new_gp=False,
         gp_of_interest=None,
-        hvg_list=None,
-        num_virtual_tokens=0,
-        virtual_tokens_label=None,
-        num_prompt_classes=0,
-        mean_emb_dict=None,
         use_baseline_tk=False,
         tk_vocab_size=0,
         gene2vec=None,
@@ -1443,15 +991,9 @@ class gpTransformerBase(nn.Module):
             num_heads=num_heads,
             mgm_mask_ratio=self.mgm_mask_ratio,
             gp_inputs=gp_inputs,
-            add_remaining_var=add_remaining_var,
             use_flash=self.use_flash,
             model_type=model_type,
             learn_new_gp=learn_new_gp,
-            hvg_list=hvg_list,
-            num_virtual_tokens=num_virtual_tokens,
-            virtual_tokens_label=virtual_tokens_label,
-            num_prompt_classes=num_prompt_classes,
-            mean_emb_dict=mean_emb_dict,
             use_pos_emb=use_pos_emb,
         )
 
@@ -1463,15 +1005,10 @@ class gpTransformerBase(nn.Module):
         tokens_to_keep=None,
         return_gf_cell_emb=False,
         gp_of_interest=None,
-        masking=True,
+        masking=False,
     ):
-        if self.training:
-            inference = False
-        else:
-            inference = True
-
         # input is tokenized dataset
-        emb_out = self.gf_wrapper(input_dataset, inference)
+        emb_out = self.gf_wrapper(input_dataset)
 
         # Extract embeddings for each gene program
         # For backwards compataibilty
@@ -1484,6 +1021,7 @@ class gpTransformerBase(nn.Module):
         output = self.multi_gp_encoder(
             emb_out,
             input_dataset,
+            masking=masking,
             return_gene_embeddings=return_gene_embeddings,
             return_attention=return_attention,
             tokens_to_keep=tokens_to_keep,
@@ -1498,13 +1036,8 @@ class gpTransformerBase(nn.Module):
         return output
 
     def get_last_self_attn(self, input_dataset, gp_idx):
-        if self.training:
-            inference = False
-        else:
-            inference = True
-
         # Get Geneformer embeddings
-        gf_emb = self.gf_wrapper(input_dataset, inference)
+        gf_emb = self.gf_wrapper(input_dataset)
 
         output = self.multi_gp_encoder.get_last_self_attn(
             gf_emb, input_dataset, gp_idx=gp_idx
@@ -1513,17 +1046,12 @@ class gpTransformerBase(nn.Module):
         return output
 
     def get_cls_attn(self, input_dataset, gp):
-        if self.training:
-            inference = False
-        else:
-            inference = True
-
         # Get gp index
         gp_idx = self.gp_inputs.index(gp)
         gene_names = self.gpdb.iloc[:, gp_idx].tolist()
 
         # Get Geneformer embeddings
-        gf_emb = self.gf_wrapper(input_dataset, inference)
+        gf_emb = self.gf_wrapper(input_dataset)
 
         output = self.multi_gp_encoder.get_cls_attn(
             gf_emb, input_dataset, gp_idx=gp_idx, gene_names=gene_names
@@ -1548,36 +1076,16 @@ class gpTransformerGlobal(gpTransformerBase):
         global_n_blocks=1,
         use_flash=False,
         n_bins=10,
-        num_virtual_tokens=0,
-        num_prototypes=0,
-        prbm=None,
-        cond_to_shift=None,
         **kwargs,
     ):
         super().__init__(
             use_flash=use_flash,
             model_type='Global',
-            num_virtual_tokens=num_virtual_tokens,
             **kwargs,
         )
         self.global_attn_heads = global_attn_heads
 
         self.global_loss = global_loss
-
-        # If using PRBM, set up the buffers on GPU
-        if prbm is not None:
-            self.use_prbm = True
-            prbm = prbm[self.gp_inputs]
-            prbm_tensor = torch.tensor(prbm.values.T).to(torch.float32)
-            self.register_buffer('prbm', prbm_tensor)
-        else:
-            self.use_prbm = False
-
-        self.cond_to_shift = cond_to_shift
-
-        # for backwards compatibility
-        if not hasattr(self, 'use_prbm'):
-            self.use_prbm = False
 
         self.cell_token_learner = cellWrapper(
             gp_inputs=self.gp_inputs,
@@ -1586,7 +1094,6 @@ class gpTransformerGlobal(gpTransformerBase):
             num_heads=self.global_attn_heads,
             global_masking_rate=global_masking_rate,
             use_flash=use_flash,
-            num_virtual_tokens=num_virtual_tokens,
         )
 
         if self.global_loss == 'supervised':
@@ -1625,19 +1132,6 @@ class gpTransformerGlobal(gpTransformerBase):
                     d_model=self.gp_latent_size,
                 )
 
-        self.num_prototypes = num_prototypes
-        if num_prototypes > 0:
-            self.prototypes = nn.Parameter(
-                torch.empty(
-                    num_prototypes,  # use 1 prototype per class = set as same number
-                    # num_prototypes,
-                    self.gp_latent_size,
-                ),
-                requires_grad=True,
-            )
-
-            nn.init.xavier_normal_(self.prototypes)
-
     def forward(
         self,
         input_dataset,
@@ -1645,17 +1139,10 @@ class gpTransformerGlobal(gpTransformerBase):
         return_attention=False,
         tokens_to_keep=None,
         gp_of_interest=None,
+        masking=False,
+        masking_global=False,
     ):
         return_gf_cell_emb = True if self.global_loss == 'mse' else False
-
-        if self.global_loss != 'masking':
-            # no masking
-            inference = True
-        else:
-            if self.training:
-                inference = False
-            else:
-                inference = True
 
         base_output = super().forward(
             input_dataset,
@@ -1664,36 +1151,12 @@ class gpTransformerGlobal(gpTransformerBase):
             tokens_to_keep,
             return_gf_cell_emb,
             gp_of_interest=gp_of_interest,
+            masking=masking,
         )
 
         if return_gene_embeddings:
             return base_output
-
-        # for each GP, optionally sum the reference mean embedding tensor
-        if self.use_prbm:
-            if self.cond_to_shift is not None:
-                # cond_to_shift is of form {'name' : ['value']}
-                condition_key = list(self.cond_to_shift.keys())[0]
-                condition_values = self.cond_to_shift[condition_key]
-
-                mask = torch.tensor(
-                    [name in condition_values for name in input_dataset[condition_key]],
-                    dtype=torch.bool,
-                )
-                mask = (
-                    mask.unsqueeze(-1).unsqueeze(-1).to(base_output['z'].device)
-                )  # Ensure correct broadcasting
-                prbm_expanded = self.prbm.unsqueeze(0).expand_as(base_output['z'])
-
-                base_output['z'] = torch.where(
-                    mask,
-                    base_output['z'] + (base_output['z'] - prbm_expanded),
-                    base_output['z'],
-                )
-            else:
-                base_output['z'] = base_output['z'] + (base_output['z'] - prbm_expanded)
-
-        cell_output = self.cell_token_learner(base_output, inference=inference)
+        cell_output = self.cell_token_learner(base_output, masking=masking_global)
 
         base_output['cell_token'] = cell_output['cell_token']
 
@@ -1717,10 +1180,6 @@ class gpTransformerGlobal(gpTransformerBase):
                     binned = torch.tensor(binned).to(count_output.device)
                     base_output['true_bins'] = binned
 
-        if self.cell_token_learner.num_virtual_tokens > 0:
-            logits = self.multi_gp_encoder.prompt_clf(cell_output['virtual_token'])
-            base_output['global_virtual_token_logit'] = logits
-
         return base_output
 
     def get_cell_token_attention(self, input_dataset):
@@ -1729,6 +1188,735 @@ class gpTransformerGlobal(gpTransformerBase):
         output = self.cell_token_learner.get_attn(base_output)
 
         return output
+
+
+####################################
+# Models with additional heads/losses
+####################################
+
+
+# ----------------------------------
+# Condition on Geneformer mean embedding
+# ----------------------------------
+
+# class gpWrapperCondMean(gpWrapper):
+#     def __init__(self, mean_emb_dict, **kwargs):
+#         super().__init__(**kwargs)
+
+#         self.mean_emb_dict = mean_emb_dict
+#         if self.mean_emb_dict is not None:
+#             # Load precomputed GP gene embeddings from the pickle file
+#             with open(mean_emb_dict, 'rb') as f:
+#                 z_mean = pickle.load(f)
+
+#             # Convert strings to integers
+#             z_mean = {int(k): v for k, v in z_mean.items()}
+
+#             # Convert z_mean dictionary to a tensor for efficient indexing
+#             max_token_id = max(z_mean.keys())
+#             z_mean_tensor = torch.zeros(
+#                 (max_token_id + 1, next(iter(z_mean.values())).shape[0])
+#             )
+
+#             for token_id, embedding in z_mean.items():
+#                 z_mean_tensor[token_id] = torch.tensor(embedding)
+
+#             self.register_buffer('z_mean', z_mean_tensor)
+
+#     def build_input_matrix(self, gf, input_ids, gp_tokens, crop_to_gp_len=True):
+
+#         # condition on mean gene representation from geneformer
+#         # Use input_ids to index into z_mean_tensor and get embeddings
+#         # in masked_labels, temporarily convert to 0 (padding token)
+#         masked_labels_output[masked_labels_output == -100] = 0
+
+#         z_mean_embeddings = self.z_mean[masked_labels_output]  # Shape: (b, e, e2)
+
+#         result_matrix = torch.cat([result_matrix, z_mean_embeddings], dim=-1)
+
+#         # Convert back
+#         masked_labels_output[masked_labels_output == 0] = -100
+
+#         return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
+
+
+# class gpTransformerCondMean(gpTransformerGlobal):
+#     # mean_emb_dict=None,
+#             # If using PRBM, set up the buffers on GPU
+#         if prbm is not None:
+#             self.use_prbm = True
+#             prbm = prbm[self.gp_inputs]
+#             prbm_tensor = torch.tensor(prbm.values.T).to(torch.float32)
+#             self.register_buffer('prbm', prbm_tensor)
+#         else:
+#             self.use_prbm = False
+
+#         self.cond_to_shift = cond_to_shift
+
+
+#     def forward(self):
+
+#         # for each GP, optionally sum the reference mean embedding tensor
+#         if self.use_prbm:
+#             if self.cond_to_shift is not None:
+#                 # cond_to_shift is of form {'name' : ['value']}
+#                 condition_key = list(self.cond_to_shift.keys())[0]
+#                 condition_values = self.cond_to_shift[condition_key]
+
+#                 mask = torch.tensor(
+#                     [name in condition_values
+#                           for name in input_dataset[condition_key]],
+#                     dtype=torch.bool,
+#                 )
+#                 mask = (
+#                     mask.unsqueeze(-1).unsqueeze(-1).to(base_output['z'].device)
+#                 )  # Ensure correct broadcasting
+#                 prbm_expanded = self.prbm.unsqueeze(0).expand_as(base_output['z'])
+
+#                 base_output['z'] = torch.where(
+#                     mask,
+#                     base_output['z'] + (base_output['z'] - prbm_expanded),
+#                     base_output['z'],
+#                 )
+#             else:
+#                 base_output['z'] = base_output['z']
+#                       + (base_output['z'] - prbm_expanded)
+
+
+# ----------------------------------
+# Add virtual tokens
+# ----------------------------------
+
+
+class gpWrapperWithPrompt(gpWrapper):
+    def __init__(
+        self,
+        use_flash,
+        use_pos_emb,
+        num_virtual_tokens,
+        virtual_tokens_label,
+        num_prompt_classes,
+        **kwargs,
+    ):
+        super().__init__(use_flash=use_flash, use_pos_emb=use_pos_emb, **kwargs)
+
+        self.num_virtual_tokens = num_virtual_tokens
+
+        for i, gp in enumerate(self.gp_inputs):
+            prompt_encoder = PromptEncoder(
+                token_dim=self.gp_latent_size,
+                encoder_hidden_size=int(self.gp_latent_size * 0.5),
+                num_virtual_tokens=self.num_virtual_tokens,
+            )
+
+            setattr(self, f'prompt_encoder_gp{i}', prompt_encoder)
+
+        self.encoder = nn.ModuleList(
+            [
+                gpTransformerEncoderWithPrompt(
+                    n_gp_tokens=len(getattr(self, f'gp{i}_tokens')),
+                    embed_dim=self.gp_latent_size,
+                    depth=self.n_blocks,
+                    num_heads=self.num_heads,
+                    mlm_masking_prob=self.mgm_mask_ratio,
+                    use_flash=use_flash,
+                    use_pos_emb=use_pos_emb,
+                )
+                for i in range(len(self.gp_inputs))
+            ]
+        )
+
+        # # freeze all other parameters
+        # for param in self.encoder.parameters():
+        #     param.requires_grad = False
+
+        # add encoder for shared token
+        self.prompt_encoder = PromptEncoder(
+            token_dim=self.gp_latent_size,
+            encoder_hidden_size=int(self.gp_latent_size * 0.5),
+            num_virtual_tokens=self.num_virtual_tokens,
+        )
+
+        if virtual_tokens_label is not None:
+            self.virtual_tokens_label = virtual_tokens_label
+            self.prompt_clf = nn.Linear(self.gp_latent_size, num_prompt_classes)
+        else:
+            self.virtual_tokens_label = None
+
+    def build_input_matrix(self, gf, input_ids, gp_tokens, crop_to_gp_len=True):
+        (
+            result_matrix,
+            masked_labels_output,
+            num_genes_per_cell,
+            attn_mask,
+        ) = super().build_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len)
+
+        attn_mask = torch.cat(
+            # times 2 because 1 GP-specific token + 1 non-specific token
+            [
+                attn_mask,
+                torch.ones_like(attn_mask)[:, : 2 * self.num_virtual_tokens],
+            ],
+            dim=-1,
+        )
+
+        return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
+
+    def forward(
+        self,
+        gf_emb,
+        input_dataset,
+        masking=False,
+        return_attention=False,
+        return_gene_embeddings=False,
+        tokens_to_keep=None,
+        gp_of_interest=None,
+    ):
+        # Subset GP embeddings
+        gp_token_list = []
+        logits_lm_list = []
+        gene_labels_list = []
+        gene_original_labels_list = []
+        num_genes_per_cell_list = []
+        gene_emb_list = []
+        gp_virtual_token_logit_list = []
+        shared_virtual_token_logit_list = []
+        gp_virtual_token_list = []
+        shared_virtual_token_list = []
+
+        # Extract embeddings for each gene program
+        for i in range(len(self.gp_inputs)):
+            if (gp_of_interest is None) or (self.gp_inputs[i] in gp_of_interest):
+                (
+                    emb_pad,
+                    tokens_pad,
+                    num_genes_per_cell,
+                    attn_mask,
+                ) = self.build_input_matrix(
+                    gf_emb,  # geneformer embeddings
+                    input_dataset['input_ids'],
+                    getattr(self, f'gp{i}_tokens'),
+                )
+
+                # track number of genes per cell
+                # divide by GP length
+                num_genes_per_cell = num_genes_per_cell / (
+                    getattr(self, f'gp{i}_tokens').shape[0]
+                )
+                num_genes_per_cell_list += [num_genes_per_cell]
+
+                # Encode tokens for MLM
+                tokens_pad_unencoded = tokens_pad
+                tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
+
+                # append tokens for PEFT
+                # get GP-specific token
+                gp_virtual_token = getattr(self, f'prompt_encoder_gp{i}')(
+                    torch.arange(self.num_virtual_tokens, device=emb_pad.device)
+                )
+
+                gp_virtual_token = gp_virtual_token.unsqueeze(0).expand(
+                    emb_pad.shape[0], -1, -1
+                )
+
+                emb_pad = torch.cat([emb_pad, gp_virtual_token], dim=1)
+
+                tokens_pad = torch.cat(
+                    [
+                        tokens_pad,
+                        torch.tensor(
+                            [-100] * self.num_virtual_tokens,
+                            device=tokens_pad.device,
+                        )
+                        .unsqueeze(0)
+                        .expand(tokens_pad.shape[0], -1),
+                    ],
+                    dim=1,
+                )
+
+                # Get shared token
+                virtual_tokens = self.prompt_encoder(
+                    torch.arange(self.num_virtual_tokens, device=emb_pad.device)
+                )
+
+                # Expand virtual tokens to match emb_pad
+                virtual_tokens = virtual_tokens.unsqueeze(0).expand(
+                    emb_pad.shape[0], -1, -1
+                )
+
+                emb_pad = torch.cat([virtual_tokens, emb_pad], dim=1)
+
+                # Add to labels as well
+                tokens_pad = torch.cat(
+                    [
+                        torch.tensor(
+                            [-100] * self.num_virtual_tokens,
+                            device=tokens_pad.device,
+                        )
+                        .unsqueeze(0)
+                        .expand(tokens_pad.shape[0], -1),
+                        tokens_pad,
+                    ],
+                    dim=1,
+                )
+
+                # get token GP representation, logits for gene level prediction,
+                # and gene_labels where masked genes = -100
+                encoder_output = self.encoder[i](
+                    emb_pad,
+                    attn_mask=attn_mask,
+                    gene_labels=tokens_pad,
+                    masking=masking,
+                    return_attention=return_attention,
+                    return_gene_embeddings=return_gene_embeddings,
+                    num_virtual_tokens=self.num_virtual_tokens
+                    * 2,  # *2 for shared and GP-specific tokens
+                    using_gp_specific_token=self.num_virtual_tokens > 0,
+                )
+                gp_token_list.append(encoder_output['cls'])
+                logits_lm_list.append(encoder_output['logits_lm'])
+                gene_labels_list.append(encoder_output['gene_labels'])
+
+                gp_virtual_token_list.append(encoder_output['gp_virtual_tokens'])
+                shared_virtual_token_list.append(
+                    encoder_output['shared_virtual_tokens']
+                )
+
+                if (
+                    hasattr(self, 'virtual_tokens_label')
+                    and self.virtual_tokens_label is not None
+                ):
+                    gpi_token_logits = self.prompt_clf(
+                        encoder_output['gp_virtual_tokens']
+                    )
+                    gp_virtual_token_logit_list.append(gpi_token_logits)
+
+                    shared_token_logits = self.prompt_clf(
+                        encoder_output['shared_virtual_tokens']
+                    )
+                    shared_virtual_token_logit_list.append(shared_token_logits)
+
+                if return_gene_embeddings:
+                    gene_emb_list = encoder_output['gene_embeddings']
+                    gene_original_labels_list = tokens_pad_unencoded
+            else:
+                continue
+
+        # Concatenate tensors
+        z = torch.stack(gp_token_list, dim=1)
+
+        # store for output
+        output = {
+            'z': z,
+            'logits_lm_list': logits_lm_list,
+            'gene_labels_list': gene_labels_list,
+            'gene_emb_list': gene_emb_list,
+            'gene_original_labels_list': gene_original_labels_list,
+            'num_genes_per_cell_list': num_genes_per_cell_list,
+        }
+
+        output['virtual_tokens'] = virtual_tokens  # for global model
+        output['gp_virtual_token_logits'] = gp_virtual_token_logit_list
+        output['shared_virtual_token_logits'] = shared_virtual_token_logit_list
+
+        # for saving embeddings
+        output['gp_virtual_tokens'] = gp_virtual_token_list
+        output['shared_virtual_tokens'] = shared_virtual_token_list
+
+        if return_gene_embeddings:
+            output = self.wrangle_gene_embeddings(output, tokens_to_keep)
+
+        return output
+
+    def get_cls_attn(self, gf_emb, input_dataset, gp_idx, gene_names):
+        '''
+        If multilpe blocks, get attn matrix from last transformer block
+        '''
+
+        gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
+
+        # Extract embeddings for the gene program of interest
+        emb_pad, tokens_pad, _, attn_mask = self.build_input_matrix(
+            gf_emb,  # geneformer embeddings
+            input_dataset['input_ids'],
+            gp_tokens,
+        )
+
+        # Encode tokens for MLM
+        tokens_pad_unencoded = tokens_pad
+        tokens_pad = getattr(self, f'gp{gp_idx}_tokens_lookup')[tokens_pad].long()
+
+        # get token GP representation
+        # Optionally append tokens for PEFT
+        if self.num_virtual_tokens > 0:
+            # get GP-specific token
+            gp_virtual_token = getattr(self, f'prompt_encoder_gp{gp_idx}')(
+                torch.arange(self.num_virtual_tokens, device=emb_pad.device)
+            )
+
+            gp_virtual_token = gp_virtual_token.unsqueeze(0).expand(
+                emb_pad.shape[0], -1, -1
+            )
+
+            emb_pad = torch.cat([emb_pad, gp_virtual_token], dim=1)
+
+            tokens_pad = torch.cat(
+                [
+                    tokens_pad,
+                    torch.tensor(
+                        [-100] * self.num_virtual_tokens,
+                        device=tokens_pad.device,
+                    )
+                    .unsqueeze(0)
+                    .expand(tokens_pad.shape[0], -1),
+                ],
+                dim=1,
+            )
+
+            # Get shared token
+            virtual_tokens = self.prompt_encoder(
+                torch.arange(self.num_virtual_tokens, device=emb_pad.device)
+            )
+
+            # Expand virtual tokens to match emb_pad
+            virtual_tokens = virtual_tokens.unsqueeze(0).expand(
+                emb_pad.shape[0], -1, -1
+            )
+
+            emb_pad = torch.cat([virtual_tokens, emb_pad], dim=1)
+
+            # Add to labels as well
+            tokens_pad = torch.cat(
+                [
+                    torch.tensor(
+                        [-100] * self.num_virtual_tokens,
+                        device=tokens_pad.device,
+                    )
+                    .unsqueeze(0)
+                    .expand(tokens_pad.shape[0], -1),
+                    tokens_pad,
+                ],
+                dim=1,
+            )
+
+        else:
+            virtual_tokens = None
+
+        encoder_output = self.encoder[gp_idx](
+            emb_pad,
+            attn_mask=attn_mask,
+            gene_labels=tokens_pad,
+            masking=False,
+            return_attention=True,
+            num_virtual_tokens=self.num_virtual_tokens * 2,
+            using_gp_specific_token=self.num_virtual_tokens > 0,
+        )
+
+        attn = encoder_output['attention']
+
+        # Average attention across heads
+        attn = attn.mean(dim=1)
+
+        output = {}
+
+        # Select cls attention
+        attn = attn[:, 0, :]
+
+        output['cls'] = attn[:, 0].cpu().detach().numpy()
+
+        if self.num_virtual_tokens > 0:
+            for i in range(self.num_virtual_tokens):
+                output[f'gp_virtual_token_{i}'] = (
+                    attn[:, -2 * (i + 1)].cpu().detach().numpy()
+                )
+                output[f'shared_virtual_token_{i}'] = (
+                    attn[:, -1 * (i + 1)].cpu().detach().numpy()
+                )
+
+            # drop virtual tokens
+            attn = attn[:, : -2 * self.num_virtual_tokens]
+
+        # keep only gene scores
+        attn = attn[:, 1:]
+
+        for i, gene in enumerate(gp_tokens):
+            # Ensure the data types match
+            gene = gene.to(tokens_pad_unencoded.dtype)
+
+            # zero out other genes
+            mask = (tokens_pad_unencoded == gene).to(torch.int)
+
+            masked_score = attn * mask
+
+            # Find the indices of the non-zero scores
+            non_zero_mask = masked_score != 0
+
+            indices = non_zero_mask.nonzero(as_tuple=True)
+
+            # Initialize the result tensor with zeros
+            result = torch.zeros(attn.shape[0], attn.shape[-1]).to(attn.device)
+
+            # Check if there are any non-zero rows, and update the result tensor
+            if indices[0].nelement() != 0:
+                result[indices] = masked_score[indices]
+
+                # for debugging
+                for row_idx in torch.unique(indices[0]):
+                    if non_zero_mask[row_idx].sum() > 1:
+                        raise ValueError('Multiple non-zero scores for the same gene')
+
+            output[gene_names[i]] = result.cpu().detach().numpy().sum(axis=-1)
+
+        return output
+
+
+class cellWrapperWithPrompt(cellWrapper):
+    def __init__(self, num_virtual_tokens, **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_virtual_tokens = num_virtual_tokens
+
+        self.prompt_encoder = PromptEncoder(
+            token_dim=self.gp_latent_size,
+            encoder_hidden_size=int(self.gp_latent_size * 0.5),
+            num_virtual_tokens=self.num_virtual_tokens,
+        )
+
+    def forward(self, x, masking):
+        """
+        Input is the dictionary output of gpWrapper
+        we need keys z and number of genes per cell
+        """
+        z, gp_labels, attn_mask = self.build_input_matrix(
+            z=x['z'], num_genes_per_cell_list=x['num_genes_per_cell_list']
+        )
+
+        # Optionally append virtual tokens
+        if self.num_virtual_tokens > 0:
+            virtual_tokens = x['virtual_tokens']
+
+            z = torch.cat([virtual_tokens, z], dim=1)
+
+            # Add to labels as well
+            gp_labels = torch.cat(
+                [
+                    torch.tensor(
+                        [-100] * self.num_virtual_tokens, device=gp_labels.device
+                    )
+                    .unsqueeze(0)
+                    .expand(gp_labels.shape[0], -1),
+                    gp_labels,
+                ],
+                dim=1,
+            )
+
+            # And attention mask
+            attn_mask = torch.cat(
+                [
+                    attn_mask,
+                    torch.ones(attn_mask.shape[0], self.num_virtual_tokens).to(
+                        attn_mask.device
+                    ),
+                ],
+                dim=1,
+            )
+
+        encoder_output = self.encoder(
+            z,
+            gene_labels=gp_labels,
+            attn_mask=attn_mask,
+            masking=masking,
+            return_attention=False,
+            num_virtual_tokens=self.num_virtual_tokens,
+        )
+
+        output = {
+            'cell_token': encoder_output['cls'],
+            'gp_logits_lm': encoder_output['logits_lm'],
+            'gp_labels': encoder_output['gene_labels'],
+        }
+
+        if self.num_virtual_tokens > 0:
+            output['virtual_token'] = encoder_output['shared_virtual_tokens']
+
+        return output
+
+    def get_attn(self, x):
+        """
+        Input is the dictionary output of gpWrapper
+        we need keys z and number of genes per cell
+        """
+
+        z, gp_labels, attn_mask = self.build_input_matrix(
+            z=x['z'], num_genes_per_cell_list=x['num_genes_per_cell_list']
+        )
+
+        # Append virtual tokens
+        virtual_tokens = x['virtual_tokens']
+
+        z = torch.cat([virtual_tokens, z], dim=1)
+
+        # Add to labels as well
+        gp_labels = torch.cat(
+            [
+                torch.tensor([-100] * self.num_virtual_tokens, device=gp_labels.device)
+                .unsqueeze(0)
+                .expand(gp_labels.shape[0], -1),
+                gp_labels,
+            ],
+            dim=1,
+        )
+
+        # And attention mask
+        attn_mask = torch.cat(
+            [
+                attn_mask,
+                torch.ones(attn_mask.shape[0], self.num_virtual_tokens).to(
+                    attn_mask.device
+                ),
+            ],
+            dim=1,
+        )
+
+        encoder_output = self.encoder(
+            z,
+            gene_labels=gp_labels,
+            attn_mask=attn_mask,
+            masking=False,
+            return_attention=True,
+            num_virtual_tokens=self.num_virtual_tokens,
+        )
+
+        # Reorder attention matrix so GP are in the same order in each cell
+        attn = encoder_output['attention']
+
+        # Average attention across heads
+        attn = attn.mean(dim=1)
+
+        # And focus on cls attention scores
+        attn = attn[:, 0, :]
+
+        output = {}
+
+        output['cls'] = attn[:, 0].cpu().detach().numpy()
+
+        # drop cls token
+        attn = attn[:, 1:]
+
+        if self.num_virtual_tokens > 0:
+            for i in range(self.num_virtual_tokens):
+                output[f'virtual_token_{i}'] = (
+                    attn[:, -1 * (i + 1)].cpu().detach().numpy()
+                )
+
+            # drop virtual tokens
+            attn = attn[:, : -self.num_virtual_tokens]
+            gp_labels = gp_labels[:, : -self.num_virtual_tokens]
+
+        for i, gp in enumerate(self.gp_inputs):
+            # zero out other GP
+            mask = (gp_labels == i).to(torch.int)
+
+            masked_score = attn * mask
+
+            # Find the indices of the non-zero scores
+            non_zero_mask = masked_score != 0
+
+            indices = non_zero_mask.nonzero(as_tuple=True)
+
+            # Initialize the result tensor with zeros
+            result = torch.zeros(attn.shape[0], attn.shape[-1]).to(attn.device)
+
+            # Check if there are any non-zero rows, and update the result tensor
+            if indices[0].nelement() != 0:
+                result[indices] = masked_score[indices]
+
+                # for debugging
+                for row_idx in torch.unique(indices[0]):
+                    if non_zero_mask[row_idx].sum() > 1:
+                        raise ValueError('Multiple non-zero scores for the same gene')
+
+            output[gp] = result.cpu().detach().numpy().sum(axis=-1)
+
+        return output
+
+
+class gpTransformerBaseWithPrompt(gpTransformerBase):
+    def __init__(
+        self,
+        num_virtual_tokens,
+        virtual_tokens_label,
+        num_prompt_classes,
+        # for gpWrapper
+        gene_token_path=TOKEN_DICTIONARY_FILE,
+        gene_name_path=GENE_NAME_FILE,
+        num_heads=1,
+        model_type='Base',
+        learn_new_gp=False,
+        use_pos_emb=True,
+        **kwargs,
+    ):
+        super().__init__(
+            gene_token_path=TOKEN_DICTIONARY_FILE,
+            gene_name_path=GENE_NAME_FILE,
+            num_heads=1,
+            model_type='Base',
+            learn_new_gp=False,
+            use_pos_emb=True,
+            **kwargs,
+        )
+
+        self.multi_gp_encoder = gpWrapperWithPrompt(
+            database=self.gpdb,
+            do_ensembl_conversion=self.do_ensembl_conversion,
+            gene_token_path=gene_token_path,
+            gene_name_path=gene_name_path,
+            gp_latent_size=self.gp_latent_size,
+            n_blocks=self.n_blocks,
+            num_heads=num_heads,
+            mgm_mask_ratio=self.mgm_mask_ratio,
+            gp_inputs=self.gp_inputs,
+            use_flash=self.use_flash,
+            model_type=model_type,
+            learn_new_gp=learn_new_gp,
+            use_pos_emb=use_pos_emb,
+            # Prompt-spwcific arguments
+            num_virtual_tokens=num_virtual_tokens,
+            virtual_tokens_label=virtual_tokens_label,
+            num_prompt_classes=num_prompt_classes,
+        )
+
+
+class gpTransformerGlobalWithPrompt(gpTransformerBaseWithPrompt, gpTransformerGlobal):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+
+# ----------------------------------
+# Prototypes
+# ----------------------------------
+
+
+class gpTransformerPrototypes(gpTransformerGlobal):
+    def __init__(self, num_prototypes, **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_prototypes = num_prototypes
+
+        self.prototypes = nn.Parameter(
+            torch.empty(
+                self.num_prototypes,
+                self.gp_latent_size,
+            ),
+            requires_grad=True,
+        )
+
+        nn.init.xavier_normal_(self.prototypes)
+
+
+####################################
+# For GradCAM
+####################################
 
 
 class iGpWrapper(nn.Module):
@@ -1786,9 +1974,6 @@ class iGpWrapper(nn.Module):
 
         logits = self.clf_layer(output['cls'])
         return logits
-
-        # out = output['logits_lm'][:, 0, :]
-        # return out.max(1).values
 
 
 class iGlobalWrapper(nn.Module):
@@ -1981,7 +2166,6 @@ class gfBaseline(gpTransformerBase):
         num_heads,
         gene_token_path=TOKEN_DICTIONARY_FILE,
         gene_name_path=GENE_NAME_FILE,
-        add_remaining_var=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -1997,12 +2181,10 @@ class gfBaseline(gpTransformerBase):
             gene_token_path=gene_token_path,
             gene_name_path=gene_name_path,
             gp_inputs=self.gp_inputs,
-            add_remaining_var=add_remaining_var,
             use_flash=False,
             model_type='Mean',
             learn_new_gp=False,
             # MAY NEED TO UPDATE THIS
-            hvg_list=None,
             num_virtual_tokens=0,
             virtual_tokens_label=None,
             num_prompt_classes=0,
@@ -2037,7 +2219,6 @@ class gfGlobal(gpTransformerGlobal):
         num_heads,
         gene_token_path=TOKEN_DICTIONARY_FILE,
         gene_name_path=GENE_NAME_FILE,
-        add_remaining_var=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -2053,12 +2234,10 @@ class gfGlobal(gpTransformerGlobal):
             gene_token_path=gene_token_path,
             gene_name_path=gene_name_path,
             gp_inputs=self.gp_inputs,
-            add_remaining_var=add_remaining_var,
             use_flash=False,
             model_type='Mean',
             learn_new_gp=False,
             # MAY NEED TO UPDATE THIS
-            hvg_list=None,
             num_virtual_tokens=0,
             virtual_tokens_label=None,
             num_prompt_classes=0,

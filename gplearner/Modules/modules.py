@@ -260,6 +260,9 @@ class gpTransformerEncoder(nn.Module):
         self.embed_dim = embed_dim
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+        self.mask_emb = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
         self.use_pos_emb = use_pos_emb
 
         self.pos_drop = nn.Dropout(p=drop_rate)
@@ -312,9 +315,8 @@ class gpTransformerEncoder(nn.Module):
         self.apply(self._init_weights)
 
         self.pos_embed = PositionalEncoding(
-            d_model=embed_dim, dropout=drop_rate, max_len=2048
+            d_model=embed_dim, dropout=drop_rate, max_len=3000
         )
-        # self.pos_embed = nn.Embedding(2048, embed_dim)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -324,6 +326,103 @@ class gpTransformerEncoder(nn.Module):
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+
+    def random_gene_masking(self, x, gene_labels):
+        x = x.clone()
+        gene_labels = gene_labels.clone()
+
+        full_mask, mask, random_mask = self.mask_generator(gene_labels)
+
+        # Apply the mask to the target tensor
+        # if mask = 1, we want to 0 out the token embedding
+        # but keep the label for loss calculation
+        x = torch.where(mask.unsqueeze(-1), self.mask_emb.expand_as(x), x)
+
+        # Add random tokens to the masked positions
+        random_tokens = torch.randn(x.shape, device=x.device)
+
+        x[random_mask] = random_tokens[random_mask]
+
+        # Replace unmasked indices with -100 in the labels
+        # since we only compute loss on masked tokens
+        gene_labels[~full_mask] = -100
+
+        return x, gene_labels
+
+    def prepare_tokens(self, x, gene_labels):
+        B = x.shape[0]  # batch size
+
+        # add the [CLS] token to the embed patch tokens
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # (256, 1, 256)
+
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        # add dummy label for cls
+        cls_label = torch.full(
+            (gene_labels.shape[0], 1),
+            -100,
+            dtype=gene_labels.dtype,
+            device=gene_labels.device,
+        )  # Create a column of -100 values
+
+        gene_labels = torch.cat((cls_label, gene_labels), dim=1)
+
+        # add positional encoding to each token
+        if self.use_pos_emb:
+            x = self.pos_embed(x)
+
+        return self.pos_drop(x), gene_labels
+
+    def forward(
+        self,
+        x,
+        gene_labels,
+        masking,
+        attn_mask,
+        return_attention,
+        return_gene_embeddings=False,
+    ):
+        # Random masking:
+        if masking:
+            x, gene_labels = self.random_gene_masking(x, gene_labels)
+
+        # Prepare tokens for transformer
+        x, gene_labels = self.prepare_tokens(x, gene_labels)
+
+        for blk in self.blocks:
+            x, attn = blk(x, attn_mask=attn_mask, return_attention=return_attention)
+
+        x = self.norm(x)
+
+        token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
+
+        logits_lm = self.decoder(x)
+
+        output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
+
+        if attn is not None:
+            #  returns full attention matrix not just CLS
+            output['attention'] = attn
+
+        if return_gene_embeddings:
+            output['gene_embeddings'] = x[:, 1:, :]
+
+        return output
+
+    def get_intermediate_layers(self, x, gene_labels, n=1):
+        x, gene_labels = self.prepare_tokens(x, gene_labels)
+        # we return the output tokens from the `n` last blocks
+        output = []
+        for i, blk in enumerate(self.blocks):
+            x = blk(x)
+            if len(self.blocks) - i <= n:
+                output.append(self.norm(x))
+        return output
+
+
+class gpTransformerEncoderWithPrompt(gpTransformerEncoder):
+    def __init__(self, **kwargs):
+        super()._init_(**kwargs)
 
     def random_gene_masking(self, x, gene_labels, unmask_last_n=0):
         x = x.clone()
@@ -360,47 +459,11 @@ class gpTransformerEncoder(nn.Module):
 
         return x, gene_labels
 
-    def prepare_tokens(self, x, gene_labels):
-        B = x.shape[0]  # batch size
-
-        # add the [CLS] token to the embed patch tokens
-        cls_tokens = self.cls_token.expand(B, -1, -1)  # (256, 1, 256)
-
-        # print('cls token --> when concatenated')
-        # print(cls_tokens.shape) # 256
-        # print(cls_tokens[:5, 0, :10])
-
-        x = torch.cat((cls_tokens, x), dim=1)
-
-        # add dummy label for cls
-        cls_label = torch.full(
-            (gene_labels.shape[0], 1),
-            -100,
-            dtype=gene_labels.dtype,
-            device=gene_labels.device,
-        )  # Create a column of -100 values
-        gene_labels = torch.cat((cls_label, gene_labels), dim=1)
-
-        # add positional encoding to each token
-        if self.use_pos_emb:
-            x = self.pos_embed(x)
-        #     position_ids = torch.arange(x.shape[1], device=x.device)
-        #     pos_emb = self.pos_embed(position_ids)
-        #     print('pos_emb shape', pos_emb.shape)
-        #     print('x shape', x.shape)
-        #     x = x + pos_emb
-
-        #     print('x shape after pos emb', x.shape)
-
-        # print(x[:5, 0, :10])
-
-        return self.pos_drop(x), gene_labels
-
     def forward(
         self,
         x,
         gene_labels,
-        inference,
+        masking,
         attn_mask,
         return_attention,
         return_gene_embeddings=False,
@@ -408,7 +471,7 @@ class gpTransformerEncoder(nn.Module):
         using_gp_specific_token=False,
     ):
         # Random masking:
-        if inference is False:
+        if masking:
             x, gene_labels = self.random_gene_masking(
                 x, gene_labels, unmask_last_n=num_virtual_tokens
             )
@@ -416,11 +479,6 @@ class gpTransformerEncoder(nn.Module):
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
 
-        # print('After adding cls token and positional encoding --> ALL 0 CELLS')
-        # print(x[idx][:5, 0, :10])
-
-        # # Optionally move virtual tokens to start of the sequence
-        # if num_virtual_tokens > 0:
         #     # Extract the <cls> token
         #     # shapes indicate shape of line below
         #     # Shape: [batch_size, 1, feature_dim]
@@ -457,13 +515,8 @@ class gpTransformerEncoder(nn.Module):
         for blk in self.blocks:
             x, attn = blk(x, attn_mask=attn_mask, return_attention=return_attention)
 
-        # print('ALL 0 CELLS - output of attention block')
-        # print(x[idx][:5, 0, :10])
-
         x = self.norm(x)
 
-        # print('after normalization')
-        # print(x[idx][:5, 0, :10])
         token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
 
         logits_lm = self.decoder(x)
@@ -471,42 +524,20 @@ class gpTransformerEncoder(nn.Module):
         output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
 
         if attn is not None:
-            # Now returns full attention matrix not just CLS
-            # for attributions, use gradcam
-            # could implement method for cls attention scores as well
-            # print('Attention shape', attn.shape)
-            # (batch, heads, 1 + tokens, 1 + tokens)
-            # print('<cls>', attn[:, :, 0, :].shape)
+            #  returns full attention matrix not just CLS
             output['attention'] = attn
 
         if return_gene_embeddings:
-            output['gene_embeddings'] = (
-                x[:, 1:-num_virtual_tokens, :]
-                if num_virtual_tokens > 0
-                else x[:, 1:, :]
-            )
+            output['gene_embeddings'] = x[:, 1:-num_virtual_tokens, :]
 
-        if num_virtual_tokens > 0:
-            if using_gp_specific_token:
-                output['gp_virtual_tokens'] = x[
-                    :, -num_virtual_tokens : -int(num_virtual_tokens / 2), :
-                ]
-                output['shared_virtual_tokens'] = x[
-                    :, -int(num_virtual_tokens / 2) :, :
-                ]
-            else:
-                output['shared_virtual_tokens'] = x[:, -num_virtual_tokens:, :]
+        if using_gp_specific_token:
+            output['gp_virtual_tokens'] = x[
+                :, -num_virtual_tokens : -int(num_virtual_tokens / 2), :
+            ]
+            output['shared_virtual_tokens'] = x[:, -int(num_virtual_tokens / 2) :, :]
+        else:
+            output['shared_virtual_tokens'] = x[:, -num_virtual_tokens:, :]
 
-        return output
-
-    def get_intermediate_layers(self, x, gene_labels, n=1):
-        x, gene_labels = self.prepare_tokens(x, gene_labels)
-        # we return the output tokens from the `n` last blocks
-        output = []
-        for i, blk in enumerate(self.blocks):
-            x = blk(x)
-            if len(self.blocks) - i <= n:
-                output.append(self.norm(x))
         return output
 
 

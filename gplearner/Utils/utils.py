@@ -38,7 +38,10 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torchmetrics import PearsonCorrCoef
 from tqdm import tqdm
+
+from ..Metrics.metrics import evaluate_emd, evaluate_mmd
 
 random.seed(0)
 
@@ -875,6 +878,117 @@ class mlm_mask_generator:
 ###################################
 # Downstream evaluation
 ###################################
+
+
+def evaluate_gene_expr_reconstruction(true_counts, pred_counts, meta, output_dir):
+    # shuffle the counts
+    true_counts_shuffled = true_counts[torch.randperm(true_counts.size(0))]
+
+    pearson_val = PearsonCorrCoef(num_outputs=true_counts.shape[0]).to(
+        true_counts.device
+    )
+
+    pearson = pearson_val(pred_counts.T, true_counts.T)
+    mean_pearson = torch.mean(pearson)
+
+    pearson_shuffled = pearson_val(pred_counts.T, true_counts_shuffled.T)
+    mean_pearson_shuffled = torch.mean(pearson_shuffled)
+
+    # Pearson correlation for non zero genes
+    n_cells, n_genes = pred_counts.shape
+    mean_pearson_non_zero = []
+
+    for cell_idx in range(n_cells):
+        # For each cell, identify non-zero genes
+        non_zero_genes = true_counts[cell_idx, :] > 0
+
+        # Filter out zero-expression genes for this cell
+        # in both pred and true counts
+        pred_non_zero = pred_counts[cell_idx, non_zero_genes]
+        true_non_zero = true_counts[cell_idx, non_zero_genes]
+
+        if (
+            len(pred_non_zero) > 1
+        ):  # Ensure there's more than one gene to calculate Pearson correlation
+            # Calculate Pearson correlation for the non-zero genes in this cell
+            pearson_corr = torch.corrcoef(torch.stack((pred_non_zero, true_non_zero)))[
+                0, 1
+            ]
+            mean_pearson_non_zero.append(pearson_corr)
+
+    # Compute the mean Pearson correlation across all cells
+    mean_pearson_non_zero = torch.tensor(mean_pearson_non_zero).mean()
+
+    # # MSE
+    # mse = self.metric['mse'](pred_counts, true_counts)
+    # mean_mse = torch.mean(mse)
+
+    # mse_shuffled = self.metric['mse'](pred_counts, true_counts_shuffled)
+    # mean_mse_shuffled = torch.mean(mse_shuffled)
+
+    # # set up anndata object for subsetting by condition
+    # meta_dict = self.cell_metadata
+
+    # meta_dict.pop('counts', None)
+    # meta_dict.pop('size_factor', None)
+
+    if 'batch_key' not in meta.columns:
+        meta['batch_key'] = 'single_condition'
+
+    adata_true = sc.AnnData(X=true_counts.cpu().numpy(), obs=meta)
+    adata_pred = sc.AnnData(X=pred_counts.cpu().numpy(), obs=meta)
+
+    mmd = evaluate_mmd(adata_true, adata_pred, condition_key='batch_key')
+
+    mmd.to_csv(os.path.join(output_dir, 'global_recon_mmd.csv'))
+
+    emd = evaluate_emd(adata_true, adata_pred, condition_key='batch_key')
+    emd.to_csv(os.path.join(output_dir, 'global_recon_emd.csv'))
+
+    # count zero values in true and predicted
+    true_zeros = torch.sum(true_counts == 0).item()
+    pred_zeros = torch.sum(pred_counts == 0).item()
+    true_prop_zeros = true_zeros / true_counts.numel()
+    pred_prop_zeros = pred_zeros / pred_counts.numel()
+
+    # write to disk
+    metrics_df = pd.DataFrame(
+        {
+            'metric': [
+                'pearson',
+                'pearson_shuffled',
+                'pearson_non_zero',
+                # 'mse',
+                # 'mse_shuffled',
+                'true_zeros',
+                'pred_zeros',
+                'true_prop_zeros',
+                'pred_prop_zeros',
+                'max true counts',
+                'max pred counts',
+            ],
+            'value': [
+                mean_pearson.item(),
+                mean_pearson_shuffled.item(),
+                mean_pearson_non_zero.item(),
+                # mean_mse.item(),
+                # mean_mse_shuffled.item(),
+                true_zeros,
+                pred_zeros,
+                true_prop_zeros,
+                pred_prop_zeros,
+                true_counts.max().item(),
+                pred_counts.max().item(),
+            ],
+        }
+    )
+
+    metrics_df.to_csv(
+        os.path.join(output_dir, 'random_baseline_metrics.csv'),
+        index=False,
+    )
+
+    return metrics_df
 
 
 def wrangle_classification_report(report):

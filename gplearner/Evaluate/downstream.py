@@ -1,13 +1,8 @@
 import os
 import pickle
 import random
-import shutil
 import warnings
-from typing import (
-    Dict,
-    List,
-    Optional,
-)
+from typing import Dict, Optional
 
 import anndata as ad
 import matplotlib
@@ -22,7 +17,6 @@ from captum.attr import GuidedGradCam
 from datasets import load_from_disk
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
-from scib_metrics.benchmark import Benchmarker
 from tqdm import tqdm
 
 from ..Datamodules.datamodule import (
@@ -35,12 +29,16 @@ from ..Models.gp_model import (
     GENE_NAME_FILE,
     GENEFORMER_MODEL_PATH,
     gfGlobal,
-    gpTransformerBase,
-    gpTransformerGlobal,
     iGlobalWrapper,
     iGpWrapper,
 )
-from ..Trainers.trainer import EmbEvaluator, scGPL
+from ..Train.training import configure_model
+from ..Trainers.trainer import (
+    EmbEvaluator,
+    gpBase,
+    gpGlobal,
+    gpPrototypes,
+)
 from ..Utils.utils import (
     MidpointNormalize,
     find_latest_file,
@@ -125,7 +123,6 @@ class gpEval:
         gp_latent_size: Optional[int] = 256,
         gp_inputs: Optional[list] = None,
         batch_size: Optional[int] = 128,
-        add_remaining_var: Optional[str] = None,
         supervised_labels: Optional[Dict] = None,
         global_attn_heads: Optional[int] = 1,
         global_n_blocks: Optional[int] = 1,
@@ -135,15 +132,11 @@ class gpEval:
         peft_config_path: Optional[str] = None,
         path_to_trained_model: Optional[str] = None,
         seed: Optional[int] = 0,
-        hvg_path: Optional[str] = None,
         hparam_save: Optional[str] = 'all',
         num_virtual_tokens: Optional[int] = 0,
         cond_to_shift: Optional[Dict] = None,
         mean_emb_dict: Optional[Dict] = None,
     ):
-        # check only one GPU --> force only 1 device
-        # assert torch.cuda.device_count() == 1, 'Please run evaluation on single GPU'
-
         # set seed for reproducibility
         np.random.seed(seed)
         random.seed(seed)
@@ -183,84 +176,14 @@ class gpEval:
         else:
             self.gene_counts_df = None
 
-        if hvg_path is not None:
-            hvg = pd.read_csv(hvg_path)
-            hvg_list = hvg['hvg'].tolist()
-        else:
-            hvg_list = None
+        args = locals()
 
-        if model_type == 'Base':
-            self.model = gpTransformerBase(
-                gp_inputs=gp_inputs,
-                gene_counts_df=self.gene_counts_df,
-                database=gpdb,
-                do_ensembl_conversion=do_ensembl_conversion,
-                n_blocks=n_blocks,
-                num_heads=n_heads,
-                gp_latent_size=gp_latent_size,
-                add_remaining_var=add_remaining_var,
-                geneformer_model=geneformer_model_path,
-                hvg_list=hvg_list,
-                num_virtual_tokens=num_virtual_tokens,
-                peft_config_path=peft_config_path,
-                mean_emb_dict=mean_emb_dict,
-            )
-
-        elif model_type == 'Global':
-            self.model = gpTransformerGlobal(
-                gene_counts_df=self.gene_counts_df,
-                database=gpdb,
-                do_ensembl_conversion=do_ensembl_conversion,
-                n_blocks=n_blocks,
-                num_heads=n_heads,
-                gp_latent_size=gp_latent_size,
-                gp_inputs=gp_inputs,
-                add_remaining_var=add_remaining_var,
-                supervised_labels=supervised_labels,
-                global_attn_heads=global_attn_heads,
-                global_n_blocks=global_n_blocks,
-                global_loss=global_loss,
-                reconstruction_loss=reconstruction_loss,
-                geneformer_model=geneformer_model_path,
-                peft_config_path=peft_config_path,
-                hvg_list=hvg_list,
-                num_virtual_tokens=num_virtual_tokens,
-                cond_to_shift=cond_to_shift,
-                mean_emb_dict=mean_emb_dict,
-            )
-
-            self.reconstruction_loss = reconstruction_loss
-            self.cond_to_shift = cond_to_shift
-
-        elif model_type == 'Mean':
-            self.model = gfGlobal(
-                gp_inputs=gp_inputs,
-                database=gpdb,
-                do_ensembl_conversion=do_ensembl_conversion,
-                gene_counts_df=self.gene_counts_df,
-                # dummy variables to avoid errors if no defaults
-                # but we won't use transformer blocks
-                n_blocks=1,
-                mgm_mask_ratio=1,
-                num_heads=1,
-                add_remaining_var=add_remaining_var,
-                geneformer_model=geneformer_model_path,
-                peft_config_path=peft_config_path,
-                hvg_list=hvg_list,
-                num_virtual_tokens=num_virtual_tokens,
-                mean_emb_dict=mean_emb_dict,
-                use_pos_emb=False,
-            )
-
-        else:
-            raise ValueError('model_type must be one of Base, Global, or Mean')
+        self.model = configure_model(args)
 
         if gp_inputs is None:
             gp_inputs = gpdb.columns.tolist()
         if isinstance(gp_inputs, str):
             gp_inputs = [gp_inputs]
-        if add_remaining_var:
-            gp_inputs.append('remaining_var')
 
         # Remove /
         gp_inputs = [g.replace('/', '_') for g in gp_inputs]
@@ -309,39 +232,24 @@ class gpEval:
         num_virtual_tokens=0,
         return_virtual_tokens=False,
     ):
-        if self.model_type != 'Mean':
-            gp_transformer = scGPL(
-                self.model,
-                self.model_type,
-                return_gene_embeddings=return_gene_embeddings,
-                tokens_to_keep=tokens_to_keep,
-                genes_to_keep=genes_to_keep,
-                gene_dir_tag=gene_dir_tag,
-                return_attention=return_attention,
-                gp=gp,
-                return_classification_report=return_classification_report,
-                global_loss=self.global_loss,
-                test_random_baseline=test_random_baseline,
-                save_emb=save_emb,
-                split_label=split_label,
-                hparam_save=hparam_save,
-                return_virtual_tokens=return_virtual_tokens,
-            ).load_from_checkpoint(self.checkpoint_path, hparam_save=hparam_save)
-        else:
-            gp_transformer = scGPL(
-                self.model,
-                self.model_type,
-                tokens_to_keep=tokens_to_keep,
-                genes_to_keep=genes_to_keep,
-                gene_dir_tag=gene_dir_tag,
-                return_gene_embeddings=return_gene_embeddings,
-                output_dir=self.output_dir,
-                return_classification_report=return_classification_report,
-                save_emb=save_emb,
-                split_label=split_label,
-                hparam_save='ignore_model',
-                return_virtual_tokens=return_virtual_tokens,
+        if self.model_type == 'Base':
+            gp_transformer = gpBase.load_from_checkpoint(
+                self.checkpoint_path, hparam_save=hparam_save
             )
+
+        elif self.model_type == 'Global':
+            gp_transformer = gpGlobal.load_from_checkpoint(
+                self.checkpoint_path, hparam_save=hparam_save
+            )
+
+        elif self.model_type == 'Prototypes':
+            gp_transformer = gpPrototypes.load_from_checkpoint(
+                self.checkpoint_path, hparam_save=hparam_save
+            )
+
+        elif self.model_type == 'Mean':
+            # only needs gp mean model set up in init
+            gp_transformer = gfGlobal(model=self.model)
 
         # reset attributes overwritten by loading from checkpoint
         gp_transformer.return_gene_embeddings = return_gene_embeddings
@@ -359,29 +267,7 @@ class gpEval:
         gp_transformer.return_virtual_tokens = return_virtual_tokens
         gp_transformer.model.cond_to_shift = self.cond_to_shift
 
-        # print('')
-        # print('***')
-        # print('INITIALIZING MODEL FROM CHECKPOINT')
-        # print('***')
-        # print('')
-
-        # for n, p in gp_transformer.model.named_parameters():
-        #     print(n, p.shape)
-
-        # print('')
-
-        # print('Hyperparameters')
-        # print(gp_transformer.hparams)
-        # print('')
-
-        if gp_transformer.model_type == 'Global':
-            gp_transformer.model.cell_token_learner.num_virtual_tokens = (
-                num_virtual_tokens
-            )
-
-        # for backwards compatibility
-        if not hasattr(gp_transformer.model, 'use_prbm'):
-            gp_transformer.model.use_prbm = False
+        gp_transformer.model.cell_token_learner.num_virtual_tokens = num_virtual_tokens
 
         return gp_transformer
 
@@ -408,7 +294,7 @@ class gpEval:
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
 
-        trainer.validate(gp_transformer, txdata)
+        trainer.test(gp_transformer, txdata)
 
     @staticmethod
     def evaluate_embeddings(
@@ -580,85 +466,6 @@ class gpEval:
         adata.obsm[model_name] = new.X
 
         return adata
-
-    @staticmethod
-    def benchmarking_with_scib(
-        self,
-        adata_path: str,
-        batch_key: str,
-        label_key: str,
-        embs_to_benchmark: List,
-        model_labels: List,
-        emb_label: str,
-    ):
-        '''
-        Run scIB benchmarking
-        Based on https://github.com/YosefLab/scib-metrics/
-
-        Parameters
-        ----------
-        adata_path : str
-            Path to original adata
-        embs_to_benchmark : list
-            List of paths to embeddings to benchmark
-            eg ['../output_different_hparam/embeddings/test_set',
-                '../expimap/adata_expimap.h5ad']
-        model_labels : list
-            List of labels for each model
-            eg ['gpTransformer', 'Expimap']
-        emb_label : str
-            Label for embeddings
-            eg 'GEP_1'
-            eg 'cell_token'
-
-        '''
-        # Load original gene expression data
-        adata = sc.read_h5ad(adata_path)
-        sc.pp.highly_variable_genes(
-            adata, n_top_genes=2000, flavor='seurat_v3', batch_key='batch_key'
-        )
-        sc.pp.normalize_total(adata, target_sum=1e4)
-        sc.tl.pca(adata, n_comps=30, use_highly_variable=True)
-        adata.obsm['Unintegrated'] = adata.obsm['X_pca']
-
-        if isinstance(embs_to_benchmark, str):
-            embs_to_benchmark = [embs_to_benchmark]
-
-        if isinstance(model_labels, str):
-            model_labels = [model_labels]
-
-        for emb_path, model_name in zip(embs_to_benchmark, model_labels):
-            if emb_path.endswith('.h5ad'):
-                embx = sc.read_h5ad(emb_path)
-
-                if emb_label != 'cell_token':
-                    embx = embx[:, embx.var.str.contains(emb_label)]
-
-            else:
-                embx = load_from_disk(emb_path)
-                x = np.array(embx[emb_label])
-                y = pd.DataFrame(embx[[batch_key, label_key, 'idx']])
-                embx = sc.AnnData(X=x, obs=y)
-
-            adata = self._load_and_save_latent(adata, embx, model_name)
-
-        bm = Benchmarker(
-            adata,
-            batch_key=batch_key,
-            label_key=label_key,
-            embedding_obsm_keys=model_labels,
-            n_jobs=-1,
-        )
-        bm.benchmark()
-
-        bm.plot_results_table(show=False, savedir=self.output_dir)
-
-        shutil.move(
-            os.path.join(self.output_dir, 'scib_results.svg'),
-            os.path.join(self.output_dir, 'scib_results_minmax_scaling.svg'),
-        )
-
-        bm.plot_results_table(min_max_scale=False, show=False, savedir=self.output_dir)
 
     def generate_gene_embeddings(
         self,
@@ -1020,50 +827,18 @@ def calculate_gp_attribution_scores(
     # Set up model
     # --------------------------
 
+    model = configure_model(locals())
+
     if model_type == 'Base':
-        model = gpTransformerBase(
-            database=gpdb,
-            do_ensembl_conversion=(gene_format != 'ensembl'),
-            n_blocks=n_blocks,
-            num_heads=num_heads,
-            gp_latent_size=gp_latent_size,
-            gp_inputs=gp_inputs,
-            gene_counts_df=gene_counts_df,
-            add_remaining_var=add_remaining_var,
-            hvg_list=hvg_list,
-            use_flash=use_flash,
-            num_virtual_tokens=num_virtual_tokens,
+        gp_transformer = gpBase.load_from_checkpoint(
+            model_checkpoint,
+            strict=False,
         )
     elif model_type == 'Global':
-        model = gpTransformerGlobal(
-            database=gpdb,
-            do_ensembl_conversion=(gene_format != 'ensembl'),
-            n_blocks=n_blocks,
-            num_heads=num_heads,
-            gp_latent_size=gp_latent_size,
-            gp_inputs=gp_inputs,
-            gene_counts_df=gene_counts_df,
-            add_remaining_var=add_remaining_var,
-            global_loss=global_loss,
-            supervised_labels=supervised_labels,
-            hvg_list=hvg_list,
-            use_flash=use_flash,
-            num_virtual_tokens=num_virtual_tokens,
+        gp_transformer = gpGlobal.load_from_checkpoint(
+            model_checkpoint,
+            strict=False,
         )
-
-    gp_transformer = scGPL(
-        model,
-        model_type,
-        global_loss=global_loss,
-        return_gene_embeddings=False,
-        tokens_to_keep=None,
-        return_attention=False,
-        gp=None,  # (for getting attention matrices)
-        return_classification_report=False,
-    ).load_from_checkpoint(
-        model_checkpoint,
-        strict=False,
-    )
 
     # Load classification layer
     # or train if not available
@@ -1300,35 +1075,9 @@ def calculate_cell_token_attribution_scores(
     # Set up model
     # --------------------------
 
-    # remaning variation should be added during initialization
-    if 'remaining_var' in gp_inputs:
-        gp_inputs.remove('remaining_var')
+    model = configure_model(locals())
 
-    model = gpTransformerGlobal(
-        database=gpdb,
-        do_ensembl_conversion=(gene_format != 'ensembl'),
-        n_blocks=n_blocks,
-        num_heads=num_heads,
-        gp_latent_size=gp_latent_size,
-        gp_inputs=gp_inputs,
-        add_remaining_var=add_remaining_var,
-        global_loss=global_loss,
-        reconstruction_loss=reconstruction_loss,
-        supervised_labels=supervised_labels,
-        gene_counts_df=gene_counts_df,
-        num_virtual_tokens=num_virtual_tokens,
-    )
-
-    gp_transformer = scGPL(
-        model,
-        'Global',
-        global_loss=reconstruction_loss,
-        return_gene_embeddings=False,
-        tokens_to_keep=None,
-        return_attention=False,
-        gp=None,
-        return_classification_report=False,
-    ).load_from_checkpoint(
+    gp_transformer = gpGlobal.load_from_checkpoint(
         model_checkpoint,
         strict=False,
     )
