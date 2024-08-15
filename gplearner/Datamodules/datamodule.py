@@ -25,7 +25,7 @@ from ..Models.gp_model import (
     GENEFORMER_MODEL_PATH,
     gfWrapper,
 )
-from ..Utils.utils import get_gp_tokens
+from ..Utils.utils import build_gp_input_matrix, get_gp_tokens
 
 random.seed(0)
 
@@ -314,7 +314,7 @@ class txDataModule(LightningDataModule):
         frac_for_generation=1,
         # development only:
         frac_for_training=1,
-        data_split_to_pass_to_val_step='val',
+        data_split_to_pass_to_test_step='val',
         seed=42,
         load_exp=False,
     ):
@@ -338,7 +338,7 @@ class txDataModule(LightningDataModule):
         self.shuffle = shuffle
         token_dictionary_file = TOKEN_DICTIONARY_FILE
         self.frac_for_training = frac_for_training
-        self.data_for_validation_step = data_split_to_pass_to_val_step
+        self.data_for_test_step = data_split_to_pass_to_test_step
         self.label_key = label_key
         self.return_tuple = return_tuple
         self.filter_key = filter_key
@@ -379,6 +379,8 @@ class txDataModule(LightningDataModule):
             anndata_dataset = AnnDataset(self.adata_path)
 
             if len(tokenized_dataset) != len(anndata_dataset):
+                print('Tokenized dataset length:', len(tokenized_dataset))
+                print('Anndata object length:', len(anndata_dataset))
                 raise ValueError(
                     'Tokenized dataset and anndata object do not have the same length'
                 )
@@ -458,7 +460,17 @@ class txDataModule(LightningDataModule):
         return dataloader
 
     def val_dataloader(self):
-        if self.data_for_validation_step == 'train':
+        return DataLoader(
+            self.val_dataset,
+            collate_fn=self.custom_collate,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+
+    def test_dataloader(self):
+        if self.data_for_test_step == 'train':
             return DataLoader(
                 self.train_dataset,
                 collate_fn=self.custom_collate,
@@ -467,16 +479,7 @@ class txDataModule(LightningDataModule):
                 num_workers=self.num_workers,
                 pin_memory=True,
             )
-        elif self.data_for_validation_step == 'test':
-            return DataLoader(
-                self.test_dataset,
-                collate_fn=self.custom_collate,
-                batch_size=self.batch_size,
-                shuffle=False,
-                num_workers=self.num_workers,
-                pin_memory=True,
-            )
-        else:
+        elif self.data_for_test_step == 'val':
             return DataLoader(
                 self.val_dataset,
                 collate_fn=self.custom_collate,
@@ -485,16 +488,15 @@ class txDataModule(LightningDataModule):
                 num_workers=self.num_workers,
                 pin_memory=True,
             )
-
-    def test_dataloader(self):
-        return DataLoader(
-            self.test_dataset,
-            collate_fn=self.custom_collate,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
+        else:
+            return DataLoader(
+                self.test_dataset,
+                collate_fn=self.custom_collate,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                pin_memory=True,
+            )
 
     def custom_collate(self, batch):
         # Step 1 : tokenized dataset
@@ -635,97 +637,6 @@ class iTxDataModule(txDataModule):
 
             self.gp_tokens = tokens_tensor
 
-    def build_input_matrix(self, gf, input_ids, gp_tokens):
-        """
-        Build a matrix of shape (n_cells, n_gp_tokens, 256)
-        where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
-        maintains geneformer order
-
-        Inputs:
-
-        gf :
-            geneformer embeddings (n_cells, 2048, 256)
-
-        input_ids:
-            list of lists with positional information for each token
-
-        gp_tokens_list:
-            list of tokens for each gene program
-
-        model:
-            "full_model" : set for input into geneformer
-            "extract_genes" : when extracting gene embeddings
-                            -> max size is total GP size
-
-        """
-        # binary mask (h, i, k)
-        # in cell h, is the gene as position i in our GP at position k?
-        mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0)
-        mask = mask.to(torch.int)
-
-        # Now reshape so that we will zero out non GP genes in each cell
-        mask_expanded = mask.sum(dim=-1).unsqueeze(2)
-
-        # Apply the mask to the data using broadcasting
-        masked_latent = gf * mask_expanded
-
-        # Now wrangle so that the non zero genes are first
-        # but we maintain the order
-        # loop through the cells to deal with different shapes
-        holder = []
-
-        for i in range(masked_latent.shape[0]):
-            x = masked_latent[i, :, :]
-            c = masked_latent[i, :, 1]  # find which genes have been 0'd out
-            idx = c != 0
-            idx_zero = c == 0
-            z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
-            holder += [z]
-
-        result_matrix = torch.stack(holder)
-
-        # Now do the same for labels
-        masked_labels = torch.where(
-            mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
-        )
-
-        holder = []
-        for i in range(masked_labels.shape[0]):
-            x = masked_labels[i, :]
-            nz = x != 0
-            z = torch.concat((x[nz], x[~nz]), dim=0)
-            holder += [z]
-
-        masked_labels_output = torch.stack(holder)
-
-        # count number of genes per cell
-        num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
-
-        # # Make tensor for forward pass
-        # masked_labels_output = torch.tensor(masked_labels_output).to(gf.device)
-        # # comment the line below to leave 0s because they are actually informative
-        # # (this gene was not in the top 1000 of this cell)
-        masked_labels_output[masked_labels_output == 0] = -100
-
-        # # We know that at most, the non zero genes is the number of genes in the GP
-        # # for known GP we keep all genes
-        # # TO DO : ADD OPTION FOR GPFINDER HERE
-        # n_genes_to_keep = gp_tokens.shape[0]
-        # result_matrix = result_matrix[:, :n_genes_to_keep, :]
-        # masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
-
-        # Set up attention mask
-        # to avoid attention to padding tokens
-        attn_mask = torch.zeros_like(masked_labels_output)
-        attn_mask[masked_labels_output != 0] = 1
-
-        # never mask cls
-        attn_mask = torch.cat(
-            [torch.ones_like(attn_mask)[:, 0].unsqueeze(-1), attn_mask], dim=-1
-        )
-
-        return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
-
     def custom_collate(self, batch):
         # Step 1 : tokenized dataset
         tokenized_batch = [d['tk'] for d in batch]
@@ -743,7 +654,7 @@ class iTxDataModule(txDataModule):
             'input_ids': input_batch_id,
             'length': length,
         }
-        gf_emb = self.gf_wrapper(input_dict, inference=False)
+        gf_emb = self.gf_wrapper(input_dict)
 
         # Wrangle gp genes
         (
@@ -751,7 +662,7 @@ class iTxDataModule(txDataModule):
             tokens_pad,
             num_genes_per_cell,
             attn_mask,
-        ) = self.build_input_matrix(
+        ) = build_gp_input_matrix(
             gf_emb,  # geneformer embeddings
             input_batch_id,
             self.gp_tokens,
@@ -1065,6 +976,14 @@ class EmbDataModule(LightningDataModule):
                 else:
                     output_dict[m] = [d['obs'][m] for d in batch]
 
+        print('In emb datamodule')
+        print('output_dict:', output_dict.keys())
+        for k, v in output_dict.items():
+            if isinstance(v, torch.Tensor):
+                print(k, v.shape)
+            else:
+                print(k, len(v))
+
         return output_dict
 
 
@@ -1106,6 +1025,15 @@ class iEmbDataModule(EmbDataModule):
 
         # And metadata
         for m in self.meta_labels:
+            if self.encode_covariate:
+                if m == self.clf_label:
+                    output_dict[f'{m}_id'] = torch.tensor(
+                        [self.train_dataset.label_dict[d[m]] for d in batch],
+                        dtype=torch.long,
+                    )
+
+                    output_dict[m] = [d[m] for d in batch]
+
             if m.endswith('_id'):
                 output_dict[m] = torch.tensor([d[m] for d in batch], dtype=torch.long)
             elif m in self.continuous_cov:

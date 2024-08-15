@@ -7,18 +7,20 @@ from typing import (
     Union,
 )
 
+# from deepspeed.ops.adam import DeepSpeedCPUAdam
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
+import scanpy as sc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
-
-# from deepspeed.ops.adam import DeepSpeedCPUAdam
+from scipy.sparse import csr_matrix
 from sklearn.metrics import classification_report, roc_auc_score
 from torch import optim
-from torchmetrics import PearsonCorrCoef
+from torchmetrics import MeanSquaredError, PearsonCorrCoef
 
 from ..Models.gp_model import EmbEvaluatorHead
 from ..Utils.losses import compute_count_loss, compute_gp_similarity_loss
@@ -247,6 +249,7 @@ class gpBase(pl.LightningModule):
             return_gene_embeddings=self.return_gene_embeddings,
             tokens_to_keep=self.tokens_to_keep,
             gp_of_interest=self.gp,
+            return_attention=self.return_attention,
         )
 
         return out
@@ -381,7 +384,34 @@ class gpBase(pl.LightningModule):
             return None
 
         if self.return_attention:
-            pass  # TODO
+            # returns a dictionary where each gene is a key
+            if self.gp != 'cell_token':
+                output = self.model.get_cls_attn(batch, self.gp)
+            else:
+                # for cell token (only implemented for global model)
+                output = self.model.get_cell_token_attention(batch)
+
+            # add metadata
+            meta_dict = {}
+            for k, v in batch.items():
+                if k != 'input_ids':
+                    if isinstance(v, torch.Tensor):
+                        meta_dict[k] = v.cpu().numpy()
+                    else:
+                        meta_dict[k] = v
+
+            adata = sc.AnnData(
+                csr_matrix(pd.DataFrame(output).values),
+                obs=pd.DataFrame(meta_dict),
+                var=pd.DataFrame(index=list(output.keys())),
+            )
+
+            if self.attn_adata is None:
+                self.attn_adata = adata
+            else:
+                self.attn_data = ad.concat([self.attn_adata, adata])
+
+            return None
 
     def on_test_epoch_end(self):
         if self.save_emb:
@@ -398,6 +428,17 @@ class gpBase(pl.LightningModule):
             output_name = os.path.join(output_path, f'{self.split_label}_set')
             self.gene_dataset.save_to_disk(output_name)
             self.gene_dataset = None
+            return None
+
+        if self.return_attention:
+            output_path = os.path.join(self.output_dir, 'attention')
+            os.makedirs(output_path, exist_ok=True)
+            self.attn_adata.write_h5ad(
+                os.path.join(
+                    output_path, f'{self.gp}_attention_{self.split_label}_set.h5ad'
+                )
+            )
+
             return None
 
     def compute_gp_loss(self, batch, fw_pass_output):
@@ -558,6 +599,22 @@ class gpGlobal(gpBase):
                     'or a single float value for all tasks'
                 )
 
+        if self.global_loss == 'reconstruction':
+            self.reconstruction_loss = self.model.reconstruction_loss
+            if self.reconstruction_loss in ['nb', 'zinb']:
+                self.n_conditions_combined = n_condition_combined
+                self.theta = torch.nn.Parameter(
+                    torch.randn(total_n_genes, self.n_conditions_combined)
+                )
+            else:
+                self.theta = None
+
+            self.metric = nn.ModuleDict(
+                {
+                    'mse': MeanSquaredError(),
+                }
+            )
+
         # For learning global cell token
         for stage in ['train', 'val', 'test']:
             if self.global_loss == 'supervised':
@@ -603,7 +660,9 @@ class gpGlobal(gpBase):
             loss = loss_base['total_loss'] + cell_masking_loss
 
         elif self.global_loss == 'reconstruction':
-            reconstruction_loss = self.compute_reconstruction_loss(batch, output)
+            reconstruction_loss = self.compute_reconstruction_loss(
+                batch, output, stage='train'
+            )
             loss = loss_base['total_loss'] + reconstruction_loss
 
             # log loss
@@ -708,7 +767,9 @@ class gpGlobal(gpBase):
             loss = loss_base['total_loss'] + cell_masking_loss
 
         elif self.global_loss == 'reconstruction':
-            reconstruction_loss = self.compute_reconstruction_loss(batch, output)
+            reconstruction_loss = self.compute_reconstruction_loss(
+                batch, output, stage='val'
+            )
             loss = loss_base['total_loss'] + reconstruction_loss
 
             self.log(
@@ -911,15 +972,20 @@ class gpGlobal(gpBase):
             batch,
             self.model.reconstruction_loss,
             self.theta,
+            self.n_conditions_combined,
         )
 
         if self.model.reconstruction_loss in ['mse']:
-            self.train_pred_counts_list.append(output['count_output']['count_lognorm'])
-            self.train_true_counts_list.append(batch['counts'])
+            getattr(self, f'{stage}_pred_counts_list').append(
+                output['count_output']['count_lognorm']
+            )
+            getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         if self.model.reconstruction_loss in ['nb', 'zinb']:
-            self.train_pred_counts_list.append(output['count_output']['count_mean'])
-            self.train_true_counts_list.append(batch['counts'])
+            getattr(self, f'{stage}_pred_counts_list').append(
+                output['count_output']['count_mean']
+            )
+            getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         return reconstruction_loss
 
@@ -948,7 +1014,9 @@ class gpPrototypes(gpGlobal):
         loss_base = self.compute_gp_loss(batch, output)
 
         # Reconstruction loss
-        reconstruction_loss = self.compute_reconstruction_loss(batch, output)
+        reconstruction_loss = self.compute_reconstruction_loss(
+            batch, output, stage='train'
+        )
         loss = loss_base['total_loss'] + reconstruction_loss
 
         self.log(

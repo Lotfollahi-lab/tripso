@@ -23,7 +23,11 @@ from ..Modules.modules import (
     gpTransformerEncoderWithPrompt,
 )
 from ..Utils.geneformer_utils import EmbExtractor
-from ..Utils.utils import bin_gene_expression, get_gp_tokens
+from ..Utils.utils import (
+    bin_gene_expression,
+    build_gp_input_matrix,
+    get_gp_tokens,
+)
 
 ####################################
 # Geneformer
@@ -219,120 +223,6 @@ class gpWrapper(nn.Module):
             ]
         )
 
-    def build_input_matrix(self, gf, input_ids, gp_tokens, crop_to_gp_len=True):
-        """
-        Build a matrix of shape (n_cells, n_gp_tokens, 256)
-        where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
-        maintains geneformer order
-
-        Inputs:
-
-        gf :
-            geneformer embeddings (n_cells, 2048, 256)
-
-        input_ids:
-            list of lists with positional information for each token
-
-        gp_tokens_list:
-            list of tokens for each gene program
-
-        model:
-            "full_model" : set for input into geneformer
-            "extract_genes" : when extracting gene embeddings
-                            -> max size is total GP size
-            # NEED TO REIMPLEMENT
-
-        """
-        # Get list of gp tokens
-        # convert gp_tokens bf16 tensor to integers
-        # gp_tokens = gp_tokens.to(torch.int)
-        gp_tokens = gp_tokens.long()
-
-        # FOR ONE HOT ENCODER VERSION ONLY
-        b1, s1 = input_ids.shape
-        b2, s2, e2 = gf.shape
-
-        if s1 != s2:
-            input_ids = input_ids[:, :s2]
-
-        # Create a binary mask (h, i, k)
-        # In cell h, is the gene at position i in our GP at position k?
-        # Using broadcasting to compare tokens_arr with gp_tokens
-        mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0)  # .unsqueeze(0)
-        mask = mask.to(torch.int)
-
-        # Now reshape so that we will zero out non GP genes in each cell
-        # Sum along the last dimension to count how many GP tokens each gene matches
-        mask_expanded = mask.sum(dim=-1).unsqueeze(2)
-
-        if crop_to_gp_len:
-            # Apply the mask to the data using broadcasting
-            masked_latent = gf * mask_expanded
-
-            # Now wrangle so that the non zero genes are first
-            # but we maintain the order
-            # loop through the cells to deal with different shapes
-            holder = []
-
-            for i in range(masked_latent.shape[0]):
-                x = masked_latent[i, :, :]
-                c = masked_latent[i, :, 1]  # find which genes have been 0'd out
-                idx = c != 0
-                idx_zero = c == 0
-                z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
-                holder += [z]
-
-            result_matrix = torch.stack(holder)
-
-            masked_labels = torch.where(
-                mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
-            )
-
-            holder = []
-            for i in range(masked_labels.shape[0]):
-                x = masked_labels[i, :]
-                nz = x != 0
-                z = torch.concat((x[nz], x[~nz]), dim=0)
-                holder += [z]
-
-            masked_labels_output = torch.stack(holder)
-
-            # crop
-            n_genes_to_keep = gp_tokens.shape[0]
-            result_matrix = result_matrix[:, :n_genes_to_keep, :]
-            masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
-
-        else:
-            # Apply the mask to the data using broadcasting
-            result_matrix = gf * mask_expanded
-
-            # Now do the same for labels
-            # masked_labels_output = mask.sum(axis=-1) * input_ids
-            masked_labels_output = torch.where(
-                mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
-            )
-
-        # count number of genes per cell
-        num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
-
-        # Make tensor for forward pass
-        # comment the line below to leave 0s because they are actually informative
-        # (this gene was not in the top 1000 of this cell)
-        # masked_labels_output[masked_labels_output == 0] = -100
-        # happens when do LOOKUP
-
-        # Set up attention mask
-        # to avoid attention to padding tokens
-        attn_mask = torch.zeros_like(masked_labels_output)
-        attn_mask[masked_labels_output != 0] = 1
-
-        # never mask cls
-        attn_mask = torch.cat(
-            [torch.ones_like(attn_mask)[:, 0].unsqueeze(-1), attn_mask], dim=-1
-        )
-
-        return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
-
     def forward(
         self,
         gf_emb,
@@ -359,7 +249,7 @@ class gpWrapper(nn.Module):
                     tokens_pad,
                     num_genes_per_cell,
                     attn_mask,
-                ) = self.build_input_matrix(
+                ) = build_gp_input_matrix(
                     gf_emb,  # geneformer embeddings
                     input_dataset['input_ids'],
                     getattr(self, f'gp{i}_tokens'),
@@ -451,7 +341,7 @@ class gpWrapper(nn.Module):
 
         return output
 
-    def get_last_self_attn(self, gf_emb, input_dataset, gp_idx):
+    def get_gene_gene_attention(self, gf_emb, input_dataset, gp_idx):
         '''
         If multilpe blocks, get attn matrix from last transformer block
         '''
@@ -459,7 +349,7 @@ class gpWrapper(nn.Module):
         gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
 
         # Extract embeddings for the gene program of interest
-        emb_pad, tokens_pad, _, attn_mask = self.build_input_matrix(
+        emb_pad, tokens_pad, _, attn_mask = build_gp_input_matrix(
             gf_emb,  # geneformer embeddings
             input_dataset['input_ids'],
             gp_tokens,
@@ -548,7 +438,7 @@ class gpWrapper(nn.Module):
         gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
 
         # Extract embeddings for the gene program of interest
-        emb_pad, tokens_pad, _, attn_mask = self.build_input_matrix(
+        emb_pad, tokens_pad, _, attn_mask = build_gp_input_matrix(
             gf_emb,  # geneformer embeddings
             input_dataset['input_ids'],
             gp_tokens,
@@ -1035,11 +925,10 @@ class gpTransformerBase(nn.Module):
 
         return output
 
-    def get_last_self_attn(self, input_dataset, gp_idx):
-        # Get Geneformer embeddings
+    def get_gene_gene_attn(self, input_dataset, gp_idx):
         gf_emb = self.gf_wrapper(input_dataset)
 
-        output = self.multi_gp_encoder.get_last_self_attn(
+        output = self.multi_gp_encoder.get_gene_gene_attn(
             gf_emb, input_dataset, gp_idx=gp_idx
         )
 
@@ -1392,7 +1281,7 @@ class gpWrapperWithPrompt(gpWrapper):
                     tokens_pad,
                     num_genes_per_cell,
                     attn_mask,
-                ) = self.build_input_matrix(
+                ) = build_gp_input_matrix(
                     gf_emb,  # geneformer embeddings
                     input_dataset['input_ids'],
                     getattr(self, f'gp{i}_tokens'),
@@ -1967,12 +1856,17 @@ class iGpWrapper(nn.Module):
             emb,
             attn_mask=additional_input_dict['attn_mask'],
             gene_labels=additional_input_dict['token_labels'],
-            inference=True,
+            masking=False,
             return_attention=False,
             return_gene_embeddings=False,
         )
 
+        print('inside wrapper', output)
+
         logits = self.clf_layer(output['cls'])
+
+        print('logits', logits.shape)
+
         return logits
 
 
@@ -2025,7 +1919,7 @@ class iGlobalWrapper(nn.Module):
         }
 
         # Global cell token learner
-        out = self.global_block(input_dataset, inference=False)
+        out = self.global_block(input_dataset, masking=False)
 
         # Pass through linear layer
         logits = self.clf_layer(out['cell_token'])
@@ -2088,7 +1982,7 @@ class gpAverager(gpWrapper):
 
     def get_last_self_attn(self, gf_emb, input_dataset, gp_idx):
         # Extract embeddings for the gene program of interest
-        emb_pad, tokens_pad, _, attn_mask = self.build_input_matrix(
+        emb_pad, tokens_pad, _, attn_mask = build_gp_input_matrix(
             gf_emb,  # geneformer embeddings
             input_dataset['input_ids'],
             getattr(self, f'gp{gp_idx}_tokens'),

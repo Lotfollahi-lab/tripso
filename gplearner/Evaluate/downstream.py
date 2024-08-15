@@ -32,7 +32,6 @@ from ..Models.gp_model import (
     iGlobalWrapper,
     iGpWrapper,
 )
-from ..Train.training import configure_model
 from ..Trainers.trainer import (
     EmbEvaluator,
     gpBase,
@@ -113,29 +112,16 @@ class gpEval:
         gpdb_path: Optional[str] = None,
         output_dir: str = '/path/to/output/',
         dataset_path: Optional[str] = None,
-        gene_counts_df: Optional[str] = None,
-        n_blocks: Optional[int] = 1,
-        gene_format: Optional[str] = 'symbol',
         tissue: Optional[str] = 'test',
         model_type: Optional[str] = 'Base',
         model_type_in_checkpoint: Optional[str] = None,
-        n_heads: Optional[int] = 8,
-        gp_latent_size: Optional[int] = 256,
-        gp_inputs: Optional[list] = None,
         batch_size: Optional[int] = 128,
-        supervised_labels: Optional[Dict] = None,
-        global_attn_heads: Optional[int] = 1,
-        global_n_blocks: Optional[int] = 1,
-        global_loss: Optional[str] = 'supervised',
-        reconstruction_loss: Optional[str] = 'zinb',
-        geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
-        peft_config_path: Optional[str] = None,
         path_to_trained_model: Optional[str] = None,
         seed: Optional[int] = 0,
         hparam_save: Optional[str] = 'all',
         num_virtual_tokens: Optional[int] = 0,
         cond_to_shift: Optional[Dict] = None,
-        mean_emb_dict: Optional[Dict] = None,
+        return_classification_report: Optional[bool] = False,
     ):
         # set seed for reproducibility
         np.random.seed(seed)
@@ -165,31 +151,6 @@ class gpEval:
 
         gpdb = pd.read_csv(gpdb_path)
 
-        if gene_format == 'symbol':
-            do_ensembl_conversion = True
-        elif gene_format == 'ensembl':
-            do_ensembl_conversion = False
-        self.do_ensembl_conversion = do_ensembl_conversion
-
-        if gene_counts_df is not None:
-            self.gene_counts_df = pd.read_csv(gene_counts_df)
-        else:
-            self.gene_counts_df = None
-
-        args = locals()
-
-        self.model = configure_model(args)
-
-        if gp_inputs is None:
-            gp_inputs = gpdb.columns.tolist()
-        if isinstance(gp_inputs, str):
-            gp_inputs = [gp_inputs]
-
-        # Remove /
-        gp_inputs = [g.replace('/', '_') for g in gp_inputs]
-
-        self.gp_inputs = gp_inputs
-
         # change directory for saving outputs
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -198,10 +159,6 @@ class gpEval:
         self.dataset_path = dataset_path
         self.batch_size = batch_size
         self.gpdb = gpdb
-        self.cond_to_shift = cond_to_shift
-
-        # for compatability with gpGlobal init
-        self.global_loss = global_loss
 
         # to avoid error when using geneformer finetuned model
         self.hparam_save = hparam_save
@@ -209,7 +166,8 @@ class gpEval:
         # Set up gpTransformer lightning module
         self.model_type = model_type
         self.num_virtual_tokens = num_virtual_tokens
-        return_classification_report = True if supervised_labels is not None else False
+        self.cond_to_shift = cond_to_shift
+
         self.gp_transformer = self._init_trainer(
             return_classification_report=return_classification_report,
             hparam_save=self.hparam_save,
@@ -269,6 +227,10 @@ class gpEval:
 
         gp_transformer.model.cell_token_learner.num_virtual_tokens = num_virtual_tokens
 
+        # Extract model
+        self.model = gp_transformer.model
+        self.gp_inputs = gp_transformer.model.gp_inputs
+
         return gp_transformer
 
     def generate_embeddings(self, split='train'):
@@ -286,7 +248,7 @@ class gpEval:
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
-            data_split_to_pass_to_val_step=split,
+            data_split_to_pass_to_test_step=split,
             # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
             # -> comment out to reproduce original
             seed=self.seed,
@@ -548,7 +510,7 @@ class gpEval:
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
-            data_split_to_pass_to_val_step=split,
+            data_split_to_pass_to_test_step=split,
             filter_key=obs_key,
             filter_value=obs_value,
             frac_for_generation=data_frac,
@@ -558,7 +520,7 @@ class gpEval:
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
-        trainer.validate(gp_transformer, txdata)
+        trainer.test(gp_transformer, txdata)
 
     def visualize_gene_embeddings(
         self,
@@ -631,7 +593,7 @@ class gpEval:
                 frameon=False,
             )
 
-    def generate_attention_matrix(self, gp):
+    def generate_attention_matrix(self, gp, split='test'):
         """
         Get attention weights from gpTransformer
         """
@@ -644,10 +606,17 @@ class gpEval:
             raise ValueError(f'{gp} must be one of "cell_token" or {self.gp_inputs}')
 
         # Initialize trainer
-        txdata = txDataModule(folder=self.dataset_path, batch_size=self.batch_size)
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_test_step=split,
+        )
 
         gp_transformer = self._init_trainer(
-            return_attention=True, gp=gp, num_virtual_tokens=self.num_virtual_tokens
+            return_attention=True,
+            gp=gp,
+            num_virtual_tokens=self.num_virtual_tokens,
+            split_label=split,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
@@ -670,12 +639,12 @@ class gpEval:
         # Initialize trainer
         os.chdir(self.output_dir)
 
+        print('Dataset path', self.dataset_path)
+
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
             adata_path=adata_path,
-            # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
-            # -> comment out to reproduce original
             seed=self.seed,
         )
 
@@ -689,8 +658,6 @@ class gpEval:
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
-            # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
-            # -> comment out to reproduce original
             seed=self.seed,
         )
 
@@ -711,7 +678,7 @@ class gpEval:
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
-            data_split_to_pass_to_val_step=split,
+            data_split_to_pass_to_test_step=split,
             seed=self.seed,
         )
 
@@ -729,8 +696,6 @@ def calculate_gp_attribution_scores(
     gpdb_path,
     dataset_path,
     data_split,
-    n_blocks,
-    num_heads,
     gp_latent_size,
     model_checkpoint,
     obs_key,
@@ -745,12 +710,7 @@ def calculate_gp_attribution_scores(
     gene_counts_df=None,
     add_remaining_var=None,
     gp_inputs=None,
-    supervised_labels=None,
     model_type='Base',
-    global_loss='supervised',
-    hvg_path=None,
-    use_flash=False,
-    num_virtual_tokens=0,
     peft_config_path=None,
     geneformer_model=GENEFORMER_MODEL_PATH,
     output_file_name=None,
@@ -791,20 +751,12 @@ def calculate_gp_attribution_scores(
     if gene_counts_df is not None:
         gene_counts_df = pd.read_csv(gene_counts_df)
 
-    if hvg_path is not None:
-        hvg = pd.read_csv(hvg_path)
-        hvg_list = hvg['hvg'].tolist()
-    else:
-        hvg_list = None
-
     txdata = iTxDataModule(
         folder=dataset_path,
         batch_size=1,
         return_tuple=True,
         gp=gp,
         gp_inputs=gp_inputs,
-        add_remaining_var=add_remaining_var,
-        hvg_list=hvg_list,
         gpdb=gpdb,
         do_ensembl_conversion=(gene_format != 'ensembl'),
         filter_key=obs_key,
@@ -827,8 +779,6 @@ def calculate_gp_attribution_scores(
     # Set up model
     # --------------------------
 
-    model = configure_model(locals())
-
     if model_type == 'Base':
         gp_transformer = gpBase.load_from_checkpoint(
             model_checkpoint,
@@ -836,6 +786,12 @@ def calculate_gp_attribution_scores(
         )
     elif model_type == 'Global':
         gp_transformer = gpGlobal.load_from_checkpoint(
+            model_checkpoint,
+            strict=False,
+        )
+
+    elif model_type == 'Prototypes':
+        gp_transformer = gpPrototypes.load_from_checkpoint(
             model_checkpoint,
             strict=False,
         )
@@ -881,14 +837,6 @@ def calculate_gp_attribution_scores(
         gp_of_interest=gp,
     )
 
-    # force reset
-    warnings.warn('Resetting positional encoding')
-    from gplearner.Modules.modules import PositionalEncoding
-
-    imodel.gp_block.pos_embed = PositionalEncoding(
-        d_model=256, dropout=0, max_len=2049  # 2048
-    )
-
     imodel = imodel.to(device)
 
     # --------------------------
@@ -896,7 +844,7 @@ def calculate_gp_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[0].mlp)
+    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[-1].mlp)
 
     attribution_scores = {}
     all_tokens = set()
@@ -995,27 +943,22 @@ def calculate_cell_token_attribution_scores(
     dataset_path,
     emb_dataset_path,
     data_split,
-    n_blocks,
-    num_heads,
     gp_latent_size,
     model_checkpoint,
     obs_key,
     obs_value,
     output_dir,
-    global_loss,
     # for EmbEvaluator
     emb_label,
     task,
+    encode_covariate=True,
     save_plot=False,
     gp_inputs=None,
     use_embedding=False,
     pretrained_emb=None,
-    reconstruction_loss=None,
     supervised_labels=None,
     gene_counts_df=None,
     add_remaining_var=None,
-    gene_format='symbol',
-    num_virtual_tokens=0,
 ):
     # --------------------------
     # Set seed
@@ -1049,6 +992,8 @@ def calculate_cell_token_attribution_scores(
         batch_size=1,
         gp_inputs=gp_inputs,
         meta_labels=obs_key,
+        clf_label=obs_key,
+        encode_covariate=encode_covariate,
         add_remaining_var=add_remaining_var,
     )
 
@@ -1062,20 +1007,22 @@ def calculate_cell_token_attribution_scores(
 
     y_label = obs_key + '_id'
 
-    datax = load_from_disk(dataset_path)
-    cols_to_remove = datax.column_names
-    cols_to_remove.remove(obs_key)
-    cols_to_remove.remove(y_label)
-    datax = datax.remove_columns(cols_to_remove)
-    conversion = datax.to_pandas().drop_duplicates()
+    if encode_covariate:
+        datax = load_from_disk(dataset_path)
+        labels = datax.unique(obs_key)
+        conversion_dict = {k: i for i, k in enumerate(labels)}
 
-    conversion_dict = {k: v for k, v in zip(conversion[obs_key], conversion[y_label])}
+    else:
+        datax = load_from_disk(dataset_path)
+        datax = datax.select_columns([y_label, obs_key])
+        conversion = datax.to_pandas().drop_duplicates()
+        conversion_dict = {
+            k: v for k, v in zip(conversion[obs_key], conversion[y_label])
+        }
 
     # --------------------------
     # Set up model
     # --------------------------
-
-    model = configure_model(locals())
 
     gp_transformer = gpGlobal.load_from_checkpoint(
         model_checkpoint,
@@ -1084,7 +1031,7 @@ def calculate_cell_token_attribution_scores(
 
     # Load classification layer
     # or train if not available
-    if global_loss != 'supervised':
+    if gp_transformer.model.global_loss != 'supervised':
         ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
         clf_ckpt = f'{y_label.replace("_id", "")}_{emb_label}_{task}'
         if os.path.exists(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')):
@@ -1094,7 +1041,7 @@ def calculate_cell_token_attribution_scores(
 
         else:
             gpEval.evaluate_embeddings(
-                y_label=y_label,
+                y_label=obs_key,
                 folder_path=emb_dataset_path,
                 output_dir=output_dir,
                 emb_label=emb_label,
@@ -1103,10 +1050,10 @@ def calculate_cell_token_attribution_scores(
                 lr=1e-3,
                 batch_size=128,
                 num_workers=1,
-                meta_labels=[y_label, y_label.replace('_id', '')],
                 data_type='dataset',
                 n_epochs=3,
                 continuous_cov=[],
+                encode_covariate=encode_covariate,
             )
 
             clf_layer = EmbEvaluator.load_from_checkpoint(
@@ -1140,7 +1087,7 @@ def calculate_cell_token_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[0].mlp)
+    gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[-1].mlp)
 
     attribution_scores = {}
 
@@ -1193,8 +1140,8 @@ def calculate_cell_token_attribution_scores(
             'GP': g,
             'scores': attribution_scores[g],
             'scores_abs': attribution_scores[f'{g}_abs'],
-            'score_std': attribution_scores[f'{g}_std'],
-            'score_abs_std': attribution_scores[f'{g}_abs_std'],
+            # 'score_std': attribution_scores[f'{g}_std'],
+            # 'score_abs_std': attribution_scores[f'{g}_abs_std'],
         }
         rows.append(row)
 
@@ -1207,18 +1154,23 @@ def calculate_cell_token_attribution_scores(
     )
 
     if save_plot:
-        plt.figure()
-        ax = sns.barplot(attribution_df, x='GP', y='scores_abs')
+        # Sorting the DataFrame by 'scores_abs' in descending order
+        attribution_df_sorted_abs = attribution_df.sort_values(
+            by='scores_abs', ascending=False
+        )
 
-        # for i, bar in enumerate(ax.patches):
-        #     x = bar.get_x() + bar.get_width() / 2
-        #     y = bar.get_height()
-        #     error = attribution_df['score_abs_std'].iloc[i]
-        #     plt.errorbar(x, y, yerr=error, fmt='none', capsize=5, color='black')
+        plt.figure()
+        ax = sns.barplot(attribution_df_sorted_abs, x='GP', y='scores_abs')
 
         ax.set_title(obs_value.capitalize().replace('_', ' '))
         ax.set_ylabel('Absolute attribution score')
         ax.set_xlabel('Gene Program')
+
+        # Rotating x-tick labels 90 degrees
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=90)
+
+        plt.tight_layout()
+
         plt.savefig(
             os.path.join(
                 output_dir, f'cell_token_abs_attribution_scores_{obs_value}.pdf'
@@ -1226,19 +1178,21 @@ def calculate_cell_token_attribution_scores(
         )
         plt.close()
 
-        # Mean normalized values
-        plt.figure()
-        ax = sns.barplot(attribution_df, x='GP', y='scores')
+        # Sorting the DataFrame by 'scores' in descending order
+        attribution_df_sorted = attribution_df.sort_values(by='scores', ascending=False)
 
-        # for i, bar in enumerate(ax.patches):
-        #     x = bar.get_x() + bar.get_width() / 2
-        #     y = bar.get_height()
-        #     error = attribution_df['score_std'].iloc[i]
-        #     plt.errorbar(x, y, yerr=error, fmt='none', capsize=5, color='black')
+        plt.figure()
+        ax = sns.barplot(attribution_df_sorted, x='GP', y='scores')
 
         ax.set_title(obs_value.capitalize().replace('_', ' '))
         ax.set_ylabel('Attribution score')
         ax.set_xlabel('Gene Program')
+
+        # Rotating x-tick labels 90 degrees
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=90)
+
+        plt.tight_layout()
+
         plt.savefig(
             os.path.join(output_dir, f'cell_token_attribution_scores_{obs_value}.pdf')
         )
