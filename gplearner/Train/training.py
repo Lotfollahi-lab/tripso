@@ -18,9 +18,9 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
+from ..Models.baselines import gfGlobal
 from ..Models.gp_model import (
     GENEFORMER_MODEL_PATH,
-    gfGlobal,
     gpTransformerBase,
     gpTransformerBaseWithPrompt,
     gpTransformerGlobal,
@@ -81,7 +81,6 @@ def run_training(
     peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
     supervised_rem_var: Optional[str] = None,
-    set_gpfinder_weight_decay: Optional[float] = None,
     num_virtual_tokens: int = 0,
     virtual_tokens_label: Optional[str] = None,
     num_prompt_classes: Optional[int] = 0,

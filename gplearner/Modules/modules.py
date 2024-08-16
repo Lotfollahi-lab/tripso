@@ -337,6 +337,7 @@ class gpTransformerEncoder(nn.Module):
         # if mask = 1, we want to 0 out the token embedding
         # but keep the label for loss calculation
         x = torch.where(mask.unsqueeze(-1), self.mask_emb.expand_as(x), x)
+        # x = x.masked_fill(mask.unsqueeze(-1), 0)
 
         # Add random tokens to the masked positions
         random_tokens = torch.randn(x.shape, device=x.device)

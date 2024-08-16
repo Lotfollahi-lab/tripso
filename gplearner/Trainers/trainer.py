@@ -289,6 +289,8 @@ class gpBase(pl.LightningModule):
             sync_dist=True,
         )
 
+        return loss
+
     def on_train_epoch_end(self):
         # reset step_output
         stage = 'train'
@@ -308,7 +310,7 @@ class gpBase(pl.LightningModule):
         self.log(
             'val/loss',
             loss,
-            on_step=True,
+            on_step=False,
             on_epoch=True,
             prog_bar=True,
             logger=True,
@@ -318,7 +320,7 @@ class gpBase(pl.LightningModule):
         self.log(
             'val/perplexity',
             perp,
-            on_step=True,
+            on_step=False,
             on_epoch=True,
             prog_bar=True,
             logger=True,
@@ -1243,7 +1245,7 @@ class EmbEvaluator(pl.LightningModule):
         self.log(
             'val_loss',
             loss,
-            on_step=True,
+            on_step=False,
             on_epoch=True,
             logger=True,
             prog_bar=True,

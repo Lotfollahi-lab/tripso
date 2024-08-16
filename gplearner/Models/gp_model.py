@@ -3,21 +3,18 @@
 ####################################
 
 import pickle
-import warnings
 from typing import Dict, Optional
 
 # imports
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from peft import PeftConfig, get_peft_model
 from transformers import BertForMaskedLM
 
 from ..Modules.modules import (
     Mlp,
-    PretrainedEmbeddings,
     PromptEncoder,
     gpTransformerEncoder,
     gpTransformerEncoderWithPrompt,
@@ -150,7 +147,6 @@ class gpWrapper(nn.Module):
         gp_inputs,
         database,
         do_ensembl_conversion,
-        gene_counts_df,
         gene_token_path,
         gene_name_path,
         gp_latent_size,
@@ -265,6 +261,7 @@ class gpWrapper(nn.Module):
                 # Encode tokens for MLM
                 tokens_pad_unencoded = tokens_pad
                 tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
+
                 # get token GP representation, logits for gene level prediction,
                 # and gene_labels where masked genes = -100
                 encoder_output = self.encoder[i](
@@ -839,8 +836,9 @@ class gpTransformerBase(nn.Module):
                 peft_config_path=peft_config_path,
             )
 
-        # Optionally: extract Geneformer cell embeddings
-        self.gf_cell_encoder = AverageNonZero()
+        # # Optionally: extract Geneformer cell embeddings
+        # only need if MSE with gf cell embedding
+        # self.gf_cell_encoder = AverageNonZero()
 
         # Set up token sets for each gene program
         if gp_inputs is None:
@@ -852,11 +850,7 @@ class gpTransformerBase(nn.Module):
         gp_inputs = [x.replace('/', '_') for x in gp_inputs]
         database.columns = [x.replace('/', '_') for x in database.columns]
 
-        gp_in_db = gp_inputs.copy()
-        if 'remaining_var' in gp_in_db:
-            gp_in_db.remove('remaining_var')
-
-        self.gpdb = database[gp_in_db]
+        self.gpdb = database[gp_inputs]
         self.gp_inputs = gp_inputs
         self.gp_latent_size = gp_latent_size
         self.mgm_mask_ratio = mgm_mask_ratio
@@ -869,11 +863,9 @@ class gpTransformerBase(nn.Module):
             gp_of_interest = [gp_of_interest]
         self.gp_of_interest = gp_of_interest
 
-        # ADD UNITTEST
         self.multi_gp_encoder = gpWrapper(
             database=self.gpdb,
             do_ensembl_conversion=self.do_ensembl_conversion,
-            gene_counts_df=gene_counts_df,
             gene_token_path=gene_token_path,
             gene_name_path=gene_name_path,
             gp_latent_size=self.gp_latent_size,
@@ -1801,401 +1793,6 @@ class gpTransformerPrototypes(gpTransformerGlobal):
         )
 
         nn.init.xavier_normal_(self.prototypes)
-
-
-####################################
-# For GradCAM
-####################################
-
-
-class iGpWrapper(nn.Module):
-    def __init__(
-        self,
-        gp_transformer,
-        clf_layer,
-        gp_of_interest,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
-    ):
-        super().__init__()
-        # get index of gp of interest
-        self.gp_of_interest = gp_of_interest
-        self.gp_idx = gp_transformer.model.gp_inputs.index(gp_of_interest)
-
-        # select relevant gp block
-        self.gp_block = gp_transformer.model.multi_gp_encoder.encoder[self.gp_idx]
-        self.clf_layer = clf_layer
-
-        # store relevant gp tokens as nn.Embedding
-        gp_tokens = getattr(
-            gp_transformer.model.multi_gp_encoder, f'gp{self.gp_idx}_tokens'
-        )
-
-        # table for converting between different gene labels
-        with open(gene_name_path, 'rb') as f:
-            name_dictionary = pickle.load(f)
-        with open(gene_token_path, 'rb') as f:
-            token_dictionary = pickle.load(f)
-
-        ensembl_to_name = {v: k for k, v in name_dictionary.items()}
-        token_to_gene = {v: k for k, v in token_dictionary.items()}
-
-        gene_conversion = {
-            'token': gp_tokens.cpu().numpy().tolist(),
-            'ensembl': [token_to_gene[t.item()] for t in gp_tokens],
-        }
-
-        gene_conversion['symbol'] = [
-            ensembl_to_name[e] for e in gene_conversion['ensembl']
-        ]
-
-        self.gene_conversion = gene_conversion
-
-    def forward(self, emb, additional_input_dict):
-        output = self.gp_block(
-            emb,
-            attn_mask=additional_input_dict['attn_mask'],
-            gene_labels=additional_input_dict['token_labels'],
-            masking=False,
-            return_attention=False,
-            return_gene_embeddings=False,
-        )
-
-        print('inside wrapper', output)
-
-        logits = self.clf_layer(output['cls'])
-
-        print('logits', logits.shape)
-
-        return logits
-
-
-class iGlobalWrapper(nn.Module):
-    def __init__(
-        self,
-        gp_transformer,
-        clf_layer=None,
-        global_loss='reconstruction',
-        task_index=None,
-        use_embedding=False,
-        pretrained_emb=None,
-        vocab_size=None,
-        embedding_dim=None,
-    ):
-        super().__init__()
-
-        self.global_block = gp_transformer.model.cell_token_learner
-        # set decoder to identiy
-        self.global_block.encoder.decoder = nn.Identity()
-
-        if global_loss != 'supervised':
-            if clf_layer is None:
-                raise ValueError('Please provide a classifier layer')
-            self.clf_layer = clf_layer
-        else:
-            if task_index is None:
-                raise ValueError('Please provide a task index')
-            self.clf_layer = gp_transformer.model.clf_head[task_index]
-
-        self.use_embedding = use_embedding
-        if self.use_embedding:
-            self.gp_embedding = PretrainedEmbeddings(
-                pretrained_emb=pretrained_emb,
-                pretrained_pos_emb=self.global_block.encoder.pos_embed,
-                vocab_size=vocab_size,
-                embedding_dim=embedding_dim,
-            )
-
-            # turn off positional embeddings
-            self.global_block.encoder.pos_embed = nn.Identity()
-
-    def forward(self, emb, additional_input_dict):
-        if self.use_embedding:
-            emb = self.gp_embedding(emb)
-
-        input_dataset = {
-            'z': emb,
-            'num_genes_per_cell_list': additional_input_dict['num_genes_per_cell_list'],
-        }
-
-        # Global cell token learner
-        out = self.global_block(input_dataset, masking=False)
-
-        # Pass through linear layer
-        logits = self.clf_layer(out['cell_token'])
-
-        # return logits.max(1).values
-        return logits
-
-
-####################################
-# Baseline : averaging GP embeddings
-####################################
-
-
-class AverageNonZero(nn.Module):
-    def __init__(self, cls_tag='cls'):
-        super().__init__()
-        self.cls_tag = cls_tag
-        self.num_virtual_tokens = 0
-
-    def forward(self, x, return_gene_embeddings=False, *args, **kwargs):
-        if return_gene_embeddings:
-            output = {
-                'cls': torch.zeros((1, 1)),
-                'gene_embeddings': x,
-                'logits_lm': [],
-                'gene_labels': [],
-            }
-            return output
-
-        # extra argument only for compatibility with gpTransformerEncoder
-        # also for compatability: extract tensor if necessary
-        if isinstance(x, dict):
-            x = x['z']
-
-        # Replace zero values with NaN to facilitate ignoring them during averaging
-        x[x == 0] = float('nan')
-
-        # Calculate the mean along the last dimension (embedding_dim)
-        # Specify 'nanmean' to ignore NaN values during the mean calculation
-        x = torch.nanmean(x, dim=1)
-
-        # Replace NaN values with 0
-        x[torch.isnan(x)] = 0
-
-        if torch.isnan(x).any():
-            print('Found nan in line 1847 of AverageNZ')
-
-        # output
-        output = {self.cls_tag: x, 'logits_lm': [], 'gene_labels': []}
-
-        return output
-
-
-class gpAverager(gpWrapper):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.encoder = nn.ModuleList(
-            [AverageNonZero() for i in range(len(self.gp_inputs))]
-        )
-
-    def get_last_self_attn(self, gf_emb, input_dataset, gp_idx):
-        # Extract embeddings for the gene program of interest
-        emb_pad, tokens_pad, _, attn_mask = build_gp_input_matrix(
-            gf_emb,  # geneformer embeddings
-            input_dataset['input_ids'],
-            getattr(self, f'gp{gp_idx}_tokens'),
-            gp_idx=gp_idx,
-        )
-
-        # Encode tokens
-        tokens_pad = (
-            tokens_pad.cpu()
-            .apply_(
-                lambda x: getattr(self, f'gp{gp_idx}_tokens_encoded')[x]
-                if x in getattr(self, f'gp{gp_idx}_tokens_encoded').keys()
-                else -100
-            )
-            .to(emb_pad.device)
-        )
-
-        # Get cell embedding: average non zero genes
-        o = self.encoder[gp_idx](emb_pad)
-        cell = o['cls']
-        # Reshape to dimensions of gene tensor
-        cell = cell.unsqueeze(1).expand_as(emb_pad)
-
-        # get cosine similarity between gene and cell embedding
-        # for each gene in the GP
-        cosim = F.cosine_similarity(emb_pad, cell, dim=-1)
-
-        # set to 0 for padding tokens
-        cosim[tokens_pad == -100] = 0
-
-        # For the padding tokens, attention will be 0
-        # so we can randomly reassign gene tokens to help with ranking
-        all_gp_tokens = set(getattr(self, f'gp{gp_idx}_tokens_encoded').values())
-
-        holder = []
-
-        for i in range(tokens_pad.shape[0]):
-            # because we've not done any masking,
-            # all the -100 tokens will be at the end
-            x = tokens_pad[i, :]
-            labeled_genes_idx = x != -100
-
-            values_to_fill_in = all_gp_tokens - set(
-                x[labeled_genes_idx].cpu().numpy().tolist()
-            )
-            new_labels = torch.tensor(list(values_to_fill_in)).to(x.device)
-
-            new_padded = torch.concat([x[labeled_genes_idx], new_labels], dim=0)
-            # bring back cls to first position
-            new_padded = torch.cat([new_padded[-1].unsqueeze(0), new_padded[:-1]])
-
-            holder.append(new_padded)
-
-        tokens_pad = torch.stack(holder).long().to(cosim.device)
-
-        # Reorder attention matrix so genes are in the same order in each cell
-        # Create an index tensor to sort tokens_pad
-        _, indices = torch.sort(tokens_pad, dim=1)
-
-        # Apply sorting to the corresponding rows in x
-        cosim = torch.gather(cosim, 1, indices)
-        tokens_pad = torch.gather(tokens_pad, 1, indices)
-
-        output = {
-            'attn': cosim.detach().cpu().numpy(),
-        }
-
-        return output
-
-
-class gfBaseline(gpTransformerBase):
-    def __init__(
-        self,
-        gene_counts_df,
-        num_heads,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-
-        self.multi_gp_encoder = gpAverager(
-            database=self.gpdb,
-            do_ensembl_conversion=self.do_ensembl_conversion,
-            gene_counts_df=gene_counts_df,
-            gp_latent_size=self.gp_latent_size,
-            n_blocks=self.n_blocks,
-            num_heads=num_heads,
-            mgm_mask_ratio=self.mgm_mask_ratio,
-            gene_token_path=gene_token_path,
-            gene_name_path=gene_name_path,
-            gp_inputs=self.gp_inputs,
-            use_flash=False,
-            model_type='Mean',
-            learn_new_gp=False,
-            # MAY NEED TO UPDATE THIS
-            num_virtual_tokens=0,
-            virtual_tokens_label=None,
-            num_prompt_classes=0,
-            mean_emb_dict=None,
-            use_pos_emb=False,
-        )
-
-    def get_last_self_attn(self, input_dataset, gp):
-        warnings.warn(
-            'Using model type : Mean'
-            'Attention matrices are not available for this model type.'
-            'Instead, we return the cosine similarity between GP embeddings'
-            'and the mean GP embedding for that GP.'
-            'but note that this is not a true attention matrix.'
-        )
-        gp_idx = self.gp_inputs.index(gp)
-        # input is tokenized dataset
-        emb_out = self.gf_wrapper(input_dataset)
-
-        # Extract attention matrix for our GP of interest
-        output = self.multi_gp_encoder.get_last_self_attn(
-            emb_out, input_dataset, gp_idx=gp_idx
-        )
-
-        return output
-
-
-class gfGlobal(gpTransformerGlobal):
-    def __init__(
-        self,
-        gene_counts_df,
-        num_heads,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-
-        self.multi_gp_encoder = gpAverager(
-            database=self.gpdb,
-            do_ensembl_conversion=self.do_ensembl_conversion,
-            gene_counts_df=gene_counts_df,
-            gp_latent_size=self.gp_latent_size,
-            n_blocks=self.n_blocks,
-            num_heads=num_heads,
-            mgm_mask_ratio=self.mgm_mask_ratio,
-            gene_token_path=gene_token_path,
-            gene_name_path=gene_name_path,
-            gp_inputs=self.gp_inputs,
-            use_flash=False,
-            model_type='Mean',
-            learn_new_gp=False,
-            # MAY NEED TO UPDATE THIS
-            num_virtual_tokens=0,
-            virtual_tokens_label=None,
-            num_prompt_classes=0,
-            mean_emb_dict=None,
-            use_pos_emb=False,
-        )
-
-        self.cell_token_learner = AverageNonZero(cls_tag='cell_token')
-
-    def get_cell_token_attention(self, input_dataset):
-        warnings.warn(
-            'Using model type : Mean'
-            'Attention matrices are not available for this model type.'
-            'Instead, we return the cosine similarity between GP embeddings'
-            'and the mean GP embedding for that GP.'
-            'but note that this is not a true attention matrix.'
-        )
-
-        output = super().forward(input_dataset, return_gp_cls=True)
-
-        # get cosine similarity between cell and GP embedding
-        # for each gene in the GP
-        cosim = F.cosine_similarity(output['gp_cls'], output['cell_token'], dim=-1)
-
-        # set to 0 for padding tokens
-        cosim[output['gp_labels'] == -100] = 0
-
-        # For the padding tokens, attention will be 0
-        all_gp = set([i for i in range(len(self.gp_inputs))])
-
-        holder = []
-
-        gp_labels = output['gp_labels']
-
-        for i in range(gp_labels.shape[0]):
-            # because GP are ranked by number of genes per cell
-            # all the -100 tokens will be at the end
-            x = gp_labels[i, :]
-            labeled_gp_idx = x != -100
-
-            values_to_fill_in = all_gp - set(x[labeled_gp_idx].cpu().numpy().tolist())
-            new_labels = torch.tensor(list(values_to_fill_in)).to(x.device)
-
-            new_padded = torch.concat([x[labeled_gp_idx], new_labels], dim=0)
-            # bring back cls to first position
-            new_padded = torch.cat([new_padded[-1].unsqueeze(0), new_padded[:-1]])
-
-            holder.append(new_padded)
-
-        gp_labels = torch.stack(holder).long().to(gp_labels.device)
-
-        # Reorder attention matrix so GP are in the same order in each cell
-        # Create an index tensor to sort tokens_pad
-        _, indices = torch.sort(gp_labels, dim=1)
-
-        # Apply sorting to the corresponding rows in x
-        cosim = torch.gather(cosim, 1, indices)
-        gp_labels = torch.gather(gp_labels, 1, indices)
-
-        output = {
-            'attn': cosim.detach().cpu().numpy(),
-        }
-
-        return output
 
 
 ####################################

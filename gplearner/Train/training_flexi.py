@@ -15,9 +15,9 @@ from pytorch_lightning.callbacks import TQDMProgressBar
 from pytorch_lightning.utilities import rank_zero_only
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
+from ..Models.baselines import gfGlobal
 from ..Models.gp_model import (
     GENEFORMER_MODEL_PATH,
-    gfGlobal,
     gpTransformerBase,
     gpTransformerBaseWithPrompt,
     gpTransformerGlobal,

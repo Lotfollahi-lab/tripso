@@ -25,13 +25,9 @@ from ..Datamodules.datamodule import (
     iTxDataModule,
     txDataModule,
 )
-from ..Models.gp_model import (
-    GENE_NAME_FILE,
-    GENEFORMER_MODEL_PATH,
-    gfGlobal,
-    iGlobalWrapper,
-    iGpWrapper,
-)
+from ..Models.baselines import gfGlobal
+from ..Models.gp_model import GENE_NAME_FILE, GENEFORMER_MODEL_PATH
+from ..Models.interpretability import iGlobalWrapper, iGpWrapper
 from ..Trainers.trainer import (
     EmbEvaluator,
     gpBase,
@@ -701,14 +697,13 @@ def calculate_gp_attribution_scores(
     obs_key,
     obs_value,
     output_dir,
-    gp=None,
+    gp,
     total_n_cells=None,
     task='classification',
     gpdb_ref_path=None,
     gene_format='symbol',
     emb_dataset_path=None,
     gene_counts_df=None,
-    add_remaining_var=None,
     gp_inputs=None,
     model_type='Base',
     peft_config_path=None,
@@ -718,9 +713,6 @@ def calculate_gp_attribution_scores(
     '''
     Calculate attribution scores for each gene program
     '''
-
-    if add_remaining_var is None and gp is None:
-        raise ValueError('Please provide a gene program to evaluate')
 
     # --------------------------
     # Set seed

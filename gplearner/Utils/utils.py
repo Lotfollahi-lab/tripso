@@ -495,6 +495,27 @@ ensembl_to_name = {v: k for k, v in name_dictionary.items()}
 token_to_gene = {v: k for k, v in token_dictionary.items()}
 
 
+def convert_gene_names_to_tokens(genes, do_ensembl_conversion=True, gp_name=None):
+    # Convert gene names to Ensembl IDs
+    if do_ensembl_conversion:
+        ensembl_ids = [name_dictionary.get(gene_name, 'Unknown') for gene_name in genes]
+    else:
+        ensembl_ids = genes
+
+    # Convert ensembl IDs to tokens:
+    gp_tokens = [
+        token_dictionary.get(gene_name, 'Unknown') for gene_name in ensembl_ids
+    ]
+
+    # Unknown values later cause issues for indexing -> remove
+    if 'Unknown' in gp_tokens:
+        print(f"In {gp_name}, dropped {gp_tokens.count('Unknown')} unknown genes")
+        while 'Unknown' in gp_tokens:
+            gp_tokens.remove('Unknown')
+
+    return gp_tokens
+
+
 def get_gp_tokens(
     gp_genes,
     do_ensembl_conversion,
@@ -520,12 +541,6 @@ def get_gp_tokens(
         Label for the GP of interest (only used for printing)
 
     """
-    with open(gene_token_path, 'rb') as f:
-        token_dictionary = pickle.load(f)
-
-    # load gene name to ensembl dict
-    with open(gene_name_path, 'rb') as f:
-        name_dictionary = pickle.load(f)
 
     # Remove missing values (NaN) from the column
     if isinstance(gp_genes, pd.Series):
@@ -533,22 +548,7 @@ def get_gp_tokens(
     else:
         genes = gp_genes
 
-    # Convert gene names to Ensembl IDs
-    if do_ensembl_conversion:
-        ensembl_ids = [name_dictionary.get(gene_name, 'Unknown') for gene_name in genes]
-    else:
-        ensembl_ids = genes
-
-    # Convert ensembl IDs to tokens:
-    gp_tokens = [
-        token_dictionary.get(gene_name, 'Unknown') for gene_name in ensembl_ids
-    ]
-
-    # Unknown values later cause issues for indexing -> remove
-    if 'Unknown' in gp_tokens:
-        print(f"In {gp_name}, dropped {gp_tokens.count('Unknown')} unknown genes")
-        while 'Unknown' in gp_tokens:
-            gp_tokens.remove('Unknown')
+    gp_tokens = convert_gene_names_to_tokens(genes, do_ensembl_conversion, gp_name)
 
     # Remove rare genes
     # rare_genes = []
