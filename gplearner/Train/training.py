@@ -681,7 +681,7 @@ def load_from_ckpt(mode, pl_model, args):
 
     elif mode == 'resume_training':
         latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-        pl_model = pl_model.load_from_checkpoint(latest_ckpt)
+        pl_model = pl_model.load_from_checkpoint(latest_ckpt, map_location='cpu')
 
         return pl_model
 
