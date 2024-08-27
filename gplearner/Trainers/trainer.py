@@ -799,11 +799,15 @@ class gpGlobal(gpBase):
         stage = 'val'
 
         if self.global_loss == 'supervised':
+            acc_holder = []
+
             for t in self.model.supervised_tasks:
                 # compute accuracy
                 clf_pred = torch.cat(getattr(self, 'val_clf_pred')[t])
                 clf_true = torch.cat(getattr(self, 'val_clf_true')[t])
                 acc = torch.sum(clf_pred == clf_true).float() / clf_true.shape[0]
+
+                acc_holder.append(acc)
 
                 self.log(
                     f'val/{t}_accuracy',
@@ -817,6 +821,17 @@ class gpGlobal(gpBase):
                 # empty lists
                 getattr(self, 'val_clf_pred')[t] = []
                 getattr(self, 'val_clf_true')[t] = []
+
+            # Log accuracy across tasks for early stopping
+            mean_acc = torch.mean(torch.tensor(acc_holder))
+            self.log(
+                'val/accuracy',
+                mean_acc,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
 
         if self.global_loss == 'reconstruction':
             # return Pearson correlation coefficient

@@ -606,7 +606,6 @@ def configure_lightning_module(model, gp_similarity, args):
         'output_dir': args['output_dir'],
         'lambda_gp_similarity': args['lambda_gp_similarity'],
         'weight_decay': args['weight_decay'],
-        'set_gpfinder_weight_decay': args['set_gpfinder_weight_decay'],
         'optimizer': DeepSpeedCPUAdam
         if args['strategy'].startswith('deepspeed')
         else torch.optim.AdamW,

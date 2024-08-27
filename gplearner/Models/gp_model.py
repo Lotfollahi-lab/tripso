@@ -839,6 +839,8 @@ class gpTransformerBase(nn.Module):
         # # Optionally: extract Geneformer cell embeddings
         # only need if MSE with gf cell embedding
         # self.gf_cell_encoder = AverageNonZero()
+        # for backwards compatibility
+        self.gf_cell_encoder = nn.Identity()
 
         # Set up token sets for each gene program
         if gp_inputs is None:

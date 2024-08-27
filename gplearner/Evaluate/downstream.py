@@ -188,17 +188,17 @@ class gpEval:
     ):
         if self.model_type == 'Base':
             gp_transformer = gpBase.load_from_checkpoint(
-                self.checkpoint_path, hparam_save=hparam_save
+                self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
             )
 
         elif self.model_type == 'Global':
             gp_transformer = gpGlobal.load_from_checkpoint(
-                self.checkpoint_path, hparam_save=hparam_save
+                self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
             )
 
         elif self.model_type == 'Prototypes':
             gp_transformer = gpPrototypes.load_from_checkpoint(
-                self.checkpoint_path, hparam_save=hparam_save
+                self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
             )
 
         elif self.model_type == 'Mean':
@@ -775,17 +775,16 @@ def calculate_gp_attribution_scores(
         gp_transformer = gpBase.load_from_checkpoint(
             model_checkpoint,
             strict=False,
+            map_location='cpu',
         )
     elif model_type == 'Global':
         gp_transformer = gpGlobal.load_from_checkpoint(
-            model_checkpoint,
-            strict=False,
+            model_checkpoint, strict=False, map_location='cpu'
         )
 
     elif model_type == 'Prototypes':
         gp_transformer = gpPrototypes.load_from_checkpoint(
-            model_checkpoint,
-            strict=False,
+            model_checkpoint, strict=False, map_location='cpu'
         )
 
     # Load classification layer
@@ -1019,6 +1018,7 @@ def calculate_cell_token_attribution_scores(
     gp_transformer = gpGlobal.load_from_checkpoint(
         model_checkpoint,
         strict=False,
+        map_location='cpu',
     )
 
     # Load classification layer
