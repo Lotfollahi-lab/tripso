@@ -18,12 +18,20 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
+from ..Models.baselines import gfGlobal
 from ..Models.gp_model import (
     GENEFORMER_MODEL_PATH,
     gpTransformerBase,
+    gpTransformerBaseWithPrompt,
     gpTransformerGlobal,
+    gpTransformerGlobalWithPrompt,
+    gpTransformerPrototypes,
 )
-from ..Trainers.trainer import scGPL
+from ..Trainers.trainer import (
+    gpBase,
+    gpGlobal,
+    gpPrototypes,
+)
 from ..Utils.utils import find_latest_file
 
 
@@ -51,7 +59,6 @@ def run_training(
     resume_training: Optional[bool] = False,
     gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
-    add_remaining_var: Optional[str] = None,
     frac_for_training: Optional[float] = 1.0,
     lambda_gp_similarity: Optional[float] = 1e-2,
     global_loss: str = 'supervised',
@@ -60,21 +67,38 @@ def run_training(
     supervised_labels: Optional[dict] = None,
     global_masking_rate: Optional[float] = 0.15,
     global_training: str = 'simultaneous',
-    path_to_base_model: str = 'path/to/pretrained/model',
+    path_to_base_model: Optional[str] = None,  # 'path/to/pretrained/model',
     learn_new_gp: Optional[bool] = False,
     gp_to_learn: list = ['novel_gp'],
     global_n_blocks: int = 1,
-    reconstruction_loss: Optional[str] = 'mse',
+    reconstruction_loss: Optional[str] = 'nb',
     adata_path: Optional[str] = None,
     use_flash: Optional[bool] = False,
     weight_decay: float = 0.0,
     use_weighted_sampler: Optional[bool] = False,
-    sample_by: Optional[str] = 'cell_type',
+    sample_by: Optional[str] = None,
     geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
+    peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
     supervised_rem_var: Optional[str] = None,
-    set_gpfinder_weight_decay: Optional[float] = None,
-    hvg_df: Optional[str] = None,
+    num_virtual_tokens: int = 0,
+    virtual_tokens_label: Optional[str] = None,
+    num_prompt_classes: Optional[int] = 0,
+    num_nodes: int = 1,
+    num_prototypes: int = 0,
+    prototype_labels_key: Optional[str] = None,
+    lambda_prototype_loss: float = 1e-2,
+    prbm_path: Optional[str] = None,
+    use_baseline_tk: Optional[bool] = False,
+    tk_vocab_size: Optional[int] = 0,
+    # for large scale pretraining:
+    limit_val_batches: Optional[float] = 1.0,
+    val_check_interval: Optional[float] = 1.0,
+    mean_emb_dict: Optional[str] = None,
+    gene2vec: Optional[str] = None,
+    use_pos_emb: Optional[bool] = True,
+    use_onehot_wrapper: Optional[bool] = False,
+    vocab_gene_names: Optional[list] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -131,8 +155,6 @@ def run_training(
         Dataframe with the counts of each gene in the dataset
     gp_inputs : list
         Which GP from GPDB to include in model if None, defaults to all GP
-    add_remaining_var : bool
-        whether to intialize a new transformer block covering non GP genes
     frac_for_training : float
         fraction of the dataset to use for training - default is 1.0
         (development only)
@@ -165,12 +187,25 @@ def run_training(
     use_flash:
         whether to use flash attention in transformer block
 
+    limit_val_batches : float
+        (Union[int, float, None]) How often to check the validation set.
+        Pass a float in the range [0.0, 1.0] to check after a fraction of
+        the training epoch. Pass an int to check after a fixed number of
+        training batches. An int value can only be higher than the number
+        of training batches when check_val_every_n_epoch=None, which
+        validates after every N training batches across epochs or during
+        iteration-based training. Default: 1.0.
+    val_check_interval : float
+        (Optional[int]) Perform a validation loop every after every N
+        training epochs. If None, validation will be done solely based
+        on the number of training batches, requiring val_check_interval
+        to be an integer value. Default: 1.
+        from https://github.com/EveryVoiceTTS/EveryVoice/issues/204
+
     """
     ##########################################
     # Setup
     ##########################################
-
-    # torch.set_float32_matmul_precision('medium')
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -183,12 +218,159 @@ def run_training(
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # wandb.login()
+    # torch.set_float32_matmul_precision('medium')
+
+    args = locals()
+
+    save_id = configure_wandb(args)
+
+    early_stopping_callback, checkpoint_callback, lr_monitor = configure_callbacks(
+        save_id, args
+    )
+
+    wandb_logger = configure_logger(args)
+
+    ############################################################################
+    # Dataset Preparation
+    ############################################################################
+
+    # Instantiate datamodule
+
+    txdata = txDataModule(
+        folder=dataset_path,
+        batch_size=batch_size,
+        frac_for_training=frac_for_training,
+        adata_path=adata_path,
+        use_weighted_sampler=use_weighted_sampler,
+        label_key=sample_by,
+        seed=seed,
+        load_exp=use_onehot_wrapper is True,
+    )
+
+    # Load gpdb
+    gpdb = pd.read_csv(gpdb_path)
+    args['gpdb'] = gpdb
+
+    # --------------------------------------------------
+    # Other arguments for set up
+    # --------------------------------------------------
+
+    if (model_type == 'Global') & (global_loss == 'reconstruction'):
+        if adata_path is None:
+            raise ValueError('Please provide path to anndata object')
+        else:
+            anndata_dataset = AnnDataset(adata_path)
+            total_n_genes = anndata_dataset.get_n_genes()
+            n_condition_combined = anndata_dataset.n_condition_combined
+
+    else:
+        total_n_genes = 0
+        n_condition_combined = 1
+
+    args['total_n_genes'] = total_n_genes
+    args['n_condition_combined'] = n_condition_combined
+
+    if (reconstruction_loss == 'mse') & (model_type == 'Global'):
+        warnings.warn(
+            'Using MSE loss for reconstruction'
+            '\nMake sure you pass anndata object with log normalized counts'
+        )
+
+    # and similarity file
+    if gp_similarity_file is not None:
+        gp_similarity = np.load(gp_similarity_file, allow_pickle=True)
+        gp_similarity = gp_similarity.astype('float32')
+
+        # filter to match gp_inputs
+        if gp_inputs is not None:
+            # get indices for gp_inputs
+            gp_idx = [gpdb.columns.get_loc(gp) for gp in gp_inputs]
+            gp_similarity = gp_similarity[gp_idx, :][:, gp_idx]
+
+    else:
+        gp_similarity = None
+
+    ############################################################################
+    # Train model
+    ############################################################################
+
+    model = configure_model(args)
+
+    pl_model = configure_lightning_module(model, gp_similarity, args)
+
+    # Optionally load pretrained model
+    if num_virtual_tokens > 0:
+        pl_model = load_from_ckpt('virtual_tokens', pl_model, args)
+    elif resume_training:
+        pl_model = load_from_ckpt('resume_training', pl_model, args)
+    elif global_training == 'sequential':
+        pl_model = load_from_ckpt('sequential', pl_model, args)
+    elif (global_training == 'finetune') | (global_training == 'finetune_global'):
+        pl_model = load_from_ckpt('finetune', pl_model, args)
+
+    if learn_new_gp:
+        pl_model = load_from_ckpt('learn_new_gp', pl_model, args)
+
+    # Optionally reset any trainer parameters
+    pl_model.prototype_labels_key = prototype_labels_key
+    pl_model.num_prototypes = num_prototypes
+    pl_model.lambda_prototype_loss = lambda_prototype_loss
+
+    # Lightning trainer
+    trainer = pl.Trainer(
+        max_epochs=n_epochs,
+        callbacks=[
+            TQDMProgressBar(refresh_rate=10),
+            early_stopping_callback,
+            checkpoint_callback,
+            lr_monitor,
+        ],
+        logger=wandb_logger,
+        devices=-1,
+        accelerator='auto',
+        precision='bf16-mixed' if strategy == 'ddp_find_unused_parameters_true' else 16,
+        # profiler='advanced',
+        num_nodes=num_nodes,
+        strategy=strategy,
+        limit_val_batches=limit_val_batches,
+        val_check_interval=val_check_interval,
+    )
+
+    # Train the model
+    trainer.fit(pl_model, txdata)
+
+    # save logs to csv for custom plotting
+    # Fetch logged data from wandb
+    api = wandb.Api()
+
+    if torch.cuda.device_count() > 1:
+        run = api.run(f'scGPL/{save_id}_gpu_{str(rank_zero_only.rank)}')
+    else:
+        run = api.run(f'scGPL/{save_id}')
+
+    # Get logged data as dataframe
+    df = run.history()
+    df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
+
+    wandb.finish()
+
+
+# --------------------------------------------------
+# Helper functions
+# --------------------------------------------------
+
+
+def configure_wandb(args):
+    # Get function specific arguments
+    output_dir = args['output_dir']
+    tissue = args['tissue']
+
+    wandb.login()
 
     # get date for today in YYYY-MM-DD format
     today = datetime.datetime.today().strftime('%Y-%m-%d')
 
-    supervised_tag = model_type
+    supervised_tag = args['model_type']
 
     # create unique id for wandb run with 3 random characters
     unique_id = str(uuid.uuid4())[:3]
@@ -214,6 +396,14 @@ def run_training(
     else:
         wandb.init(project='scGPL', id=save_id, dir=wandb_dir)
 
+    return save_id
+
+
+def configure_callbacks(save_id, args):
+    model_type = args['model_type']
+    global_loss = args['global_loss']
+    output_dir = args['output_dir']
+
     if model_type == 'Global':
         if global_loss == 'supervised':
             early_stopping_callback = EarlyStopping(
@@ -229,8 +419,8 @@ def run_training(
             )
     elif model_type == 'Base':
         early_stopping_callback = EarlyStopping(
-            monitor='train/loss_epoch',
-            patience=5,
+            monitor='train/loss_step',
+            patience=50,
             mode='min',
         )
 
@@ -242,277 +432,243 @@ def run_training(
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         # monitor='val/loss',
-        monitor='train/loss_epoch',
+        monitor='train/loss_step',
         dirpath=checkpoint_dir,
         filename=save_id,
-        save_top_k=1,
+        save_top_k=1,  # figure out how to get best checkpoint
         mode='min',
+        save_last=True,
+        # save every n steps --> issue if dataset has < n steps
+        every_n_train_steps=100,
     )
 
     lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='step')
 
+    return early_stopping_callback, checkpoint_callback, lr_monitor
+
+
+def configure_logger(args):
     # create a logger to log training progress
     wandb_logger = WandbLogger(log_model=True)
 
     if rank_zero_only.rank == 0:
         wandb_logger.experiment.config.update(
             {
-                'dataset': dataset_path.split('/')[-3],
-                'supervise': model_type,
+                'dataset': args['dataset_path'].split('/')[-3],
+                'supervise': args['model_type'],
                 'architecture': 'gp_transformer',
-                'epochs': n_epochs,
-                'mgm': mgm,
-                'n_heads': n_heads,
-                'n_blocks': n_blocks,
-                'lr_scheduler': lr_scheduler,
-                'batch_size': batch_size,
-                'strategy': strategy,
-                'gp_latent_size': gp_latent_size,
-                'attn_dropout': attn_dropout,
+                'epochs': args['n_epochs'],
+                'mgm': args['mgm'],
+                'n_heads': args['n_heads'],
+                'n_blocks': args['n_blocks'],
+                'lr_scheduler': args['lr_scheduler'],
+                'batch_size': args['batch_size'],
+                'strategy': args['strategy'],
+                'gp_latent_size': args['gp_latent_size'],
+                'attn_dropout': args['attn_dropout'],
                 'transformer_block': 'preLN',
-                'learning_rate': lr,
-                'frac_for_training': frac_for_training,
-                'use_gp_similarity_loss': gp_similarity_file is not None,
-                'lambda_gp_similarity': lambda_gp_similarity,
-                'use_flash': use_flash,
-                'weight_decay': weight_decay,
+                'learning_rate': args['lr'],
+                'frac_for_training': args['frac_for_training'],
+                'use_gp_similarity_loss': args['gp_similarity_file'] is not None,
+                'lambda_gp_similarity': args['lambda_gp_similarity'],
+                'use_flash': args['use_flash'],
+                'weight_decay': args['weight_decay'],
+                'num_virtual_tokens': args['num_virtual_tokens'],
+                'condition_on_z_mean': args['mean_emb_dict'] is not None,
+                'use_baseline_tk': args['use_baseline_tk'],
+                'use_onehot_wrapper': args['use_onehot_wrapper'],
+                'use_pos_emb': args['use_pos_emb'],
             }
         )
 
-        if model_type == 'Global':
+        if args['model_type'] == 'Global':
             wandb_logger.experiment.config.update(
                 {
-                    'global_attn_heads': global_attn_heads,
-                    'global_loss': global_loss,
-                    'global_training': global_training,
-                    'global_n_blocks': global_n_blocks,
+                    'global_attn_heads': args['global_attn_heads'],
+                    'global_loss': args['global_loss'],
+                    'global_training': args['global_training'],
+                    'global_n_blocks': args['global_n_blocks'],
                 }
             )
 
-            if global_loss == 'supervised':
+            if args['global_loss'] == 'supervised':
                 wandb_logger.experiment.config.update(
                     {
-                        'classification_labels': classification_labels,
+                        'classification_labels': args['classification_labels'],
                     }
                 )
 
-            if global_loss == 'masking':
+            if args['global_loss'] == 'masking':
                 wandb_logger.experiment.config.update(
                     {
-                        'global_masking_rate': global_masking_rate,
+                        'global_masking_rate': args['global_masking_rate'],
                     }
                 )
 
-            if global_loss == 'reconstruction':
+            if args['global_loss'] == 'reconstruction':
                 wandb_logger.experiment.config.update(
                     {
-                        'reconstruction_loss': reconstruction_loss,
+                        'reconstruction_loss': args['reconstruction_loss'],
                     }
                 )
 
-            if 'finetune' in global_training:
+            if 'finetune' in args['global_training']:
                 wandb_logger.experiment.config.update(
                     {
-                        'finetune_lr': finetune_lr,
+                        'finetune_lr': args['finetune_lr'],
                     }
                 )
 
-    ############################################################################
-    # Dataset Preparation
-    ############################################################################
-
-    # Optionally load anndata object
-    if (model_type == 'Global') & (global_loss == 'reconstruction'):
-        if adata_path is None:
-            raise ValueError('Please provide path to anndata object')
-        else:
-            anndata_dataset = AnnDataset(adata_path)
-            total_n_genes = anndata_dataset.get_n_genes()
-            n_condition_combined = anndata_dataset.n_condition_combined
-
-    else:
-        total_n_genes = 0
-        n_condition_combined = 1
-
-    # Instantiate dataset
-    # (tokenized dataset should be created already)
-    if (reconstruction_loss == 'mse') & (model_type == 'Global'):
-        warnings.warn(
-            'Using MSE loss for reconstruction'
-            '\nMake sure you pass anndata object with normalized counts'
-        )
-
-    txdata = txDataModule(
-        folder=dataset_path,
-        batch_size=batch_size,
-        frac_for_training=frac_for_training,
-        adata_path=adata_path,
-        use_weighted_sampler=use_weighted_sampler,
-        label_key=sample_by,
-        seed=seed,
-    )
-
-    # Load gpdb
-    gpdb = pd.read_csv(gpdb_path)
-
-    if gene_format == 'symbol':
-        do_ensembl_conversion = True
-    elif gene_format == 'ensembl':
-        do_ensembl_conversion = False
-
-    # and similarity file
-    if gp_similarity_file is not None:
-        gp_similarity = np.load(gp_similarity_file, allow_pickle=True)
-        gp_similarity = gp_similarity.astype('float32')
-
-        # filter to match gp_inputs
-        if gp_inputs is not None:
-            # get indices for gp_inputs
-            gp_idx = [gpdb.columns.get_loc(gp) for gp in gp_inputs]
-            gp_similarity = gp_similarity[gp_idx, :][:, gp_idx]
-
-    else:
-        gp_similarity = None
-
-    if gene_counts_df is not None:
-        gene_counts_df = pd.read_csv(gene_counts_df)
-
-    if hvg_df is not None:
-        hvg_input = pd.read_csv(hvg_df)
-        hvg_list = hvg_input['hvg'].tolist()
-    else:
-        hvg_list = None
-
-    ############################################################################
-    # Train model
-    ############################################################################
-
-    if model_type == 'Base':
-        model = gpTransformerBase(
-            gene_counts_df=gene_counts_df,
-            database=gpdb,
-            do_ensembl_conversion=do_ensembl_conversion,
-            n_blocks=n_blocks,
-            mgm_mask_ratio=mgm,
-            num_heads=n_heads,
-            gp_latent_size=gp_latent_size,
-            attn_dropout=attn_dropout,
-            gp_inputs=gp_inputs,
-            add_remaining_var=add_remaining_var,
-            use_flash=use_flash,
-            learn_new_gp=learn_new_gp,
-            geneformer_model=geneformer_model_path,
-            hvg_list=hvg_list,
-        )
-
-    elif model_type == 'Global':
-        # very slow --> provide dictionary as input
-        # if global_loss == 'supervised':
-        #     # set up dictionary with number of classes for supervised labels
-        #     supervised_labels = txdata.count_unique_classes(classification_labels)
-
-        model = gpTransformerGlobal(
-            gene_counts_df=gene_counts_df,
-            database=gpdb,
-            do_ensembl_conversion=do_ensembl_conversion,
-            n_blocks=n_blocks,
-            mgm_mask_ratio=mgm,
-            num_heads=n_heads,
-            gp_latent_size=gp_latent_size,
-            attn_dropout=attn_dropout,
-            gp_inputs=gp_inputs,
-            add_remaining_var=add_remaining_var,
-            supervised_labels=supervised_labels,
-            global_attn_heads=global_attn_heads,
-            global_loss=global_loss,
-            global_masking_rate=global_masking_rate,
-            global_n_blocks=global_n_blocks,
-            reconstruction_loss=reconstruction_loss,
-            total_n_genes=total_n_genes,
-            use_flash=use_flash,
-            geneformer_model=geneformer_model_path,
-            hvg_list=hvg_list,
-        )
-
-    else:
-        raise ValueError('Model type must be Base or Global')
-
-    use_gp_similarity_loss = gp_similarity_file is not None
-
-    # Set up gpTransformer main module
-    if strategy.startswith('deepspeed'):
-        # use deepspeed optimizer if using deepspeed strategy
-        gp_transformer = scGPL(
-            model,
-            model_type,
-            global_loss=global_loss,
-            total_epochs=n_epochs,
-            lr=lr,
-            finetune_lr=finetune_lr,
-            use_finetune_lr='finetune' in global_training,
-            lr_scheduler=lr_scheduler,
-            optimizer=DeepSpeedCPUAdam,  # FusedAdam
-            use_gp_similarity_loss=use_gp_similarity_loss,
-            gp_similarity=gp_similarity,
-            output_dir=output_dir,
-            lambda_gp_similarity=lambda_gp_similarity,
-            n_condition_combined=n_condition_combined,
-            total_n_genes=total_n_genes,
-            weight_decay=weight_decay,
-            set_gpfinder_weight_decay=set_gpfinder_weight_decay,
-        )
-    else:
-        # otherwise defaults to pytorch AdamW
-        gp_transformer = scGPL(
-            model,
-            model_type,
-            global_loss=global_loss,
-            lr=lr,
-            finetune_lr=finetune_lr,
-            use_finetune_lr='finetune' in global_training,
-            total_epochs=n_epochs,
-            lr_scheduler=lr_scheduler,
-            use_gp_similarity_loss=use_gp_similarity_loss,
-            gp_similarity=gp_similarity,
-            output_dir=output_dir,
-            lambda_gp_similarity=lambda_gp_similarity,
-            n_condition_combined=n_condition_combined,
-            total_n_genes=total_n_genes,
-            weight_decay=weight_decay,
-            set_gpfinder_weight_decay=set_gpfinder_weight_decay,
-        )
-
-    # For continuing training from checkpoint
-    if resume_training:
-        latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-        checkpoint_path = os.path.join(output_dir, latest_ckpt)
-        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-        gp_transformer.load_state_dict(checkpoint['state_dict'])
-        n_epochs = checkpoint['epoch'] + n_epochs
-
-    else:
-        # For training global model after base model
-        if global_training == 'sequential':
-            if path_to_base_model is None:
-                raise ValueError(
-                    'Please provide path to pre-trained'
-                    'gpTransformer Base model for sequential training'
+            if args['num_prototypes'] > 0:
+                wandb_logger.experiment.config.update(
+                    {
+                        'num_prototypes': args['num_prototypes'],
+                        'prototype_labels_key': args['prototype_labels_key'],
+                        'lambda_prototype_loss': args['lambda_prototype_loss'],
+                    }
                 )
-            # look for Base model to load
-            # if not found, this will raise an error
-            latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+
+    return wandb_logger
+
+
+def configure_model(args):
+    common_params = {
+        'gene_counts_df': args['gene_counts_df'],
+        'database': args['gpdb'],
+        'n_blocks': args['n_blocks'],
+        'mgm_mask_ratio': args['mgm'],
+        'num_heads': args['n_heads'],
+        'gp_latent_size': args['gp_latent_size'],
+        'attn_dropout': args['attn_dropout'],
+        'gp_inputs': args['gp_inputs'],
+        'use_flash': args['use_flash'],
+        'learn_new_gp': args['learn_new_gp'],
+        'geneformer_model': args['geneformer_model_path'],
+        'peft_config_path': args['peft_config_path'],
+        'use_baseline_tk': args['use_baseline_tk'],
+        'tk_vocab_size': args['tk_vocab_size'],
+        'gene2vec': args['gene2vec'],
+        'use_pos_emb': args['use_pos_emb'],
+        'use_onehot_wrapper': args['use_onehot_wrapper'],
+        'vocab_gene_names': args['vocab_gene_names'],
+        'do_ensembl_conversion': args['gene_format'] == 'symbol',
+    }
+
+    global_params = {
+        'supervised_labels': args['supervised_labels'],
+        'global_attn_heads': args['global_attn_heads'],
+        'global_loss': args['global_loss'],
+        'global_masking_rate': args['global_masking_rate'],
+        'global_n_blocks': args['global_n_blocks'],
+        'reconstruction_loss': args['reconstruction_loss'],
+        'total_n_genes': args['total_n_genes'],
+    }
+
+    if args['num_virtual_tokens'] > 0:
+        if args['model_type'] == 'Base':
+            model = gpTransformerBaseWithPrompt(**common_params)
+
+        elif args['model_type'] == 'Global':
+            model = gpTransformerGlobalWithPrompt(**common_params, **global_params)
+
+        return model
+
+    if args['num_prototypes'] > 0:
+        model = gpTransformerPrototypes(
+            num_prototypes=args['num_prototypes'], **global_params
+        )
+        return model
+
+    if args['model_type'] == 'Base':
+        model = gpTransformerBase(**common_params)
+        return model
+
+    if args['model_type'] == 'Global':
+        model = gpTransformerGlobal(**common_params, **global_params)
+        return model
+
+    if args['model_type'] == 'Mean':
+        model = gfGlobal(**common_params)
+        return model
+
+
+def configure_lightning_module(model, gp_similarity, args):
+    common_params = {
+        'model': model,
+        # 'model_type': args['model_type'],
+        'lr': args['lr'],
+        'finetune_lr': args['finetune_lr'],
+        'use_finetune_lr': 'finetune' in args['global_training'],
+        'total_epochs': args['n_epochs'],
+        'lr_scheduler': args['lr_scheduler'],
+        'use_gp_similarity_loss': gp_similarity is not None,
+        'gp_similarity': gp_similarity,
+        'output_dir': args['output_dir'],
+        'lambda_gp_similarity': args['lambda_gp_similarity'],
+        'weight_decay': args['weight_decay'],
+        'optimizer': DeepSpeedCPUAdam
+        if args['strategy'].startswith('deepspeed')
+        else torch.optim.AdamW,
+    }
+
+    global_params = {
+        'n_condition_combined': args['n_condition_combined'],
+        'total_n_genes': args['total_n_genes'],
+        'global_loss': args['global_loss'],
+    }
+
+    prototype_params = {
+        'num_prototypes': args['num_prototypes'],
+        'lambda_prototype_loss': args['lambda_prototype_loss'],
+    }
+
+    if args['num_prototypes'] > 0:
+        pl_model = gpPrototypes(**common_params, **global_params, **prototype_params)
+
+        return pl_model
+
+    if args['model_type'] == 'Base':
+        pl_model = gpBase(**common_params)
+        return pl_model
+
+    if args['model_type'] == 'Global':
+        pl_model = gpGlobal(**common_params, **global_params)
+        return pl_model
+
+
+def load_from_ckpt(mode, pl_model, args):
+    '''
+    Load pretrained model
+
+    Mode can be one of:
+    - 'virtual_tokens'
+    - 'resume_training'
+    - 'sequential'
+    - 'finetune'
+
+    '''
+
+    output_dir = args['output_dir']
+    tissue = args['tissue']
+    model_type = args['model_type']
+    path_to_base_model = args['path_to_base_model']
+
+    if mode == 'virtual_tokens':
+        if args['path_to_base_model'] is not None:
+            try:
+                latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type)
+            except FileNotFoundError:
+                latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
             checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-            print('Loading from checkpoint', checkpoint_path)
-            checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
-            gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-            # n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
+            checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
 
-            # reset output directory
-            gp_transformer.output_dir = output_dir
+            pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
-            # freeze base model
-            for name, param in gp_transformer.model.named_parameters():
-                if (
+            # freeze everything but prompt tokens and global head
+            for name, param in pl_model.model.named_parameters():
+                if 'prompt' in name:
+                    param.requires_grad = True
+                elif (
                     ('cell_token_learner' in name)
                     | ('clf_head' in name)
                     | ('count_head' in name)
@@ -521,148 +677,67 @@ def run_training(
                 else:
                     param.requires_grad = False
 
-        # finetuning original GP blocks
-        elif (global_training == 'finetune') | (global_training == 'finetune_global'):
-            if path_to_base_model is None:
-                raise ValueError(
-                    'Please provide path to pre-trained'
-                    'gpTransformer Base model for finetuning'
-                )
-            # look for Base model to load
-            # if not found, this will raise an error
-            tag = 'Base' if global_training == 'finetune' else 'Global'
-            latest_ckpt = find_latest_file(path_to_base_model, tissue, tag)
-            checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-            print('Loading from checkpoint', checkpoint_path)
-            checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
-            gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-            n_epochs = checkpoint['epoch'] + n_epochs  # TO DO : do we need this line?
+        return pl_model
 
-            # reset output directory
-            gp_transformer.output_dir = output_dir
+    elif mode == 'resume_training':
+        latest_ckpt = find_latest_file(output_dir, tissue, model_type)
+        pl_model = pl_model.load_from_checkpoint(latest_ckpt, map_location='cpu')
 
-            # reset supervised labels
-            gp_transformer.model.supervised_labels = supervised_labels
+        return pl_model
 
-    # For training global model after base model
-    if supervised_rem_var is not None:
-        raise ValueError(
-            'Check implementation in training_flexi to add rem var from HVG'
-        )
-
+    elif mode == 'sequential':
         latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
         checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        print('Loading from checkpoint', checkpoint_path)
-        checkpoint = torch.load(latest_ckpt)
-        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-        n_epochs = checkpoint['epoch'] + n_epochs
+        checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
+        pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
-        # reset set_gpfinder_weight_decay
-        gp_transformer.set_gpfinder_weight_decay = set_gpfinder_weight_decay
-
-        # freeze all GP
-        for name, param in gp_transformer.model.named_parameters():
-            if 'multi_gp_encoder' in name:
+        # freeze base model
+        for name, param in pl_model.model.named_parameters():
+            if (
+                ('cell_token_learner' in name)
+                | ('clf_head' in name)
+                | ('count_head' in name)
+            ):
+                param.requires_grad = True
+            else:
                 param.requires_grad = False
 
-        # unfreeze remaining variation
-        rem_var_idx = gp_transformer.model.gp_inputs.index('remaining_var')
-        for name, param in gp_transformer.model.named_parameters():
-            if f'multi_gp_encoder.encoder.{rem_var_idx}' in name:
-                param.requires_grad = True
+        return pl_model
 
-        # reinitialize weights for remaining variation
-        for name, param in gp_transformer.model.named_parameters():
-            if f'multi_gp_encoder.encoder.{rem_var_idx}' in name:
-                if 'weight' in name:
-                    if param.dim() >= 2:
-                        torch.nn.init.xavier_normal_(param)
-                    else:
-                        torch.nn.init.normal_(param, 0, 0.02)
-                if 'bias' in name:
-                    torch.nn.init.zeros_(param)
+    elif (mode == 'finetune') | (mode == 'finetune_global'):
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Global')
+        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
+        pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
-    # Learning new GP
-    if learn_new_gp:
-        # load pretrained model
+        return pl_model
+
+    elif mode == 'learn_new_gp':
         checkpoint_path = find_latest_file(path_to_base_model, tissue, model_type)
         checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-        gp_transformer.load_state_dict(checkpoint['state_dict'], strict=False)
-        n_epochs = checkpoint['epoch'] + n_epochs
-        gp_transformer.output_dir = output_dir
+        pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
+        pl_model.output_dir = output_dir
 
         # get indices of GP to learn
+        gp_to_learn = args['gp_to_learn']
+
         if isinstance(gp_to_learn, str):
             gp_to_learn = [gp_to_learn]
         gp_idx = [
-            gp_transformer.model.gp_inputs.index(gp)
+            pl_model.model.gp_inputs.index(gp)
             for gp in gp_to_learn
-            if gp in gp_transformer.model.gp_inputs
+            if gp in pl_model.model.gp_inputs
         ]
 
         # freeze all GP
-        for name, param in gp_transformer.model.named_parameters():
+        for name, param in pl_model.model.named_parameters():
             if 'multi_gp_encoder' in name:
                 param.requires_grad = False
 
         # unfreeze new GP
         for i in gp_idx:
-            for name, param in gp_transformer.model.named_parameters():
+            for name, param in pl_model.model.named_parameters():
                 if f'multi_gp_encoder.encoder.{i}' in name:
                     param.requires_grad = True
 
-    # check number of available GPUs
-    num_gpus = torch.cuda.device_count()
-
-    if num_gpus > 1:
-        trainer = pl.Trainer(
-            max_epochs=n_epochs,
-            callbacks=[
-                TQDMProgressBar(refresh_rate=10),
-                early_stopping_callback,
-                checkpoint_callback,
-                lr_monitor,
-            ],
-            logger=wandb_logger,
-            devices=-1,
-            accelerator='auto',  # uses ddp per default for multi-gpu training
-            strategy=strategy,
-            precision='bf16-mixed'
-            if strategy == 'ddp_find_unused_parameters_true'
-            else 16,
-            profiler='advanced',
-            # num_nodes=2,
-        )
-    else:
-        trainer = pl.Trainer(
-            max_epochs=n_epochs,
-            callbacks=[
-                TQDMProgressBar(refresh_rate=10),
-                early_stopping_callback,
-                checkpoint_callback,
-                lr_monitor,
-            ],
-            logger=wandb_logger,
-            devices=-1,
-            accelerator='auto',
-            precision='bf16-mixed',
-            # profiler='advanced',
-            strategy=strategy,
-        )
-
-    # Ready to train with new learning rate
-    trainer.fit(gp_transformer, txdata)
-
-    # save logs to csv for custom plotting
-    # Fetch logged data from wandb
-    api = wandb.Api()
-    if torch.cuda.device_count() > 1:
-        run = api.run(f'scGPL/{save_id}_gpu_{str(rank_zero_only.rank)}')
-    else:
-        run = api.run(f'scGPL/{save_id}')
-
-    # Get logged data as dataframe
-    df = run.history()
-    df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
-
-    wandb.finish()
+        return pl_model

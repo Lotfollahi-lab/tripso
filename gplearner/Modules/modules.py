@@ -23,6 +23,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange, repeat
 
 from ..Utils import (
     drop_path,
@@ -134,17 +135,20 @@ class Attention(nn.Module):
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
 
-            # apply attention mask for padding tokens
-            # Mask rows:
-            attn = attn * attn_mask.unsqueeze(1).unsqueeze(
-                -1
-            )  # unsqueeze to add head dimension
-            # Mask columns:
-            attn = attn * attn_mask.unsqueeze(1).unsqueeze(1)
+            mask = rearrange(attn_mask, 'b ... -> b (...)')
+            max_neg_value = -torch.finfo(attn.dtype).max
 
+            # Repeat the mask for each head
+            mask = repeat(mask, 'b j -> b h () j', h=self.num_heads)
+
+            # Apply the mask to the attention scores
+            attn.masked_fill_(mask == 0, max_neg_value)
+
+            # Apply softmax to get attention weights
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
 
+            # Calculate the weighted sum of values
             x = (attn @ v).transpose(1, 2).reshape(B, N, C)
 
         x = self.proj(x)
@@ -210,21 +214,24 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
-        position = torch.arange(max_len).unsqueeze(1)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
+            torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)
         )
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
         """
         Arguments:
             x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
         """
-        x = x + self.pe[: x.size(0)]
+
+        pe = self.pe[:, : x.size(1)]  # (1, seq_len, 256)
+        x = x + pe  # (batch, seq_len, 256)
+
         return self.dropout(x)
 
 
@@ -253,6 +260,9 @@ class gpTransformerEncoder(nn.Module):
         self.embed_dim = embed_dim
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+        self.mask_emb = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
         self.use_pos_emb = use_pos_emb
 
         self.pos_drop = nn.Dropout(p=drop_rate)
@@ -305,9 +315,8 @@ class gpTransformerEncoder(nn.Module):
         self.apply(self._init_weights)
 
         self.pos_embed = PositionalEncoding(
-            d_model=embed_dim, dropout=drop_rate, max_len=2048
+            d_model=embed_dim, dropout=drop_rate, max_len=3000
         )
-        # self.pos_embed = nn.Embedding(2048, embed_dim)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -321,7 +330,118 @@ class gpTransformerEncoder(nn.Module):
     def random_gene_masking(self, x, gene_labels):
         x = x.clone()
         gene_labels = gene_labels.clone()
+
         full_mask, mask, random_mask = self.mask_generator(gene_labels)
+
+        # Apply the mask to the target tensor
+        # if mask = 1, we want to 0 out the token embedding
+        # but keep the label for loss calculation
+        x = torch.where(mask.unsqueeze(-1), self.mask_emb.expand_as(x), x)
+        # x = x.masked_fill(mask.unsqueeze(-1), 0)
+
+        # Add random tokens to the masked positions
+        random_tokens = torch.randn(x.shape, device=x.device)
+
+        x[random_mask] = random_tokens[random_mask]
+
+        # Replace unmasked indices with -100 in the labels
+        # since we only compute loss on masked tokens
+        gene_labels[~full_mask] = -100
+
+        return x, gene_labels
+
+    def prepare_tokens(self, x, gene_labels):
+        B = x.shape[0]  # batch size
+
+        # add the [CLS] token to the embed patch tokens
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # (256, 1, 256)
+
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        # add dummy label for cls
+        cls_label = torch.full(
+            (gene_labels.shape[0], 1),
+            -100,
+            dtype=gene_labels.dtype,
+            device=gene_labels.device,
+        )  # Create a column of -100 values
+
+        gene_labels = torch.cat((cls_label, gene_labels), dim=1)
+
+        # add positional encoding to each token
+        if self.use_pos_emb:
+            x = self.pos_embed(x)
+
+        return self.pos_drop(x), gene_labels
+
+    def forward(
+        self,
+        x,
+        gene_labels,
+        masking,
+        attn_mask,
+        return_attention,
+        return_gene_embeddings=False,
+    ):
+        # Random masking:
+        if masking:
+            x, gene_labels = self.random_gene_masking(x, gene_labels)
+
+        # Prepare tokens for transformer
+        x, gene_labels = self.prepare_tokens(x, gene_labels)
+
+        for blk in self.blocks:
+            x, attn = blk(x, attn_mask=attn_mask, return_attention=return_attention)
+
+        x = self.norm(x)
+
+        token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
+
+        logits_lm = self.decoder(x)
+
+        output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
+
+        if attn is not None:
+            #  returns full attention matrix not just CLS
+            output['attention'] = attn
+
+        if return_gene_embeddings:
+            output['gene_embeddings'] = x[:, 1:, :]
+
+        return output
+
+    def get_intermediate_layers(self, x, gene_labels, n=1):
+        x, gene_labels = self.prepare_tokens(x, gene_labels)
+        # we return the output tokens from the `n` last blocks
+        output = []
+        for i, blk in enumerate(self.blocks):
+            x = blk(x)
+            if len(self.blocks) - i <= n:
+                output.append(self.norm(x))
+        return output
+
+
+class gpTransformerEncoderWithPrompt(gpTransformerEncoder):
+    def __init__(self, **kwargs):
+        super()._init_(**kwargs)
+
+    def random_gene_masking(self, x, gene_labels, unmask_last_n=0):
+        x = x.clone()
+        gene_labels = gene_labels.clone()
+
+        # Ensure the last n tokens are never masked
+        if unmask_last_n > 0:
+            # Create a mask to prevent masking of the last n tokens
+            protect_mask = torch.zeros_like(gene_labels, dtype=torch.bool)
+            protect_mask[:, -unmask_last_n:] = True
+
+        full_mask, mask, random_mask = self.mask_generator(gene_labels)
+
+        # Apply the protect_mask to ensure last n tokens are not masked
+        if unmask_last_n > 0:
+            full_mask &= ~protect_mask
+            mask &= ~protect_mask
+            random_mask &= ~protect_mask
 
         # Apply the mask to the target tensor
         # if mask = 1, we want to 0 out the token embedding
@@ -340,50 +460,58 @@ class gpTransformerEncoder(nn.Module):
 
         return x, gene_labels
 
-    def prepare_tokens(self, x, gene_labels):
-        B = x.shape[0]  # batch size
-
-        # add the [CLS] token to the embed patch tokens
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-
-        # add dummy label for cls
-        cls_label = torch.full(
-            (gene_labels.shape[0], 1),
-            -100,
-            dtype=gene_labels.dtype,
-            device=gene_labels.device,
-        )  # Create a column of -100 values
-        gene_labels = torch.cat((cls_label, gene_labels), dim=1)
-
-        # add positional encoding to each token
-        if self.use_pos_emb:
-            x = self.pos_embed(x)
-        #     position_ids = torch.arange(x.shape[1], device=x.device)
-        #     pos_emb = self.pos_embed(position_ids)
-        #     print('pos_emb shape', pos_emb.shape)
-        #     print('x shape', x.shape)
-        #     x = x + pos_emb
-
-        #     print('x shape after pos emb', x.shape)
-
-        return self.pos_drop(x), gene_labels
-
     def forward(
         self,
         x,
         gene_labels,
-        inference,
+        masking,
         attn_mask,
         return_attention,
         return_gene_embeddings=False,
+        num_virtual_tokens=0,
+        using_gp_specific_token=False,
     ):
         # Random masking:
-        if inference is False:
-            x, gene_labels = self.random_gene_masking(x, gene_labels)
+        if masking:
+            x, gene_labels = self.random_gene_masking(
+                x, gene_labels, unmask_last_n=num_virtual_tokens
+            )
 
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
+
+        #     # Extract the <cls> token
+        #     # shapes indicate shape of line below
+        #     # Shape: [batch_size, 1, feature_dim]
+        #     cls_token = x[:, :1, :]
+        #     # Extract the virtual tokens from the end
+        #     # Shape: [batch_size, num_virtual_tokens, feature_dim]
+        #     virtual_tokens = x[:, -num_virtual_tokens:, :]
+        #     # Extract the gene tokens from the remaining part
+        #     # [batch_size, sequence_length - num_virtual_tokens - 1, feature_dim]
+        #     gene_tokens = x[:, 1:-num_virtual_tokens, :]
+        #     # Concatenate the parts in the required order:
+        #     # [<cls>, <virtual tokens>, <gene_tokens>]
+        #     # Shape: [batch_size, sequence_length, feature_dim]
+        #     x = torch.cat([cls_token, virtual_tokens, gene_tokens], dim=1)
+
+        #     # And the same for gene labels
+        #     cls_label = gene_labels[:, :1]  # Shape: [batch_size, 1]
+        #     # Shape: [batch_size, num_virtual_tokens]
+        #     virtual_labels = gene_labels[:, -num_virtual_tokens:]
+        #     # Shape: [batch_size, sequence_length - num_virtual_tokens - 1]
+        #     g_labels = gene_labels[:, 1:-num_virtual_tokens]
+        #     # Shape: [batch_size, sequence_length]
+        #     gene_labels = torch.cat([cls_label, virtual_labels, g_labels], dim=1)
+
+        #     # And attention mask
+        #     cls_mask = attn_mask[:, :1]  # Shape: [batch_size, 1]
+        #     # Shape: [batch_size, num_virtual_tokens]
+        #     virtual_mask = attn_mask[:, -num_virtual_tokens:]
+        #     # Shape: [batch_size, sequence_length - num_virtual_tokens - 1]
+        #     g_mask = attn_mask[:, 1:-num_virtual_tokens]
+        #     # Shape: [batch_size, sequence_length]
+        #     attn_mask = torch.cat([cls_mask, virtual_mask, g_mask], dim=1)
 
         for blk in self.blocks:
             x, attn = blk(x, attn_mask=attn_mask, return_attention=return_attention)
@@ -397,27 +525,20 @@ class gpTransformerEncoder(nn.Module):
         output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
 
         if attn is not None:
-            # Now returns full attention matrix not just CLS
-            # for attributions, use gradcam
-            # could implement method for cls attention scores as well
-            # print('Attention shape', attn.shape)
-            # (batch, heads, 1 + tokens, 1 + tokens)
-            # print('<cls>', attn[:, :, 0, :].shape)
+            #  returns full attention matrix not just CLS
             output['attention'] = attn
 
         if return_gene_embeddings:
-            output['gene_embeddings'] = x[:, 1:, :]
+            output['gene_embeddings'] = x[:, 1:-num_virtual_tokens, :]
 
-        return output
+        if using_gp_specific_token:
+            output['gp_virtual_tokens'] = x[
+                :, -num_virtual_tokens : -int(num_virtual_tokens / 2), :
+            ]
+            output['shared_virtual_tokens'] = x[:, -int(num_virtual_tokens / 2) :, :]
+        else:
+            output['shared_virtual_tokens'] = x[:, -num_virtual_tokens:, :]
 
-    def get_intermediate_layers(self, x, gene_labels, n=1):
-        x, gene_labels = self.prepare_tokens(x, gene_labels)
-        # we return the output tokens from the `n` last blocks
-        output = []
-        for i, blk in enumerate(self.blocks):
-            x = blk(x)
-            if len(self.blocks) - i <= n:
-                output.append(self.norm(x))
         return output
 
 
@@ -445,6 +566,71 @@ class PretrainedEmbeddings(nn.Module):
     def forward(self):
         embeddings = self.word_embeddings + self.position_embeddings
         return embeddings
+
+
+class PromptEncoder(torch.nn.Module):
+    """
+    The prompt encoder network that is used to generate the
+    virtual token embeddings for p-tuning.
+
+    Adapted from
+    https://github.com/huggingface/peft/blob/main/src/peft/tuners/p_tuning/model.py
+
+    Accessed 26.06.2024
+
+    **Attributes**:
+        - **embedding** (`torch.nn.Embedding`) --
+            The embedding layer of the prompt encoder.
+        - **mlp_head** (`torch.nn.Sequential`) --
+            The MLP head of the prompt encoder if `inference_mode=False`.
+        - **lstm_head** (`torch.nn.LSTM`) --
+            The LSTM head of the prompt encoder if `inference_mode=False` and
+        `encoder_reparameterization_type="LSTM"`.
+        - **token_dim** (`int`) --
+            The hidden embedding dimension of the base transformer model.
+        - **input_size** (`int`) -- The input size of the prompt encoder.
+        - **output_size** (`int`) -- The output size of the prompt encoder.
+        - **hidden_size** (`int`) -- The hidden size of the prompt encoder.
+        - **total_virtual_tokens** (`int`): The total number of virtual tokens of the
+        prompt encoder.
+        - **encoder_type** --> here MLP only (recommended)
+
+    Input shape: (`batch_size`, `total_virtual_tokens`)
+
+    Output shape: (`batch_size`, `total_virtual_tokens`, `token_dim`)
+    """
+
+    def __init__(
+        self,
+        token_dim: int,
+        encoder_hidden_size: int,
+        num_virtual_tokens: int,
+    ):
+        super().__init__()
+        self.token_dim = token_dim
+        self.input_size = token_dim
+        self.output_size = token_dim
+        self.hidden_size = encoder_hidden_size
+        self.total_virtual_tokens = num_virtual_tokens
+
+        # embedding
+        self.embedding = torch.nn.Embedding(self.total_virtual_tokens, self.token_dim)
+
+        layers = [
+            torch.nn.Linear(self.input_size, self.hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(self.hidden_size, self.hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(self.hidden_size, self.output_size),
+        ]
+        self.mlp_head = torch.nn.Sequential(*layers)
+
+    def forward(self, indices):
+        input_embeds = self.embedding(indices)
+
+        output_embeds = self.mlp_head(input_embeds)
+
+        return output_embeds
 
 
 if __name__ == '__main__':

@@ -38,7 +38,10 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torchmetrics import PearsonCorrCoef
 from tqdm import tqdm
+
+from ..Metrics.metrics import evaluate_emd, evaluate_mmd
 
 random.seed(0)
 
@@ -77,6 +80,8 @@ def find_latest_file(output_dir, tissue, supervised_tag):
             f' {supervised_tag} found in {checkpoint_dir}. '
             'Did you train the model?'
         )
+
+    print('Loading model from', latest_file)
 
     return latest_file
 
@@ -266,14 +271,14 @@ def encode_labels(input_data, input_col, new_col):
     Encode labels as integers
     works on Huggingface dataset class
     """
-    label_values = list(set(input_data[input_col]))
+    label_values = input_data.unique(input_col)
     label_dict = {l: i for i, l in enumerate(label_values)}
 
     def classes_to_ids(example):
         example[new_col] = label_dict[example[input_col]]
         return example
 
-    labeled_dataset = input_data.map(classes_to_ids, num_proc=16)
+    labeled_dataset = input_data.map(classes_to_ids, num_proc=4)
 
     return labeled_dataset
 
@@ -492,6 +497,27 @@ ensembl_to_name = {v: k for k, v in name_dictionary.items()}
 token_to_gene = {v: k for k, v in token_dictionary.items()}
 
 
+def convert_gene_names_to_tokens(genes, do_ensembl_conversion=True, gp_name=None):
+    # Convert gene names to Ensembl IDs
+    if do_ensembl_conversion:
+        ensembl_ids = [name_dictionary.get(gene_name, 'Unknown') for gene_name in genes]
+    else:
+        ensembl_ids = genes
+
+    # Convert ensembl IDs to tokens:
+    gp_tokens = [
+        token_dictionary.get(gene_name, 'Unknown') for gene_name in ensembl_ids
+    ]
+
+    # Unknown values later cause issues for indexing -> remove
+    if 'Unknown' in gp_tokens:
+        print(f"In {gp_name}, dropped {gp_tokens.count('Unknown')} unknown genes")
+        while 'Unknown' in gp_tokens:
+            gp_tokens.remove('Unknown')
+
+    return gp_tokens
+
+
 def get_gp_tokens(
     gp_genes,
     do_ensembl_conversion,
@@ -517,32 +543,14 @@ def get_gp_tokens(
         Label for the GP of interest (only used for printing)
 
     """
-    with open(gene_token_path, 'rb') as f:
-        token_dictionary = pickle.load(f)
-
-    # load gene name to ensembl dict
-    with open(gene_name_path, 'rb') as f:
-        name_dictionary = pickle.load(f)
 
     # Remove missing values (NaN) from the column
-    genes = list(gp_genes.dropna())
-
-    # Convert gene names to Ensembl IDs
-    if do_ensembl_conversion:
-        ensembl_ids = [name_dictionary.get(gene_name, 'Unknown') for gene_name in genes]
+    if isinstance(gp_genes, pd.Series):
+        genes = list(gp_genes.dropna())
     else:
-        ensembl_ids = genes
+        genes = gp_genes
 
-    # Convert ensembl IDs to tokens:
-    gp_tokens = [
-        token_dictionary.get(gene_name, 'Unknown') for gene_name in ensembl_ids
-    ]
-
-    # Unknown values later cause issues for indexing -> remove
-    if 'Unknown' in gp_tokens:
-        print(f"In {gp_name}, dropped {gp_tokens.count('Unknown')} unknown genes")
-        while 'Unknown' in gp_tokens:
-            gp_tokens.remove('Unknown')
+    gp_tokens = convert_gene_names_to_tokens(genes, do_ensembl_conversion, gp_name)
 
     # Remove rare genes
     # rare_genes = []
@@ -692,6 +700,121 @@ def get_genes_in_single_gp(gpdb, do_ensembl_conversion, downsample_to_n_genes):
         tokens_to_keep = random.sample(tokens_to_keep, downsample_to_n_genes)
 
     return tokens_to_keep
+
+
+def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):
+    """
+    Build a matrix of shape (n_cells, n_gp_tokens, 256)
+    where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
+    maintains geneformer order
+
+    Inputs:
+
+    gf :
+        geneformer embeddings (n_cells, 2048, 256)
+
+    input_ids:
+        list of lists with positional information for each token
+
+    gp_tokens_list:
+        list of tokens for each gene program
+
+    model:
+        "full_model" : set for input into geneformer
+        "extract_genes" : when extracting gene embeddings
+                        -> max size is total GP size
+        # NEED TO REIMPLEMENT
+
+    """
+    # Get list of gp tokens
+    # convert gp_tokens bf16 tensor to integers
+    # gp_tokens = gp_tokens.to(torch.int)
+    gp_tokens = gp_tokens.long()
+
+    # FOR ONE HOT ENCODER VERSION ONLY
+    b1, s1 = input_ids.shape
+    b2, s2, e2 = gf.shape
+
+    if s1 != s2:
+        input_ids = input_ids[:, :s2]
+
+    # Create a binary mask (h, i, k)
+    # In cell h, is the gene at position i in our GP at position k?
+    # Using broadcasting to compare tokens_arr with gp_tokens
+    mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0)  # .unsqueeze(0)
+    mask = mask.to(torch.int)
+
+    # Now reshape so that we will zero out non GP genes in each cell
+    # Sum along the last dimension to count how many GP tokens each gene matches
+    mask_expanded = mask.sum(dim=-1).unsqueeze(2)
+
+    if crop_to_gp_len:
+        # Apply the mask to the data using broadcasting
+        masked_latent = gf * mask_expanded
+
+        # Now wrangle so that the non zero genes are first
+        # but we maintain the order
+        # loop through the cells to deal with different shapes
+        holder = []
+
+        for i in range(masked_latent.shape[0]):
+            x = masked_latent[i, :, :]
+            c = masked_latent[i, :, 1]  # find which genes have been 0'd out
+            idx = c != 0
+            idx_zero = c == 0
+            z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
+            holder += [z]
+
+        result_matrix = torch.stack(holder)
+
+        masked_labels = torch.where(
+            mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
+        )
+
+        holder = []
+        for i in range(masked_labels.shape[0]):
+            x = masked_labels[i, :]
+            nz = x != 0
+            z = torch.concat((x[nz], x[~nz]), dim=0)
+            holder += [z]
+
+        masked_labels_output = torch.stack(holder)
+
+        # crop
+        n_genes_to_keep = gp_tokens.shape[0]
+        result_matrix = result_matrix[:, :n_genes_to_keep, :]
+        masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
+
+    else:
+        # Apply the mask to the data using broadcasting
+        result_matrix = gf * mask_expanded
+
+        # Now do the same for labels
+        # masked_labels_output = mask.sum(axis=-1) * input_ids
+        masked_labels_output = torch.where(
+            mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
+        )
+
+    # count number of genes per cell
+    num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
+
+    # Make tensor for forward pass
+    # comment the line below to leave 0s because they are actually informative
+    # (this gene was not in the top 1000 of this cell)
+    # masked_labels_output[masked_labels_output == 0] = -100
+    # happens when do LOOKUP
+
+    # Set up attention mask
+    # to avoid attention to padding tokens
+    attn_mask = torch.zeros_like(masked_labels_output)
+    attn_mask[masked_labels_output != 0] = 1
+
+    # never mask cls
+    attn_mask = torch.cat(
+        [torch.ones_like(attn_mask)[:, 0].unsqueeze(-1), attn_mask], dim=-1
+    )
+
+    return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
 
 
 def viz_gp(GP, adata, color_by='cell_type', save_to=False):
@@ -872,6 +995,117 @@ class mlm_mask_generator:
 ###################################
 # Downstream evaluation
 ###################################
+
+
+def evaluate_gene_expr_reconstruction(true_counts, pred_counts, meta, output_dir):
+    # shuffle the counts
+    true_counts_shuffled = true_counts[torch.randperm(true_counts.size(0))]
+
+    pearson_val = PearsonCorrCoef(num_outputs=true_counts.shape[0]).to(
+        true_counts.device
+    )
+
+    pearson = pearson_val(pred_counts.T, true_counts.T)
+    mean_pearson = torch.mean(pearson)
+
+    pearson_shuffled = pearson_val(pred_counts.T, true_counts_shuffled.T)
+    mean_pearson_shuffled = torch.mean(pearson_shuffled)
+
+    # Pearson correlation for non zero genes
+    n_cells, n_genes = pred_counts.shape
+    mean_pearson_non_zero = []
+
+    for cell_idx in range(n_cells):
+        # For each cell, identify non-zero genes
+        non_zero_genes = true_counts[cell_idx, :] > 0
+
+        # Filter out zero-expression genes for this cell
+        # in both pred and true counts
+        pred_non_zero = pred_counts[cell_idx, non_zero_genes]
+        true_non_zero = true_counts[cell_idx, non_zero_genes]
+
+        if (
+            len(pred_non_zero) > 1
+        ):  # Ensure there's more than one gene to calculate Pearson correlation
+            # Calculate Pearson correlation for the non-zero genes in this cell
+            pearson_corr = torch.corrcoef(torch.stack((pred_non_zero, true_non_zero)))[
+                0, 1
+            ]
+            mean_pearson_non_zero.append(pearson_corr)
+
+    # Compute the mean Pearson correlation across all cells
+    mean_pearson_non_zero = torch.tensor(mean_pearson_non_zero).mean()
+
+    # # MSE
+    # mse = self.metric['mse'](pred_counts, true_counts)
+    # mean_mse = torch.mean(mse)
+
+    # mse_shuffled = self.metric['mse'](pred_counts, true_counts_shuffled)
+    # mean_mse_shuffled = torch.mean(mse_shuffled)
+
+    # # set up anndata object for subsetting by condition
+    # meta_dict = self.cell_metadata
+
+    # meta_dict.pop('counts', None)
+    # meta_dict.pop('size_factor', None)
+
+    if 'batch_key' not in meta.columns:
+        meta['batch_key'] = 'single_condition'
+
+    adata_true = sc.AnnData(X=true_counts.cpu().numpy(), obs=meta)
+    adata_pred = sc.AnnData(X=pred_counts.cpu().numpy(), obs=meta)
+
+    mmd = evaluate_mmd(adata_true, adata_pred, condition_key='batch_key')
+
+    mmd.to_csv(os.path.join(output_dir, 'global_recon_mmd.csv'))
+
+    emd = evaluate_emd(adata_true, adata_pred, condition_key='batch_key')
+    emd.to_csv(os.path.join(output_dir, 'global_recon_emd.csv'))
+
+    # count zero values in true and predicted
+    true_zeros = torch.sum(true_counts == 0).item()
+    pred_zeros = torch.sum(pred_counts == 0).item()
+    true_prop_zeros = true_zeros / true_counts.numel()
+    pred_prop_zeros = pred_zeros / pred_counts.numel()
+
+    # write to disk
+    metrics_df = pd.DataFrame(
+        {
+            'metric': [
+                'pearson',
+                'pearson_shuffled',
+                'pearson_non_zero',
+                # 'mse',
+                # 'mse_shuffled',
+                'true_zeros',
+                'pred_zeros',
+                'true_prop_zeros',
+                'pred_prop_zeros',
+                'max true counts',
+                'max pred counts',
+            ],
+            'value': [
+                mean_pearson.item(),
+                mean_pearson_shuffled.item(),
+                mean_pearson_non_zero.item(),
+                # mean_mse.item(),
+                # mean_mse_shuffled.item(),
+                true_zeros,
+                pred_zeros,
+                true_prop_zeros,
+                pred_prop_zeros,
+                true_counts.max().item(),
+                pred_counts.max().item(),
+            ],
+        }
+    )
+
+    metrics_df.to_csv(
+        os.path.join(output_dir, 'random_baseline_metrics.csv'),
+        index=False,
+    )
+
+    return metrics_df
 
 
 def wrangle_classification_report(report):
@@ -1422,6 +1656,17 @@ class CosineLRwithWarmUp(torch.optim.lr_scheduler._LRScheduler):
         else:
             for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
                 param_group['lr'] = lr
+
+
+class FrequentLoggingCallback(pl.Callback):
+    def on_batch_end(self, trainer, pl_module):
+        # Ensure that train/val_loss is logged after validation step
+        pl_module.log(
+            'val/intermediate_loss',
+            pl_module.current_val_loss,
+            on_step=True,
+            on_epoch=False,
+        )
 
 
 ###################################

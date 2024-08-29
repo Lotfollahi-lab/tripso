@@ -1,7 +1,12 @@
 # from Kevin
 
+from typing import Dict
+
 import torch
 import torch.nn.functional as F
+from torchmetrics.functional import pairwise_cosine_similarity
+
+from .utils import one_hot_encoder
 
 
 def mse(x_pred, x_true):
@@ -150,3 +155,79 @@ def zinb(
 
     res = mul_case_zero + mul_case_non_zero
     return res
+
+
+def compute_gp_similarity_loss(z, true_gp_similarity):
+    # calculate pairwise cosine similarity
+    cs = []
+    for i in range(z.shape[0]):
+        c = pairwise_cosine_similarity(z[i, :])
+        cs.append(c)
+    gp_cosine_similarity = torch.stack(cs)
+
+    # compute loss
+    gp_similarity_loss = F.mse_loss(gp_cosine_similarity, true_gp_similarity)
+
+    return gp_similarity_loss
+
+
+def compute_count_loss(
+    outputs: Dict[str, torch.Tensor],
+    batch: Dict[str, torch.Tensor],
+    reconstruction_loss: str,
+    theta: torch.Tensor,
+    n_condition_combined: int,
+):
+    true_counts = batch['counts']
+    batch_size_factor = torch.tensor(batch['size_factor']).to(true_counts.device)
+
+    if reconstruction_loss == 'mse':
+        loss = (
+            mse_loss(outputs['count_output']['count_lognorm'], true_counts)
+            .sum(dim=-1)
+            .mean()
+            .float()
+        )
+        return loss
+
+    elif reconstruction_loss == 'zinb':
+        dec_mean_gamma, dec_dropout = (
+            outputs['count_output']['count_mean'],
+            outputs['count_output']['count_dropout'],
+        )
+        size_factor_view = batch_size_factor.unsqueeze(1).expand(
+            dec_mean_gamma.size(0), dec_mean_gamma.size(1)
+        )
+        dec_mean = dec_mean_gamma * size_factor_view
+
+        dispersion = F.linear(
+            one_hot_encoder(batch['batch_key_id'], n_condition_combined),
+            theta,
+        )
+
+        dispersion = torch.exp(dispersion)
+        loss = (
+            -zinb(x=true_counts, mu=dec_mean, theta=dispersion, pi=dec_dropout)
+            .sum(dim=-1)
+            .mean()
+        )
+        return loss
+
+    elif reconstruction_loss == 'nb':
+        dec_mean_gamma = outputs['count_output']['count_mean']
+        size_factor_view = batch_size_factor.unsqueeze(1).expand(
+            dec_mean_gamma.size(0), dec_mean_gamma.size(1)
+        )
+        dec_mean = dec_mean_gamma * size_factor_view
+        dispersion = F.linear(
+            one_hot_encoder(batch['batch_key_id'], n_condition_combined),
+            theta,
+        )
+        dispersion = torch.exp(dispersion)
+        loss = -nb(x=true_counts, mu=dec_mean, theta=dispersion).sum(dim=-1).mean()
+        return loss
+
+    else:
+        raise ValueError(
+            'Reconstruction loss not supported' 'Please choose from mse, nb or zinb'
+        )
