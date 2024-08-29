@@ -914,6 +914,7 @@ class gpTransformerBase(nn.Module):
 
         # Optionally return geneformer cell embeddings
         if return_gf_cell_emb:
+            raise NotImplementedError('Not implemented')
             gf_output_dict = self.gf_cell_encoder(emb_out)
             output['gf_emb'] = gf_output_dict['cls']
 

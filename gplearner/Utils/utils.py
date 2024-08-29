@@ -81,6 +81,8 @@ def find_latest_file(output_dir, tissue, supervised_tag):
             'Did you train the model?'
         )
 
+    print('Loading model from', latest_file)
+
     return latest_file
 
 

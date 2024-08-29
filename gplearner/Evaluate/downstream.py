@@ -221,7 +221,10 @@ class gpEval:
         gp_transformer.return_virtual_tokens = return_virtual_tokens
         gp_transformer.model.cond_to_shift = self.cond_to_shift
 
-        gp_transformer.model.cell_token_learner.num_virtual_tokens = num_virtual_tokens
+        if hasattr(gp_transformer.model, 'cell_token_learner'):
+            gp_transformer.model.cell_token_learner.num_virtual_tokens = (
+                num_virtual_tokens
+            )
 
         # Extract model
         self.model = gp_transformer.model

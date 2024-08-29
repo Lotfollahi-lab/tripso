@@ -435,11 +435,11 @@ def configure_callbacks(save_id, args):
         monitor='train/loss_step',
         dirpath=checkpoint_dir,
         filename=save_id,
-        save_top_k=3,
+        save_top_k=1,  # figure out how to get best checkpoint
         mode='min',
         save_last=True,
         # save every n steps --> issue if dataset has < n steps
-        every_n_train_steps=10,
+        every_n_train_steps=100,
     )
 
     lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='step')
