@@ -474,7 +474,7 @@ def configure_logger(args):
                 'use_flash': args['use_flash'],
                 'weight_decay': args['weight_decay'],
                 'num_virtual_tokens': args['num_virtual_tokens'],
-                'condition_on_z_mean': args['mean_emb_dict'] is not None,
+                # 'condition_on_z_mean': args['mean_emb_dict'] is not None,
                 'use_baseline_tk': args['use_baseline_tk'],
                 'use_onehot_wrapper': args['use_onehot_wrapper'],
                 'use_pos_emb': args['use_pos_emb'],

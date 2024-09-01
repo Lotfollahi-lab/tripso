@@ -84,7 +84,6 @@ def run_training_from_select_gps(
     sample_by: Optional[str] = 'cell_type',
     geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
     seed: Optional[int] = 0,
-    supervised_rem_var: Optional[str] = None,
     set_gpfinder_weight_decay: Optional[float] = None,
     calc_gp_loss: bool = True,
     use_go_similarity_loss: bool = False,
@@ -243,7 +242,11 @@ def run_training_from_select_gps(
 
     # Load gpdb
     gpdb = pd.read_csv(gpdb_path)
+    args['gpdb_new'] = gpdb
     args['gpdb'] = gpdb
+
+    gpdb_old = pd.read_csv(gpdb_old)
+    args['gpdb_old'] = gpdb_old
 
     # --------------------------------------------------
     # Other arguments for set up
@@ -288,17 +291,33 @@ def run_training_from_select_gps(
     # Train model
     ############################################################################
 
-    use_gp_similarity_loss = gp_similarity_file is not None
-
     model_v0 = configure_model_version(args, 'old')
+
+    print('')
+    print('*** succesfully loaded OLD model ***')
+    print('')
+
     model_v1 = configure_model_version(args, 'new')
+
+    print('')
+    print('*** succesfully loaded NEW model ***')
+    print('')
 
     gp_transformer_v0 = configure_lightning_module_version(
         model_v0, 'old', gp_similarity, args
     )
+
+    print('')
+    print('*** succesfully loaded OLD model and lightning module ***')
+    print('')
+
     gp_transformer = configure_lightning_module_version(
         model_v1, 'new', gp_similarity, args
     )
+
+    print('')
+    print('*** succesfully loaded NEW model and lightning module ***')
+    print('')
 
     # ----- Load pretrained model -------
 
@@ -401,20 +420,27 @@ def configure_model_version(args, tag):
     }
 
     global_params = {
-        'supervised_labels': args[f'supervised_labels_{tag}'],
         'global_attn_heads': args['global_attn_heads'],
-        'global_loss': args[f'global_loss_{tag}'],
         'global_masking_rate': args['global_masking_rate'],
         'global_n_blocks': args['global_n_blocks'],
         'reconstruction_loss': args['reconstruction_loss'],
         'total_n_genes': args['total_n_genes'],
     }
 
+    if tag == 'old':
+        global_params['supervised_labels'] = args['supervised_labels_old']
+        global_params['global_loss'] = args[f'global_loss_{tag}']
+        model_type = args['model_type_old']
+    else:
+        global_params['supervised_labels'] = args['supervised_labels']
+        global_params['global_loss'] = args['global_loss']
+        model_type = args['model_type']
+
     if args['num_virtual_tokens'] > 0:
-        if args['model_type'] == 'Base':
+        if args[f'model_type_{tag}'] == 'Base':
             model = gpTransformerBaseWithPrompt(**common_params)
 
-        elif args['model_type'] == 'Global':
+        elif args[f'model_type_{tag}'] == 'Global':
             model = gpTransformerGlobalWithPrompt(**common_params, **global_params)
 
         return model
@@ -425,15 +451,15 @@ def configure_model_version(args, tag):
         )
         return model
 
-    if args['model_type'] == 'Base':
+    if model_type == 'Base':
         model = gpTransformerBase(**common_params)
         return model
 
-    if args['model_type'] == 'Global':
+    if model_type == 'Global':
         model = gpTransformerGlobal(**common_params, **global_params)
         return model
 
-    if args['model_type'] == 'Mean':
+    if model_type == 'Mean':
         model = gfGlobal(**common_params)
         return model
 
@@ -441,8 +467,6 @@ def configure_model_version(args, tag):
 def configure_lightning_module_version(model, tag, gp_similarity, args):
     common_params = {
         'model': model,
-        # 'model_type': args['model_type'],
-        'global_loss': args['global_loss'],
         'lr': args['lr'],
         'finetune_lr': args['finetune_lr'],
         'use_finetune_lr': 'finetune' in args['global_training'],
@@ -464,6 +488,13 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
         'total_n_genes': args['total_n_genes'],
     }
 
+    if tag == 'old':
+        global_params['global_loss'] = args[f'global_loss_{tag}']
+        model_type = args['model_type_old']
+    else:
+        global_params['global_loss'] = args['global_loss']
+        model_type = args['model_type']
+
     prototype_params = {
         'num_prototypes': args['num_prototypes'],
         'lambda_prototype_loss': args['lambda_prototype_loss'],
@@ -473,10 +504,10 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
         pl_model = gpPrototypes(**common_params, **global_params, **prototype_params)
         return pl_model
 
-    if args['model_type'] == 'Base':
+    if model_type == 'Base':
         pl_model = gpBase(**common_params)
         return pl_model
 
-    if args['model_type'] == 'Global':
+    if model_type == 'Global':
         pl_model = gpGlobal(**common_params, **global_params)
         return pl_model

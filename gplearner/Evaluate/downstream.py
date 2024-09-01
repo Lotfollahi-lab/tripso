@@ -118,6 +118,10 @@ class gpEval:
         num_virtual_tokens: Optional[int] = 0,
         cond_to_shift: Optional[Dict] = None,
         return_classification_report: Optional[bool] = False,
+        # for gpmean only
+        # otherwise loaded from checkpoint
+        gene_format: Optional[str] = 'symbol',
+        gp_inputs: Optional[list] = None,
     ):
         # set seed for reproducibility
         np.random.seed(seed)
@@ -164,6 +168,18 @@ class gpEval:
         self.num_virtual_tokens = num_virtual_tokens
         self.cond_to_shift = cond_to_shift
 
+        # save hparam for gpmean
+        if model_type == 'Mean':
+            self.gpdb = gpdb
+            self.do_ensembl_conversion = gene_format != 'ensembl'
+
+            if gp_inputs is None:
+                self.gp_inputs = list(gpdb.columns)
+            elif isinstance(gp_inputs, str):
+                self.gp_inputs = [gp_inputs]
+            else:
+                self.gp_inputs = gp_inputs
+
         self.gp_transformer = self._init_trainer(
             return_classification_report=return_classification_report,
             hparam_save=self.hparam_save,
@@ -203,7 +219,14 @@ class gpEval:
 
         elif self.model_type == 'Mean':
             # only needs gp mean model set up in init
-            gp_transformer = gfGlobal(model=self.model)
+            # to do: option for passing custom token dictonary file?
+            # (those are the only args)
+            model = gfGlobal(
+                database=self.gpdb,
+                do_ensembl_conversion=self.do_ensembl_conversion,
+            )
+
+            gp_transformer = gpGlobal(model=model, global_loss='mean')
 
         # reset attributes overwritten by loading from checkpoint
         gp_transformer.return_gene_embeddings = return_gene_embeddings
@@ -217,8 +240,9 @@ class gpEval:
         gp_transformer.test_random_baseline = test_random_baseline
         gp_transformer.save_emb = save_emb
         gp_transformer.split_label = split_label
-        gp_transformer.model.multi_gp_encoder.num_virtual_tokens = num_virtual_tokens
         gp_transformer.return_virtual_tokens = return_virtual_tokens
+
+        gp_transformer.model.multi_gp_encoder.num_virtual_tokens = num_virtual_tokens
         gp_transformer.model.cond_to_shift = self.cond_to_shift
 
         if hasattr(gp_transformer.model, 'cell_token_learner'):

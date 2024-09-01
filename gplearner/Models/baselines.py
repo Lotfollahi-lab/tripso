@@ -141,8 +141,6 @@ class gpAverager(gpWrapper):
 class gfBaseline(gpTransformerBase):
     def __init__(
         self,
-        gene_counts_df,
-        num_heads,
         gene_token_path=TOKEN_DICTIONARY_FILE,
         gene_name_path=GENE_NAME_FILE,
         **kwargs,
@@ -154,7 +152,7 @@ class gfBaseline(gpTransformerBase):
             do_ensembl_conversion=self.do_ensembl_conversion,
             gp_latent_size=self.gp_latent_size,
             n_blocks=self.n_blocks,
-            num_heads=num_heads,
+            num_heads=self.num_heads,
             mgm_mask_ratio=self.mgm_mask_ratio,
             gene_token_path=gene_token_path,
             gene_name_path=gene_name_path,
@@ -193,20 +191,21 @@ class gfBaseline(gpTransformerBase):
 class gfGlobal(gpTransformerGlobal):
     def __init__(
         self,
-        gene_counts_df,
-        num_heads,
+        database,
+        do_ensembl_conversion,
         gene_token_path=TOKEN_DICTIONARY_FILE,
         gene_name_path=GENE_NAME_FILE,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(
+            database=database, do_ensembl_conversion=do_ensembl_conversion, **kwargs
+        )
 
         self.multi_gp_encoder = gpAverager(
             database=self.gpdb,
             do_ensembl_conversion=self.do_ensembl_conversion,
             gp_latent_size=self.gp_latent_size,
             n_blocks=self.n_blocks,
-            num_heads=num_heads,
             mgm_mask_ratio=self.mgm_mask_ratio,
             gene_token_path=gene_token_path,
             gene_name_path=gene_name_path,
@@ -214,11 +213,7 @@ class gfGlobal(gpTransformerGlobal):
             use_flash=False,
             model_type='Mean',
             learn_new_gp=False,
-            # MAY NEED TO UPDATE THIS
-            num_virtual_tokens=0,
-            virtual_tokens_label=None,
-            num_prompt_classes=0,
-            mean_emb_dict=None,
+            num_heads=1,
             use_pos_emb=False,
         )
 
