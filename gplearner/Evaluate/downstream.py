@@ -87,9 +87,6 @@ class gpEval:
         if None, defaults to all GP
     gene_counts_df : str
         Dataframe with the counts of each gene in the dataset
-    add_remaining_var : str
-        Whether to initalize new transformer block covering non GP genes
-        can be [None, 'top100', 'allgenes']
     supervised_labels : list
         Dict {label : num_classes} for supervised classification
     global_attn_heads : int
@@ -254,6 +251,20 @@ class gpEval:
         self.model = gp_transformer.model
         self.gp_inputs = gp_transformer.model.gp_inputs
 
+        # Disable flash for attention matrix generation
+        if return_attention:
+            for i, gp in enumerate(self.gp_inputs):
+                for j in range(self.model.multi_gp_encoder.n_blocks):
+                    self.model.multi_gp_encoder.encoder[i].blocks[
+                        j
+                    ].attn.use_flash = False
+
+            if hasattr(self.model, 'cell_token_learner'):
+                for j in range(self.model.cell_token_learner.n_blocks):
+                    self.model.cell_token_learner.encoder.blocks[
+                        j
+                    ].attn.use_flash = False
+
         return gp_transformer
 
     def generate_embeddings(self, split='train'):
@@ -272,8 +283,6 @@ class gpEval:
             folder=self.dataset_path,
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
-            # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
-            # -> comment out to reproduce original
             seed=self.seed,
         )
 
@@ -622,9 +631,6 @@ class gpEval:
         """
         os.chdir(self.output_dir)
 
-        if self.model.use_flash:
-            raise ValueError('Attention weights not available with flash attentiokn')
-
         if (gp != 'cell_token') and (gp not in self.gp_inputs):
             raise ValueError(f'{gp} must be one of "cell_token" or {self.gp_inputs}')
 
@@ -725,6 +731,7 @@ def calculate_gp_attribution_scores(
     obs_value,
     output_dir,
     gp,
+    block_n=-1,
     total_n_cells=None,
     task='classification',
     gpdb_ref_path=None,
@@ -862,7 +869,7 @@ def calculate_gp_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[-1].mlp)
+    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[block_n].mlp)
 
     attribution_scores = {}
     all_tokens = set()
@@ -948,7 +955,7 @@ def calculate_gp_attribution_scores(
             gene_df[ogp] = np.where(gene_df['ensembl'].isin(gpdb_og[ogp]), 1, 0)
 
     if output_file_name is None:
-        output_file_name = f'{gp}_attribution_scores_{obs_value}.csv'
+        output_file_name = f'{gp}_attribution_scores_{obs_value}_block_{block_n}.csv'
 
     gene_df.to_csv(
         os.path.join(output_dir, output_file_name),
@@ -975,8 +982,7 @@ def calculate_cell_token_attribution_scores(
     use_embedding=False,
     pretrained_emb=None,
     supervised_labels=None,
-    gene_counts_df=None,
-    add_remaining_var=None,
+    block_n=-1,
 ):
     # --------------------------
     # Set seed
@@ -1002,9 +1008,6 @@ def calculate_cell_token_attribution_scores(
     if gp_inputs is None:
         gp_inputs = list(gpdb.columns)
 
-    if gene_counts_df is not None:
-        gene_counts_df = pd.read_csv(gene_counts_df)
-
     emb_dm = iEmbDataModule(
         folder_path=emb_dataset_path,
         batch_size=1,
@@ -1012,7 +1015,6 @@ def calculate_cell_token_attribution_scores(
         meta_labels=obs_key,
         clf_label=obs_key,
         encode_covariate=encode_covariate,
-        add_remaining_var=add_remaining_var,
     )
 
     emb_dm.setup()
@@ -1106,13 +1108,9 @@ def calculate_cell_token_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[-1].mlp)
+    gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[block_n].mlp)
 
     attribution_scores = {}
-
-    # optionally add gpFinder
-    if add_remaining_var is not None:
-        gp_inputs.append('remaining_var')
 
     for g in gp_inputs:
         attribution_scores[g] = []
@@ -1168,7 +1166,9 @@ def calculate_cell_token_attribution_scores(
     attribution_df = pd.DataFrame(rows)
 
     attribution_df.to_csv(
-        os.path.join(output_dir, f'cell_token_attribution_scores_{obs_value}.csv'),
+        os.path.join(
+            output_dir, f'cell_token_attribution_scores_{obs_value}_block_{block_n}.csv'
+        ),
         index=False,
     )
 

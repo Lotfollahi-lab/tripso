@@ -98,7 +98,7 @@ def run_training_from_select_gps(
     use_baseline_tk: bool = False,
     tk_vocab_size: int = 0,
     gene2vec: Optional[str] = None,
-    use_pos_emb: bool = False,
+    use_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: bool = False,
     vocab_gene_names: Optional[str] = None,
     peft_config_path: Optional[str] = None,

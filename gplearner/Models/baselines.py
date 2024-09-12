@@ -35,22 +35,21 @@ class AverageNonZero(nn.Module):
             return output
 
         # extra argument only for compatibility with gpTransformerEncoder
-        # also for compatability: extract tensor if necessary
+        # also for compatibility: extract tensor if necessary
         if isinstance(x, dict):
             x = x['z']
 
-        # Replace zero values with NaN to facilitate ignoring them during averaging
-        x[x == 0] = float('nan')
+        # Count the non-zero values along the last dimension
+        non_zero_count = torch.sum(x != 0, dim=1, keepdim=True)
 
-        # Calculate the mean along the last dimension (embedding_dim)
-        # Specify 'nanmean' to ignore NaN values during the mean calculation
-        x = torch.nanmean(x, dim=1)
+        # Calculate the sum of non-zero values along the last dimension
+        non_zero_sum = torch.sum(x * (x != 0), dim=1)
 
-        # Replace NaN values with 0
-        x[torch.isnan(x)] = 0
+        # Avoid division by zero by setting count to 1 where it's zero
+        non_zero_count[non_zero_count == 0] = 1
 
-        if torch.isnan(x).any():
-            print('Found nan in line 1847 of AverageNZ')
+        # Compute the mean of non-zero values
+        x = non_zero_sum / non_zero_count.squeeze()
 
         # output
         output = {self.cls_tag: x, 'logits_lm': [], 'gene_labels': []}

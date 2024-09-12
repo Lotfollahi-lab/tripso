@@ -96,7 +96,7 @@ def run_training(
     val_check_interval: Optional[float] = 1.0,
     mean_emb_dict: Optional[str] = None,
     gene2vec: Optional[str] = None,
-    use_pos_emb: Optional[bool] = True,
+    use_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: Optional[bool] = False,
     vocab_gene_names: Optional[list] = None,
 ):

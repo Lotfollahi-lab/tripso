@@ -567,7 +567,6 @@ class iTxDataModule(txDataModule):
         gene_name_path=GENE_NAME_FILE,
         gf_layer_to_quant=-1,
         gene_counts_df=None,
-        add_remaining_var=None,
         hvg_list=None,
         gp_inputs=None,
         **kwargs,
@@ -587,55 +586,16 @@ class iTxDataModule(txDataModule):
         self.vocab_size = max(token_dict.values())
 
         # Set up encoded GP tokens
-        if add_remaining_var is None:
-            gp_tokens = get_gp_tokens(
-                gpdb[gp],
-                do_ensembl_conversion,
-                gp,
-                gene_token_path,
-                gene_name_path,
-            )
+        gp_tokens = get_gp_tokens(
+            gpdb[gp],
+            do_ensembl_conversion,
+            gp,
+            gene_token_path,
+            gene_name_path,
+        )
 
-            gp_tokens_tensor = torch.tensor(list(gp_tokens), dtype=torch.int32)
-            self.gp_tokens = gp_tokens_tensor
-
-        else:
-            all_gp_tokens = set()
-
-            gp_inputs_dm = gp_inputs.copy()
-            if 'remaining_var' in gp_inputs_dm:
-                gp_inputs_dm.remove('remaining_var')
-
-            for gpi in gp_inputs_dm:
-                gp_tokens = get_gp_tokens(
-                    gpi,
-                    gpdb,
-                    do_ensembl_conversion,
-                    gene_counts_df,
-                    gene_token_path,
-                    gene_name_path,
-                )
-
-                all_gp_tokens.update(gp_tokens)
-            non_gp_tokens = set(gene_counts_df['token'].tolist()) - all_gp_tokens
-
-            # convert to tokens
-            with open(gene_token_path, 'rb') as f:
-                token_dict = pickle.load(f)
-
-            with open(gene_name_path, 'rb') as f:
-                gene_name_dict = pickle.load(f)
-
-            if do_ensembl_conversion:
-                hvg_list = [gene_name_dict[x] for x in hvg_list if x in gene_name_dict]
-
-            hvg_list = [token_dict[x] for x in hvg_list if x in token_dict]
-
-            non_gp_tokens = non_gp_tokens.intersection(set(hvg_list))
-
-            tokens_tensor = torch.tensor(list(non_gp_tokens), dtype=torch.int32)
-
-            self.gp_tokens = tokens_tensor
+        gp_tokens_tensor = torch.tensor(list(gp_tokens), dtype=torch.int32)
+        self.gp_tokens = gp_tokens_tensor
 
     def custom_collate(self, batch):
         # Step 1 : tokenized dataset
@@ -976,8 +936,6 @@ class EmbDataModule(LightningDataModule):
                 else:
                     output_dict[m] = [d['obs'][m] for d in batch]
 
-        print('In emb datamodule')
-        print('output_dict:', output_dict.keys())
         for k, v in output_dict.items():
             if isinstance(v, torch.Tensor):
                 print(k, v.shape)
@@ -988,13 +946,12 @@ class EmbDataModule(LightningDataModule):
 
 
 class iEmbDataModule(EmbDataModule):
-    def __init__(self, gp_inputs, add_remaining_var, **kwargs):
+    def __init__(self, gp_inputs, **kwargs):
         super().__init__(**kwargs)
 
         if isinstance(gp_inputs, str):
             gp_inputs = [gp_inputs]
-        if add_remaining_var is not None:
-            gp_inputs = gp_inputs + ['remaining_var']
+
         self.gp_inputs = gp_inputs
 
     def custom_collate(self, batch):
