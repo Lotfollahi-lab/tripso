@@ -1812,10 +1812,19 @@ class EmbEvaluatorHead(nn.Module):
         self,
         emb_dim: int,
         n_classes: int,
+        num_condition_cat: int = 0,
     ):
         super().__init__()
 
-        self.clf_head = nn.Linear(emb_dim, n_classes)
+        if num_condition_cat > 0:
+            self.clf_head = nn.Sequential(
+                nn.Linear(emb_dim + num_condition_cat, emb_dim),
+                nn.ReLU(),
+                nn.Linear(emb_dim, n_classes),
+            )
+
+        else:
+            self.clf_head = nn.Linear(emb_dim, n_classes)
 
     def forward(self, x):
         return self.clf_head(x)

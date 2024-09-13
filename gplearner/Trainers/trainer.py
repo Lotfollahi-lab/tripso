@@ -1166,12 +1166,21 @@ class gpPrototypes(gpGlobal):
 
 class EmbEvaluator(pl.LightningModule):
     def __init__(
-        self, n_classes, emb_dim, task, lr, emb_label, y_label, output_dir, filter_tag
+        self,
+        n_classes,
+        emb_dim,
+        task,
+        lr,
+        emb_label,
+        y_label,
+        output_dir,
+        filter_tag,
+        num_condition_cat=0,
     ):
         super().__init__()
         self.save_hyperparameters()
 
-        self.evaluator_head = EmbEvaluatorHead(emb_dim, n_classes)
+        self.evaluator_head = EmbEvaluatorHead(emb_dim, n_classes, num_condition_cat)
         self.emb_label = emb_label
 
         if task == 'classification':

@@ -311,6 +311,7 @@ class gpEval:
         filter_value=None,
         encode_covariate=False,
         filter_tag=None,
+        condition_variable=None,
         # development
         frac_for_training=1,
         mode=None,
@@ -363,6 +364,7 @@ class gpEval:
             encode_covariate=encode_covariate,
             frac_for_training=frac_for_training,
             mode=mode,
+            condition_variable=condition_variable,
         )
 
         emb_dm.setup()
@@ -376,6 +378,7 @@ class gpEval:
             y_label=y_label,
             output_dir=output_dir,
             filter_tag=filter_tag,
+            num_condition_cat=emb_dm.num_condition_classes,
         )
 
         logger = CSVLogger(

@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import scanpy as sc
 import torch
+import torch.nn.functional as F
 from datasets import load_from_disk
 from geneformer.in_silico_perturber import pad_tensor_list
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
@@ -180,6 +181,7 @@ class EmbDataset(Dataset):
         clf_label=None,  # classification label
         encode_covariates=False,
         frac_for_training=1,
+        condition_variable=None,
     ):
         self.data_type = data_type
         if self.data_type == 'dataset':
@@ -199,11 +201,17 @@ class EmbDataset(Dataset):
                 )
 
             self.emb = emb
+
             if clf_label is not None:
                 unique_labels = emb.unique(clf_label)
                 self.num_classes = len(unique_labels)
                 if encode_covariates:
                     self.label_dict = {n: i for i, n in enumerate(unique_labels)}
+
+            if condition_variable is not None:
+                self.num_condition_classes = len(emb.unique(condition_variable))
+            else:
+                self.num_condition_classes = 0
 
         elif self.data_type == 'h5ad':
             emb = sc.read_h5ad(folder_path)
@@ -230,6 +238,11 @@ class EmbDataset(Dataset):
                     self.label_dict = {
                         n: i for i, n in enumerate(emb.obs[clf_label].unique())
                     }
+
+            if condition_variable is not None:
+                self.num_condition_classes = len(emb.obs[condition_variable].unique())
+            else:
+                self.num_condition_classes = 0
 
         else:
             raise NotImplementedError('Data type not recognized')
@@ -664,6 +677,7 @@ class EmbDataModule(LightningDataModule):
         filter_value=None,
         clf_label=None,
         encode_covariate=False,
+        condition_variable=None,
         # for development
         frac_for_training=1,
         mode=None,
@@ -685,6 +699,7 @@ class EmbDataModule(LightningDataModule):
         self.filter_value = filter_value
         self.clf_label = clf_label
         self.encode_covariate = encode_covariate
+        self.condition_variable = condition_variable
         self.frac_for_training = frac_for_training
         self.mode = mode
 
@@ -714,19 +729,25 @@ class EmbDataModule(LightningDataModule):
             clf_label=self.clf_label,
             encode_covariates=self.encode_covariate,
             frac_for_training=self.frac_for_training,
+            condition_variable=self.condition_variable,
         )
+
+        if self.condition_variable is not None:
+            self.num_condition_classes = self.train_dataset.num_condition_classes
 
         self.val_dataset = EmbDataset(
             os.path.join(self.folder_path, f'val_set{tag}'),
             data_type=self.data_type,
             filter_key=self.filter_key,
             filter_value=self.filter_value,
+            condition_variable=self.condition_variable,
         )
         self.test_dataset = EmbDataset(
             os.path.join(self.folder_path, f'test_set{tag}'),
             data_type=self.data_type,
             filter_key=self.filter_key,
             filter_value=self.filter_value,
+            condition_variable=self.condition_variable,
         )
 
         if self.clf_label is not None:
@@ -835,6 +856,18 @@ class EmbDataModule(LightningDataModule):
                         else:
                             emb.append(torch.tensor(d[self.emb_to_keep]))
 
+                # Optionally condition on a variable
+                if self.condition_variable is not None:
+                    condition = [d[self.condition_variable] for d in batch]
+
+                    # do one hot encoding
+                    condition = torch.tensor(condition)
+                    condition = F.one_hot(
+                        condition, num_classes=self.num_condition_classes
+                    )
+
+                    emb = [torch.cat([e, c]) for e, c in zip(emb, condition)]
+
                 output_dict = {
                     self.emb_to_keep: torch.stack(emb),
                 }
@@ -935,12 +968,6 @@ class EmbDataModule(LightningDataModule):
 
                 else:
                     output_dict[m] = [d['obs'][m] for d in batch]
-
-        for k, v in output_dict.items():
-            if isinstance(v, torch.Tensor):
-                print(k, v.shape)
-            else:
-                print(k, len(v))
 
         return output_dict
 
