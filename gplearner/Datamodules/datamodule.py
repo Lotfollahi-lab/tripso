@@ -734,6 +734,8 @@ class EmbDataModule(LightningDataModule):
 
         if self.condition_variable is not None:
             self.num_condition_classes = self.train_dataset.num_condition_classes
+        else:
+            self.num_condition_classes = 0
 
         self.val_dataset = EmbDataset(
             os.path.join(self.folder_path, f'val_set{tag}'),

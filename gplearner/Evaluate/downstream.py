@@ -17,6 +17,7 @@ from captum.attr import GuidedGradCam
 from datasets import load_from_disk
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
+from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 
 from ..Datamodules.datamodule import (
@@ -267,7 +268,7 @@ class gpEval:
 
         return gp_transformer
 
-    def generate_embeddings(self, split='train'):
+    def generate_embeddings(self, split='train', precision=16):
         '''
         Save embeddings as Dataset
         '''
@@ -286,7 +287,9 @@ class gpEval:
             seed=self.seed,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision=precision
+        )
 
         trainer.test(gp_transformer, txdata)
 
@@ -1234,6 +1237,7 @@ def visualize_with_gene_exp(
     obs_key2=None,
     obs_value2=None,
     return_adata=False,
+    scale=False,
 ):
     """
     UMAP of GP embeddings
@@ -1285,6 +1289,10 @@ def visualize_with_gene_exp(
             adata = adata[adata.obs[obs_key2].isin(obs_value2)]
 
         gx = gene_exp[adata.obs.index, :]
+
+        # Optionally scale expr to 0-1
+        if scale:
+            gx.X = MinMaxScaler().fit_transform(gx.X.toarray())
 
         adata.obs[f'{gene_name}_exp'] = gx.X.toarray().flatten()
 

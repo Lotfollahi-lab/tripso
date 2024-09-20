@@ -64,11 +64,7 @@ class iGpWrapper(nn.Module):
             return_gene_embeddings=False,
         )
 
-        print('inside wrapper', output)
-
         logits = self.clf_layer(output['cls'])
-
-        print('logits', logits.shape)
 
         return logits
 
