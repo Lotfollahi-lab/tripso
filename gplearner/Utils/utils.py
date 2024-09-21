@@ -283,7 +283,7 @@ def encode_labels(input_data, input_col, new_col):
     return labeled_dataset
 
 
-def do_balanced_downsampling(class_values, input_data, n_cells_per_class):
+def do_balanced_downsampling(class_values, input_data, n_cells_per_class=None):
     """
     Perform balanced subsampling of input data
     for Huggingface dataset class
@@ -291,6 +291,9 @@ def do_balanced_downsampling(class_values, input_data, n_cells_per_class):
     """
     # Calculate class frequencies
     class_counts = Counter(class_values)
+
+    if n_cells_per_class is None:
+        n_cells_per_class = np.array(list(class_counts.values())).min()
 
     # Perform balanced subsampling
     balanced_samples = []
@@ -305,13 +308,16 @@ def do_balanced_downsampling(class_values, input_data, n_cells_per_class):
     return input_data
 
 
-def do_balanced_downsampling_anndata(adata, subsample_by, n_cells_per_class):
+def do_balanced_downsampling_anndata(adata, subsample_by, n_cells_per_class=None):
     """
     Perform balanced subsampling of input data
 
     """
     # Calculate class frequencies
     class_counts = adata.obs[subsample_by].value_counts()
+
+    if n_cells_per_class is None:
+        n_cells_per_class = class_counts.min()
 
     # Perform balanced subsampling
     balanced_samples = []

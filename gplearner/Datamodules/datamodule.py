@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import scanpy as sc
 import torch
+import torch.nn.functional as F
 from datasets import load_from_disk
 from geneformer.in_silico_perturber import pad_tensor_list
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
@@ -180,6 +181,7 @@ class EmbDataset(Dataset):
         clf_label=None,  # classification label
         encode_covariates=False,
         frac_for_training=1,
+        condition_variable=None,
     ):
         self.data_type = data_type
         if self.data_type == 'dataset':
@@ -199,11 +201,17 @@ class EmbDataset(Dataset):
                 )
 
             self.emb = emb
+
             if clf_label is not None:
                 unique_labels = emb.unique(clf_label)
                 self.num_classes = len(unique_labels)
                 if encode_covariates:
                     self.label_dict = {n: i for i, n in enumerate(unique_labels)}
+
+            if condition_variable is not None:
+                self.num_condition_classes = len(emb.unique(condition_variable))
+            else:
+                self.num_condition_classes = 0
 
         elif self.data_type == 'h5ad':
             emb = sc.read_h5ad(folder_path)
@@ -230,6 +238,11 @@ class EmbDataset(Dataset):
                     self.label_dict = {
                         n: i for i, n in enumerate(emb.obs[clf_label].unique())
                     }
+
+            if condition_variable is not None:
+                self.num_condition_classes = len(emb.obs[condition_variable].unique())
+            else:
+                self.num_condition_classes = 0
 
         else:
             raise NotImplementedError('Data type not recognized')
@@ -567,7 +580,6 @@ class iTxDataModule(txDataModule):
         gene_name_path=GENE_NAME_FILE,
         gf_layer_to_quant=-1,
         gene_counts_df=None,
-        add_remaining_var=None,
         hvg_list=None,
         gp_inputs=None,
         **kwargs,
@@ -587,55 +599,16 @@ class iTxDataModule(txDataModule):
         self.vocab_size = max(token_dict.values())
 
         # Set up encoded GP tokens
-        if add_remaining_var is None:
-            gp_tokens = get_gp_tokens(
-                gpdb[gp],
-                do_ensembl_conversion,
-                gp,
-                gene_token_path,
-                gene_name_path,
-            )
+        gp_tokens = get_gp_tokens(
+            gpdb[gp],
+            do_ensembl_conversion,
+            gp,
+            gene_token_path,
+            gene_name_path,
+        )
 
-            gp_tokens_tensor = torch.tensor(list(gp_tokens), dtype=torch.int32)
-            self.gp_tokens = gp_tokens_tensor
-
-        else:
-            all_gp_tokens = set()
-
-            gp_inputs_dm = gp_inputs.copy()
-            if 'remaining_var' in gp_inputs_dm:
-                gp_inputs_dm.remove('remaining_var')
-
-            for gpi in gp_inputs_dm:
-                gp_tokens = get_gp_tokens(
-                    gpi,
-                    gpdb,
-                    do_ensembl_conversion,
-                    gene_counts_df,
-                    gene_token_path,
-                    gene_name_path,
-                )
-
-                all_gp_tokens.update(gp_tokens)
-            non_gp_tokens = set(gene_counts_df['token'].tolist()) - all_gp_tokens
-
-            # convert to tokens
-            with open(gene_token_path, 'rb') as f:
-                token_dict = pickle.load(f)
-
-            with open(gene_name_path, 'rb') as f:
-                gene_name_dict = pickle.load(f)
-
-            if do_ensembl_conversion:
-                hvg_list = [gene_name_dict[x] for x in hvg_list if x in gene_name_dict]
-
-            hvg_list = [token_dict[x] for x in hvg_list if x in token_dict]
-
-            non_gp_tokens = non_gp_tokens.intersection(set(hvg_list))
-
-            tokens_tensor = torch.tensor(list(non_gp_tokens), dtype=torch.int32)
-
-            self.gp_tokens = tokens_tensor
+        gp_tokens_tensor = torch.tensor(list(gp_tokens), dtype=torch.int32)
+        self.gp_tokens = gp_tokens_tensor
 
     def custom_collate(self, batch):
         # Step 1 : tokenized dataset
@@ -704,6 +677,7 @@ class EmbDataModule(LightningDataModule):
         filter_value=None,
         clf_label=None,
         encode_covariate=False,
+        condition_variable=None,
         # for development
         frac_for_training=1,
         mode=None,
@@ -725,6 +699,7 @@ class EmbDataModule(LightningDataModule):
         self.filter_value = filter_value
         self.clf_label = clf_label
         self.encode_covariate = encode_covariate
+        self.condition_variable = condition_variable
         self.frac_for_training = frac_for_training
         self.mode = mode
 
@@ -754,19 +729,27 @@ class EmbDataModule(LightningDataModule):
             clf_label=self.clf_label,
             encode_covariates=self.encode_covariate,
             frac_for_training=self.frac_for_training,
+            condition_variable=self.condition_variable,
         )
+
+        if self.condition_variable is not None:
+            self.num_condition_classes = self.train_dataset.num_condition_classes
+        else:
+            self.num_condition_classes = 0
 
         self.val_dataset = EmbDataset(
             os.path.join(self.folder_path, f'val_set{tag}'),
             data_type=self.data_type,
             filter_key=self.filter_key,
             filter_value=self.filter_value,
+            condition_variable=self.condition_variable,
         )
         self.test_dataset = EmbDataset(
             os.path.join(self.folder_path, f'test_set{tag}'),
             data_type=self.data_type,
             filter_key=self.filter_key,
             filter_value=self.filter_value,
+            condition_variable=self.condition_variable,
         )
 
         if self.clf_label is not None:
@@ -875,6 +858,18 @@ class EmbDataModule(LightningDataModule):
                         else:
                             emb.append(torch.tensor(d[self.emb_to_keep]))
 
+                # Optionally condition on a variable
+                if self.condition_variable is not None:
+                    condition = [d[self.condition_variable] for d in batch]
+
+                    # do one hot encoding
+                    condition = torch.tensor(condition)
+                    condition = F.one_hot(
+                        condition, num_classes=self.num_condition_classes
+                    )
+
+                    emb = [torch.cat([e, c]) for e, c in zip(emb, condition)]
+
                 output_dict = {
                     self.emb_to_keep: torch.stack(emb),
                 }
@@ -976,25 +971,16 @@ class EmbDataModule(LightningDataModule):
                 else:
                     output_dict[m] = [d['obs'][m] for d in batch]
 
-        print('In emb datamodule')
-        print('output_dict:', output_dict.keys())
-        for k, v in output_dict.items():
-            if isinstance(v, torch.Tensor):
-                print(k, v.shape)
-            else:
-                print(k, len(v))
-
         return output_dict
 
 
 class iEmbDataModule(EmbDataModule):
-    def __init__(self, gp_inputs, add_remaining_var, **kwargs):
+    def __init__(self, gp_inputs, **kwargs):
         super().__init__(**kwargs)
 
         if isinstance(gp_inputs, str):
             gp_inputs = [gp_inputs]
-        if add_remaining_var is not None:
-            gp_inputs = gp_inputs + ['remaining_var']
+
         self.gp_inputs = gp_inputs
 
     def custom_collate(self, batch):

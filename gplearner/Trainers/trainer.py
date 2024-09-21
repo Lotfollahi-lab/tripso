@@ -240,7 +240,7 @@ class gpBase(pl.LightningModule):
         self.emb_dataset = None
         self.gene_dataset = None
         self.token_dataset = None
-        self.attn_adata = None
+        self.attn_adata_holder: List[ad.AnnData] = []
 
     def forward(self, x, masking):
         out = self.model(
@@ -408,10 +408,12 @@ class gpBase(pl.LightningModule):
                 var=pd.DataFrame(index=list(output.keys())),
             )
 
-            if self.attn_adata is None:
-                self.attn_adata = adata
-            else:
-                self.attn_data = ad.concat([self.attn_adata, adata])
+            self.attn_adata_holder.append(adata)
+
+            # if self.attn_adata_holder is None:
+            #     self.attn_adata_holder = adata
+            # else:
+            #     self.attn_adata_holder = ad.concat([self.attn_adata_holder, adata])
 
             return None
 
@@ -435,7 +437,8 @@ class gpBase(pl.LightningModule):
         if self.return_attention:
             output_path = os.path.join(self.output_dir, 'attention')
             os.makedirs(output_path, exist_ok=True)
-            self.attn_adata.write_h5ad(
+            adata = ad.concat(self.attn_adata_holder)
+            adata.write_h5ad(
                 os.path.join(
                     output_path, f'{self.gp}_attention_{self.split_label}_set.h5ad'
                 )
@@ -873,6 +876,7 @@ class gpGlobal(gpBase):
     def test_step(self, batch, batch_idx):
         if self.save_emb or self.return_gene_embeddings or self.return_attention:
             super().test_step(batch, batch_idx)
+            return None
 
         if self.global_loss == 'supervised':
             # track metadata for evaluation
@@ -911,6 +915,7 @@ class gpGlobal(gpBase):
     def on_test_epoch_end(self):
         if self.save_emb or self.return_gene_embeddings or self.return_attention:
             super().on_test_epoch_end()
+            return None
 
         if self.test_random_baseline:
             true_counts = torch.cat(self.test_true_counts_list).float()
@@ -1161,12 +1166,21 @@ class gpPrototypes(gpGlobal):
 
 class EmbEvaluator(pl.LightningModule):
     def __init__(
-        self, n_classes, emb_dim, task, lr, emb_label, y_label, output_dir, filter_tag
+        self,
+        n_classes,
+        emb_dim,
+        task,
+        lr,
+        emb_label,
+        y_label,
+        output_dir,
+        filter_tag,
+        num_condition_cat=0,
     ):
         super().__init__()
         self.save_hyperparameters()
 
-        self.evaluator_head = EmbEvaluatorHead(emb_dim, n_classes)
+        self.evaluator_head = EmbEvaluatorHead(emb_dim, n_classes, num_condition_cat)
         self.emb_label = emb_label
 
         if task == 'classification':

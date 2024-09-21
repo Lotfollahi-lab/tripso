@@ -151,7 +151,7 @@ def evaluate_mmd(adata, pred_adata, condition_key, de_genes_dict=None):
             )
             mmd_list[-1]['mmd_deg'] = mmd_deg
 
-    mmd_df = pd.DataFrame(mmd_list).set_index('condition')
+    mmd_df = pd.DataFrame(mmd_list).set_index(condition_key)
 
     return mmd_df
 
@@ -189,7 +189,7 @@ def evaluate_emd(true_data, pred_data, condition_key=None, de_genes_dict=None):
                     )
                 emd_list[-1]['emd_deg'] = np.mean(wd_deg)
 
-        emd_df = pd.DataFrame(emd_list).set_index('condition')
+        emd_df = pd.DataFrame(emd_list).set_index(condition_key)
     else:
         true_data_ = true_data.copy()
         pred_data_ = pred_data.copy()

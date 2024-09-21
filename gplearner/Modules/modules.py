@@ -235,6 +235,24 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+class LearntPositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_seq_length):
+        super().__init__()
+        self.position_embeddings = nn.Embedding(max_seq_length, d_model)
+        # Register a buffer for position IDs,
+        # precomputed for the maximum sequence length
+        position_ids = torch.arange(max_seq_length).expand((1, -1))
+        self.register_buffer('position_ids', position_ids)
+
+    def forward(self, x, position_ids=None):
+        # TODO: register buffer
+        if position_ids is None:
+            position_ids = self.position_ids[:, : x.size(1)]
+        position_ids = position_ids.expand(x.size(0), -1)
+
+        return x + self.position_embeddings(position_ids)
+
+
 class gpTransformerEncoder(nn.Module):
     """GP Transformer main block"""
 
@@ -252,7 +270,7 @@ class gpTransformerEncoder(nn.Module):
         attn_drop_rate=0.0,  # passed to attention module (attn_drop)
         drop_path_rate=0.0,  # no effect if only 1 block
         norm_layer=nn.LayerNorm,
-        use_pos_emb=True,
+        use_pos_emb='sin_cos',
         vocab_size=None,
         use_flash=False,
     ):
@@ -314,9 +332,16 @@ class gpTransformerEncoder(nn.Module):
 
         self.apply(self._init_weights)
 
-        self.pos_embed = PositionalEncoding(
-            d_model=embed_dim, dropout=drop_rate, max_len=3000
-        )
+        if self.use_pos_emb == 'sin_cos':
+            self.pos_embed = PositionalEncoding(
+                d_model=embed_dim,
+                dropout=drop_rate,
+                max_len=3000,  # 2048
+            )
+        elif self.use_pos_emb == 'learned':
+            self.pos_embed = LearntPositionalEncoding(
+                d_model=embed_dim, max_seq_length=2048
+            )
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -369,7 +394,7 @@ class gpTransformerEncoder(nn.Module):
         gene_labels = torch.cat((cls_label, gene_labels), dim=1)
 
         # add positional encoding to each token
-        if self.use_pos_emb:
+        if self.use_pos_emb is not None:
             x = self.pos_embed(x)
 
         return self.pos_drop(x), gene_labels

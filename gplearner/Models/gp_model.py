@@ -770,7 +770,7 @@ class gpTransformerBase(nn.Module):
         use_baseline_tk=False,
         tk_vocab_size=0,
         gene2vec=None,
-        use_pos_emb=True,
+        use_pos_emb='sin_cos',
         use_onehot_wrapper=False,
         vocab_gene_names=None,
     ):
@@ -1737,7 +1737,7 @@ class gpTransformerBaseWithPrompt(gpTransformerBase):
         num_heads=1,
         model_type='Base',
         learn_new_gp=False,
-        use_pos_emb=True,
+        use_pos_emb='sin_cos',
         **kwargs,
     ):
         super().__init__(
@@ -1746,7 +1746,7 @@ class gpTransformerBaseWithPrompt(gpTransformerBase):
             num_heads=1,
             model_type='Base',
             learn_new_gp=False,
-            use_pos_emb=True,
+            use_pos_emb=use_pos_emb,
             **kwargs,
         )
 
@@ -1812,10 +1812,19 @@ class EmbEvaluatorHead(nn.Module):
         self,
         emb_dim: int,
         n_classes: int,
+        num_condition_cat: int = 0,
     ):
         super().__init__()
 
-        self.clf_head = nn.Linear(emb_dim, n_classes)
+        if num_condition_cat > 0:
+            self.clf_head = nn.Sequential(
+                nn.Linear(emb_dim + num_condition_cat, emb_dim),
+                nn.ReLU(),
+                nn.Linear(emb_dim, n_classes),
+            )
+
+        else:
+            self.clf_head = nn.Linear(emb_dim, n_classes)
 
     def forward(self, x):
         return self.clf_head(x)

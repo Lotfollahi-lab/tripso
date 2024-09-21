@@ -96,9 +96,10 @@ def run_training(
     val_check_interval: Optional[float] = 1.0,
     mean_emb_dict: Optional[str] = None,
     gene2vec: Optional[str] = None,
-    use_pos_emb: Optional[bool] = True,
+    use_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: Optional[bool] = False,
     vocab_gene_names: Optional[list] = None,
+    precision='bf16-mixed',
 ):
     """
     Wrapper function for training gpLearner model
@@ -328,7 +329,7 @@ def run_training(
         logger=wandb_logger,
         devices=-1,
         accelerator='auto',
-        precision='bf16-mixed' if strategy == 'ddp_find_unused_parameters_true' else 16,
+        precision=precision,
         # profiler='advanced',
         num_nodes=num_nodes,
         strategy=strategy,
@@ -474,10 +475,11 @@ def configure_logger(args):
                 'use_flash': args['use_flash'],
                 'weight_decay': args['weight_decay'],
                 'num_virtual_tokens': args['num_virtual_tokens'],
-                'condition_on_z_mean': args['mean_emb_dict'] is not None,
+                # 'condition_on_z_mean': args['mean_emb_dict'] is not None,
                 'use_baseline_tk': args['use_baseline_tk'],
                 'use_onehot_wrapper': args['use_onehot_wrapper'],
                 'use_pos_emb': args['use_pos_emb'],
+                'precision': args['precision'],
             }
         )
 

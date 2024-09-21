@@ -17,6 +17,7 @@ from captum.attr import GuidedGradCam
 from datasets import load_from_disk
 from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
+from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 
 from ..Datamodules.datamodule import (
@@ -87,9 +88,6 @@ class gpEval:
         if None, defaults to all GP
     gene_counts_df : str
         Dataframe with the counts of each gene in the dataset
-    add_remaining_var : str
-        Whether to initalize new transformer block covering non GP genes
-        can be [None, 'top100', 'allgenes']
     supervised_labels : list
         Dict {label : num_classes} for supervised classification
     global_attn_heads : int
@@ -118,6 +116,10 @@ class gpEval:
         num_virtual_tokens: Optional[int] = 0,
         cond_to_shift: Optional[Dict] = None,
         return_classification_report: Optional[bool] = False,
+        # for gpmean only
+        # otherwise loaded from checkpoint
+        gene_format: Optional[str] = 'symbol',
+        gp_inputs: Optional[list] = None,
     ):
         # set seed for reproducibility
         np.random.seed(seed)
@@ -164,6 +166,18 @@ class gpEval:
         self.num_virtual_tokens = num_virtual_tokens
         self.cond_to_shift = cond_to_shift
 
+        # save hparam for gpmean
+        if model_type == 'Mean':
+            self.gpdb = gpdb
+            self.do_ensembl_conversion = gene_format != 'ensembl'
+
+            if gp_inputs is None:
+                self.gp_inputs = list(gpdb.columns)
+            elif isinstance(gp_inputs, str):
+                self.gp_inputs = [gp_inputs]
+            else:
+                self.gp_inputs = gp_inputs
+
         self.gp_transformer = self._init_trainer(
             return_classification_report=return_classification_report,
             hparam_save=self.hparam_save,
@@ -203,7 +217,14 @@ class gpEval:
 
         elif self.model_type == 'Mean':
             # only needs gp mean model set up in init
-            gp_transformer = gfGlobal(model=self.model)
+            # to do: option for passing custom token dictonary file?
+            # (those are the only args)
+            model = gfGlobal(
+                database=self.gpdb,
+                do_ensembl_conversion=self.do_ensembl_conversion,
+            )
+
+            gp_transformer = gpGlobal(model=model, global_loss='mean')
 
         # reset attributes overwritten by loading from checkpoint
         gp_transformer.return_gene_embeddings = return_gene_embeddings
@@ -217,8 +238,9 @@ class gpEval:
         gp_transformer.test_random_baseline = test_random_baseline
         gp_transformer.save_emb = save_emb
         gp_transformer.split_label = split_label
-        gp_transformer.model.multi_gp_encoder.num_virtual_tokens = num_virtual_tokens
         gp_transformer.return_virtual_tokens = return_virtual_tokens
+
+        gp_transformer.model.multi_gp_encoder.num_virtual_tokens = num_virtual_tokens
         gp_transformer.model.cond_to_shift = self.cond_to_shift
 
         if hasattr(gp_transformer.model, 'cell_token_learner'):
@@ -230,9 +252,23 @@ class gpEval:
         self.model = gp_transformer.model
         self.gp_inputs = gp_transformer.model.gp_inputs
 
+        # Disable flash for attention matrix generation
+        if return_attention:
+            for i, gp in enumerate(self.gp_inputs):
+                for j in range(self.model.multi_gp_encoder.n_blocks):
+                    self.model.multi_gp_encoder.encoder[i].blocks[
+                        j
+                    ].attn.use_flash = False
+
+            if hasattr(self.model, 'cell_token_learner'):
+                for j in range(self.model.cell_token_learner.n_blocks):
+                    self.model.cell_token_learner.encoder.blocks[
+                        j
+                    ].attn.use_flash = False
+
         return gp_transformer
 
-    def generate_embeddings(self, split='train'):
+    def generate_embeddings(self, split='train', precision=16):
         '''
         Save embeddings as Dataset
         '''
@@ -248,12 +284,12 @@ class gpEval:
             folder=self.dataset_path,
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
-            # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
-            # -> comment out to reproduce original
             seed=self.seed,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision=precision
+        )
 
         trainer.test(gp_transformer, txdata)
 
@@ -278,6 +314,7 @@ class gpEval:
         filter_value=None,
         encode_covariate=False,
         filter_tag=None,
+        condition_variable=None,
         # development
         frac_for_training=1,
         mode=None,
@@ -330,6 +367,7 @@ class gpEval:
             encode_covariate=encode_covariate,
             frac_for_training=frac_for_training,
             mode=mode,
+            condition_variable=condition_variable,
         )
 
         emb_dm.setup()
@@ -343,6 +381,7 @@ class gpEval:
             y_label=y_label,
             output_dir=output_dir,
             filter_tag=filter_tag,
+            num_condition_cat=emb_dm.num_condition_classes,
         )
 
         logger = CSVLogger(
@@ -598,9 +637,6 @@ class gpEval:
         """
         os.chdir(self.output_dir)
 
-        if self.model.use_flash:
-            raise ValueError('Attention weights not available with flash attentiokn')
-
         if (gp != 'cell_token') and (gp not in self.gp_inputs):
             raise ValueError(f'{gp} must be one of "cell_token" or {self.gp_inputs}')
 
@@ -701,6 +737,7 @@ def calculate_gp_attribution_scores(
     obs_value,
     output_dir,
     gp,
+    block_n=-1,
     total_n_cells=None,
     task='classification',
     gpdb_ref_path=None,
@@ -838,7 +875,7 @@ def calculate_gp_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[-1].mlp)
+    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[block_n].mlp)
 
     attribution_scores = {}
     all_tokens = set()
@@ -924,7 +961,7 @@ def calculate_gp_attribution_scores(
             gene_df[ogp] = np.where(gene_df['ensembl'].isin(gpdb_og[ogp]), 1, 0)
 
     if output_file_name is None:
-        output_file_name = f'{gp}_attribution_scores_{obs_value}.csv'
+        output_file_name = f'{gp}_attribution_scores_{obs_value}_block_{block_n}.csv'
 
     gene_df.to_csv(
         os.path.join(output_dir, output_file_name),
@@ -951,8 +988,7 @@ def calculate_cell_token_attribution_scores(
     use_embedding=False,
     pretrained_emb=None,
     supervised_labels=None,
-    gene_counts_df=None,
-    add_remaining_var=None,
+    block_n=-1,
 ):
     # --------------------------
     # Set seed
@@ -978,9 +1014,6 @@ def calculate_cell_token_attribution_scores(
     if gp_inputs is None:
         gp_inputs = list(gpdb.columns)
 
-    if gene_counts_df is not None:
-        gene_counts_df = pd.read_csv(gene_counts_df)
-
     emb_dm = iEmbDataModule(
         folder_path=emb_dataset_path,
         batch_size=1,
@@ -988,7 +1021,6 @@ def calculate_cell_token_attribution_scores(
         meta_labels=obs_key,
         clf_label=obs_key,
         encode_covariate=encode_covariate,
-        add_remaining_var=add_remaining_var,
     )
 
     emb_dm.setup()
@@ -1082,13 +1114,9 @@ def calculate_cell_token_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[-1].mlp)
+    gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[block_n].mlp)
 
     attribution_scores = {}
-
-    # optionally add gpFinder
-    if add_remaining_var is not None:
-        gp_inputs.append('remaining_var')
 
     for g in gp_inputs:
         attribution_scores[g] = []
@@ -1144,7 +1172,9 @@ def calculate_cell_token_attribution_scores(
     attribution_df = pd.DataFrame(rows)
 
     attribution_df.to_csv(
-        os.path.join(output_dir, f'cell_token_attribution_scores_{obs_value}.csv'),
+        os.path.join(
+            output_dir, f'cell_token_attribution_scores_{obs_value}_block_{block_n}.csv'
+        ),
         index=False,
     )
 
@@ -1207,6 +1237,7 @@ def visualize_with_gene_exp(
     obs_key2=None,
     obs_value2=None,
     return_adata=False,
+    scale=False,
 ):
     """
     UMAP of GP embeddings
@@ -1258,6 +1289,10 @@ def visualize_with_gene_exp(
             adata = adata[adata.obs[obs_key2].isin(obs_value2)]
 
         gx = gene_exp[adata.obs.index, :]
+
+        # Optionally scale expr to 0-1
+        if scale:
+            gx.X = MinMaxScaler().fit_transform(gx.X.toarray())
 
         adata.obs[f'{gene_name}_exp'] = gx.X.toarray().flatten()
 
