@@ -26,6 +26,7 @@ from ..Datamodules.datamodule import (
     iTxDataModule,
     txDataModule,
 )
+from ..Metrics.metrics import evaluate_emd_ref_vs_query
 from ..Models.baselines import gfGlobal
 from ..Models.gp_model import GENE_NAME_FILE, GENEFORMER_MODEL_PATH
 from ..Models.interpretability import iGlobalWrapper, iGpWrapper
@@ -723,7 +724,97 @@ class gpEval:
 
 
 ################################
-# For attributions
+# Reference/query distance
+################################
+
+
+def calculate_gp_emd(
+    data,
+    source_key,
+    ref_label,
+    query_label,
+    condition_key,
+    output_dir,
+    filename=None,
+    gp=None,
+    gpdb=None,
+    filtering_dict=None,
+):
+    '''
+    Calculate EMD between reference and query distributions
+
+    '''
+
+    if isinstance(data, str):
+        if data.endswith('.h5ad'):
+            data = sc.read(data)
+        else:
+            data = load_from_disk(data)
+
+    if (gpdb is None) and (gp is None):
+        raise ValueError('Please provide either gp or gpdb')
+
+    if gp is None:
+        gpdb = pd.read_csv(gpdb)
+        gpx = list(gpdb.columns)
+    elif isinstance(gp, str):
+        gpx = [gp]
+    else:
+        gpx = gp
+
+    holder = []
+
+    for gp in gpx:
+        if filtering_dict is None:
+            adata = sc.AnnData(
+                X=np.array(data[gp]),
+                obs=data.select_columns(
+                    list(set([source_key, condition_key]))
+                ).to_pandas(),
+            )
+
+        else:
+            adata = sc.AnnData(
+                X=np.array(data[gp]),
+                obs=data.select_columns(
+                    list(set([source_key, condition_key])) + list(filtering_dict.keys())
+                ).to_pandas(),
+            )
+
+            for k, v in filtering_dict.items():
+                if k not in adata.obs.columns:
+                    print(f'Key {k} not found in adata.obs columns. Skipping.')
+                    continue
+                if isinstance(v, list):
+                    adata = adata[adata.obs[k].isin(v)]
+                else:
+                    adata = adata[adata.obs[k] == v]
+
+        # get reference distribution
+        ref = adata[adata.obs[source_key] == ref_label]
+        query = adata[adata.obs[source_key] == query_label]
+
+        # calculate EMD
+        emd_df = evaluate_emd_ref_vs_query(ref, query, condition_key, condition_key)
+        emd_df['embedding'] = gp
+        holder.append(emd_df)
+        print('embdf', emd_df.head())
+
+    output_df = pd.concat(holder)
+
+    if filename is None:
+        filename = f'{ref_label}_vs_{query_label}_emd.csv'
+
+    output_df.to_csv(
+        os.path.join(output_dir, filename),
+        index=False,
+    )
+
+    return None
+
+
+################################
+# Grad-CAM
 ################################
 
 

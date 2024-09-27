@@ -1,6 +1,10 @@
+import math
 import warnings
+from functools import partial
+from typing import Optional
 
 import numpy as np
+import ot
 import pandas as pd
 import torch
 from scipy.sparse import issparse
@@ -158,7 +162,7 @@ def evaluate_mmd(adata, pred_adata, condition_key, de_genes_dict=None):
 
 def evaluate_emd(true_data, pred_data, condition_key=None, de_genes_dict=None):
     emd_list = []
-    if condition_key:  # instead of condition have it per timepoint
+    if condition_key:
         for cond in pred_data.obs[condition_key].unique():
             adata_ = true_data[true_data.obs[condition_key] == cond].copy()
             pred_adata_ = pred_data[pred_data.obs[condition_key] == cond].copy()
@@ -203,6 +207,181 @@ def evaluate_emd(true_data, pred_data, condition_key=None, de_genes_dict=None):
         emd_list.append({'emd': np.mean(wd)})
         emd_df = pd.DataFrame(emd_list).set_index(true_data_.var_names)
     return emd_df
+
+
+def evaluate_emd_ref_vs_query(
+    ref_data, query_data, ref_condition_key, query_condition_key
+):
+    emd_list = []
+
+    for ref_cond in ref_data.obs[ref_condition_key].unique():
+        for query_cond in query_data.obs[query_condition_key].unique():
+            ref_adata_ = ref_data[ref_data.obs[ref_condition_key] == ref_cond].copy()
+            query_adata_ = query_data[
+                query_data.obs[query_condition_key] == query_cond
+            ].copy()
+
+            if issparse(ref_adata_.X):
+                ref_adata_.X = ref_adata_.X.A
+            if issparse(query_adata_.X):
+                query_adata_.X = query_adata_.X.A
+
+            ref = torch.tensor(ref_adata_.X)
+            query = torch.tensor(query_adata_.X)
+
+            metrics_dict = compute_distribution_distances(query, ref)
+
+            out_dict = {'ref_condition': ref_cond, 'query_condition': query_cond}
+
+            for k, v in metrics_dict.items():
+                out_dict[k] = v
+
+            emd_list.append(out_dict)
+
+    emd_df = pd.DataFrame(emd_list)
+
+    return emd_df
+
+
+#############################################
+# Distribution metrics
+# from https://github.com/theislab/CFGen/blob/
+# main/cfgen/eval/compute_evaluation_metrics.py#L71
+#############################################
+
+
+def wasserstein(
+    x0: torch.Tensor,
+    x1: torch.Tensor,
+    method: Optional[str] = None,
+    reg: float = 0.05,
+    power: int = 2,
+    **kwargs,
+) -> float:
+    """
+    Compute the Wasserstein distance between two distributions.
+
+    Args:
+        x0 (torch.Tensor): The first distribution.
+        x1 (torch.Tensor): The second distribution.
+        method (Optional[str], optional):
+            The method for computing Wasserstein distance.
+            Options are "exact", "sinkhorn". Defaults to None.
+        reg (float, optional):
+            Regularization parameter for the Sinkhorn method.
+            Defaults to 0.05.
+        power (int, optional):
+            Power for the distance computation, can be 1 or 2.
+            Defaults to 2.
+        **kwargs: Additional keyword arguments.
+
+    Raises:
+        ValueError: If an unknown method is provided.
+
+    Returns:
+        float: The computed Wasserstein distance.
+
+    From https://github.com/atong01/conditional-flow-matching/
+    blob/v0/src/models/components/optimal_transport.py
+
+    """
+    assert power == 1 or power == 2
+    # ot_fn should take (a, b, M) as arguments where a, b are marginals and
+    # M is a cost matrix
+    if method == 'exact' or method is None:
+        ot_fn = ot.emd2
+    elif method == 'sinkhorn':
+        ot_fn = partial(ot.sinkhorn2, reg=reg)
+    else:
+        raise ValueError(f'Unknown method: {method}')
+
+    a, b = ot.unif(x0.shape[0]), ot.unif(x1.shape[0])
+    if x0.dim() > 2:
+        x0 = x0.reshape(x0.shape[0], -1)
+    if x1.dim() > 2:
+        x1 = x1.reshape(x1.shape[0], -1)
+    M = torch.cdist(x0, x1)
+    if power == 2:
+        M = M**2
+    ret = ot_fn(a, b, M.detach().cpu().numpy(), numItermax=1e7)
+    if power == 2:
+        ret = math.sqrt(ret)
+    return ret
+
+
+# From https://github.com/atong01/conditional-flow-matching/
+# blob/v0/src/models/components/mmd.py
+
+min_var_est = 1e-8
+
+
+# Consider linear time MMD with a linear kernel:
+# K(f(x), f(y)) = f(x)^Tf(y)
+# h(z_i, z_j) = k(x_i, x_j) + k(y_i, y_j) - k(x_i, y_j) - k(x_j, y_i)
+#             = [f(x_i) - f(y_i)]^T[f(x_j) - f(y_j)]
+#
+# f_of_X: batch_size * k
+# f_of_Y: batch_size * k
+def linear_mmd2(f_of_X, f_of_Y):
+    loss = 0.0
+    delta = f_of_X - f_of_Y
+    loss = torch.mean((delta[:-1] * delta[1:]).sum(1))
+    return loss
+
+
+# Consider linear time MMD with a polynomial kernel:
+# K(f(x), f(y)) = (alpha*f(x)^Tf(y) + c)^d
+# f_of_X: batch_size * k
+# f_of_Y: batch_size * k
+def poly_mmd2(f_of_X, f_of_Y, d=2, alpha=1.0, c=2.0):
+    K_XX = alpha * (f_of_X[:-1] * f_of_X[1:]).sum(1) + c
+    K_XX_mean = torch.mean(K_XX.pow(d))
+
+    K_YY = alpha * (f_of_Y[:-1] * f_of_Y[1:]).sum(1) + c
+    K_YY_mean = torch.mean(K_YY.pow(d))
+
+    K_XY = alpha * (f_of_X[:-1] * f_of_Y[1:]).sum(1) + c
+    K_XY_mean = torch.mean(K_XY.pow(d))
+
+    K_YX = alpha * (f_of_Y[:-1] * f_of_X[1:]).sum(1) + c
+    K_YX_mean = torch.mean(K_YX.pow(d))
+
+    return K_XX_mean + K_YY_mean - K_XY_mean - K_YX_mean
+
+
+def compute_distribution_distances(pred: torch.Tensor, true: torch.Tensor):
+    """
+    Computes distances between predicted and true distributions.
+
+    Args:
+        pred (torch.Tensor):
+            Predicted tensor of shape [batch, times, dims].
+        true (Union[torch.Tensor, list]):
+            True tensor of shape [batch, times, dims]
+            or list of tensors of length times.
+
+    Returns:
+        dict: Dictionary containing the computed distribution distances.
+
+    from https://github.com/theislab/CFGen/blob/main/
+    cfgen/eval/distribution_distances.py#L16
+    accessed 24/09/24
+    """
+    min_size = min(pred.shape[0], true.shape[0])
+
+    names = ['1-Wasserstein', '2-Wasserstein', 'Linear_MMD', 'Poly_MMD']
+    dists = []
+    to_return = []
+    w1 = wasserstein(pred, true, power=1)
+    w2 = wasserstein(pred, true, power=2)
+    pred_4_mmd = pred[:min_size]
+    true_4_mmd = true[:min_size]
+    mmd_linear = linear_mmd2(pred_4_mmd, true_4_mmd).item()
+    mmd_poly = poly_mmd2(pred_4_mmd, true_4_mmd).item()
+    dists.append((w1, w2, mmd_linear, mmd_poly))
+
+    to_return.extend(np.array(dists).mean(axis=0))
+    return dict(zip(names, to_return))
 
 
 #############################################

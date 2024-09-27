@@ -105,6 +105,7 @@ def run_training_from_select_gps(
     num_nodes: int = 1,
     limit_val_batches: float = 1.0,
     val_check_interval: float = 1.0,
+    precision='bf16-mixed',
 ):
     """
     Wrapper function for training gpLearner model
@@ -293,31 +294,15 @@ def run_training_from_select_gps(
 
     model_v0 = configure_model_version(args, 'old')
 
-    print('')
-    print('*** succesfully loaded OLD model ***')
-    print('')
-
     model_v1 = configure_model_version(args, 'new')
-
-    print('')
-    print('*** succesfully loaded NEW model ***')
-    print('')
 
     gp_transformer_v0 = configure_lightning_module_version(
         model_v0, 'old', gp_similarity, args
     )
 
-    print('')
-    print('*** succesfully loaded OLD model and lightning module ***')
-    print('')
-
     gp_transformer = configure_lightning_module_version(
         model_v1, 'new', gp_similarity, args
     )
-
-    print('')
-    print('*** succesfully loaded NEW model and lightning module ***')
-    print('')
 
     # ----- Load pretrained model -------
 
@@ -365,7 +350,7 @@ def run_training_from_select_gps(
         logger=wandb_logger,
         devices=-1,
         accelerator='auto',
-        precision='bf16-mixed' if strategy == 'ddp_find_unused_parameters_true' else 16,
+        precision=precision,
         # profiler='advanced',
         num_nodes=num_nodes,
         strategy=strategy,
