@@ -217,6 +217,7 @@ def evaluate_emd_ref_vs_query(
     for ref_cond in ref_data.obs[ref_condition_key].unique():
         for query_cond in query_data.obs[query_condition_key].unique():
             ref_adata_ = ref_data[ref_data.obs[ref_condition_key] == ref_cond].copy()
+
             query_adata_ = query_data[
                 query_data.obs[query_condition_key] == query_cond
             ].copy()

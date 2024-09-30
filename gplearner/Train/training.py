@@ -99,7 +99,7 @@ def run_training(
     use_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: Optional[bool] = False,
     vocab_gene_names: Optional[list] = None,
-    precision='bf16-mixed',
+    precision=32,  # 'bf16-mixed',
 ):
     """
     Wrapper function for training gpLearner model

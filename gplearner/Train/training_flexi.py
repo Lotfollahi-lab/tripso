@@ -105,7 +105,7 @@ def run_training_from_select_gps(
     num_nodes: int = 1,
     limit_val_batches: float = 1.0,
     val_check_interval: float = 1.0,
-    precision='bf16-mixed',
+    precision=32,  # 'bf16-mixed',
 ):
     """
     Wrapper function for training gpLearner model
