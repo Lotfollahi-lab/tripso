@@ -94,6 +94,7 @@ class gfWrapper(nn.Module):
         geneformer_model,
         fm_layer_to_quant,
         peft_config_path,
+        token_dictionary_file,
     ):
         super().__init__()
 
@@ -113,7 +114,9 @@ class gfWrapper(nn.Module):
         for name, param in self.gf.named_parameters():
             param.requires_grad = False
 
-        self.gf_emb_extractor = EmbExtractor(emb_layer=fm_layer_to_quant)
+        self.gf_emb_extractor = EmbExtractor(
+            emb_layer=fm_layer_to_quant, token_dictionary_file=token_dictionary_file
+        )
 
     def forward(self, input_dataset):
         # input is tokenized dataset
@@ -865,6 +868,7 @@ class gpTransformerBase(nn.Module):
                     geneformer_model=geneformer_model,
                     fm_layer_to_quant=fm_layer_to_quant,
                     peft_config_path=peft_config_path,
+                    token_dictionary_file=self.gene_token_path,
                 )
         else:
             raise ValueError('Only geneformer is supported for now')

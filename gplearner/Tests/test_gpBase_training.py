@@ -66,7 +66,7 @@ class TestGpBase(unittest.TestCase):
 
         # Check the output shapes
         # shape.[0] is the batch size
-        self.assertEqual(output['z'].shape, torch.Size([2, len(self.gp_inputs), 512]))
+        self.assertEqual(output['z'].shape, torch.Size([2, len(self.gp_inputs), 256]))
         self.assertEqual(len(output['logits_lm_list']), len(self.gp_inputs))
         self.assertEqual(
             output['logits_lm_list'][0].shape,

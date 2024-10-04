@@ -365,7 +365,10 @@ class txDataModule(LightningDataModule):
 
         else:
             self.gene_token_dict = pd.read_pickle(
-                os.path.join(get_gf_repo(), 'gene_token_dict.pkl')
+                os.path.join(
+                    get_gf_repo(),
+                    'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+                )
             )
             self.max_len = 2048
 

@@ -3,10 +3,10 @@ import unittest
 import numpy as np
 import pandas as pd
 import torch
-from geneformer import ENSEMBL_MAPPING_FILE, TOKEN_DICTIONARY_FILE
+from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 
-from gplearner.Models.gp_model import gpWrapper
-from gplearner.Utils.utils import convert_gene_names_to_tokens
+from ..Models.gp_model import gpWrapper
+from ..Utils.utils import convert_gene_names_to_tokens
 
 
 class TestGpWrapper(unittest.TestCase):
@@ -22,18 +22,28 @@ class TestGpWrapper(unittest.TestCase):
         )
 
         self.gpdb_tokens = {}
+
+        name_dict = pd.read_pickle(ENSEMBL_DICTIONARY_FILE)
+        token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
+
         for gp in self.gp_inputs:
             self.gpdb_tokens[gp] = list(
-                convert_gene_names_to_tokens(self.database[gp].values, gp_name=gp)
+                convert_gene_names_to_tokens(
+                    self.database[gp].values,
+                    gp_name=gp,
+                    name_dictionary=name_dict,
+                    token_dictionary=token_dict,
+                )
             )
 
         # Initialize the gpWrapper model
+        # this code matches dictionaries for Geneformer 4096
         self.gp_wrapper = gpWrapper(
             self.gp_inputs,
             self.database,
             do_ensembl_conversion=True,
             gene_token_path=TOKEN_DICTIONARY_FILE,
-            gene_name_path=ENSEMBL_MAPPING_FILE,
+            gene_name_path=ENSEMBL_DICTIONARY_FILE,
             gp_latent_size=10,
             n_blocks=2,
             num_heads=2,

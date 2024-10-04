@@ -15,7 +15,7 @@ import seaborn as sns
 import torch
 from captum.attr import GuidedGradCam
 from datasets import load_from_disk
-from geneflow import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
+from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm

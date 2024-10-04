@@ -34,10 +34,8 @@ Edited to return gene embedings as tenosrs
 import logging
 import pickle
 import re
-import warnings
 
 import torch
-from geneformer import TOKEN_DICTIONARY_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +83,7 @@ class EmbExtractor:
         emb_layer=-1,
         nproc=4,
         summary_stat=None,
-        token_dictionary_file=TOKEN_DICTIONARY_FILE,
+        token_dictionary_file=None,  # so will raise an error if not provided
     ):
         """
         Initialize embedding extractor.
@@ -134,8 +132,6 @@ class EmbExtractor:
             Path to pickle file containing token dictionary
             (Ensembl ID:token).
         """
-
-        warnings.warn('Make sure you are using the correct token dictonary file')
 
         self.model_type = model_type
         self.num_classes = num_classes
