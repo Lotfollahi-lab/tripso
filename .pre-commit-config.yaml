@@ -20,8 +20,7 @@ repos:
     -   id: mypy
         args:
           - --ignore-missing-imports
-          - --exclude
-          - 'gplearner/Datamodules/mapped_collection.py'
+        exclude: '_nb\.py'
 
 -   repo: https://github.com/PyCQA/isort
     rev: 5.12.0
