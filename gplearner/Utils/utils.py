@@ -9,7 +9,6 @@ import sys
 import tarfile
 import warnings
 from collections import Counter
-from itertools import combinations
 from multiprocessing import Pool
 from typing import List, Optional
 
@@ -25,7 +24,6 @@ import scanpy as sc
 import seaborn as sns
 import torch
 from datasets import concatenate_datasets, load_from_disk
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -283,6 +281,19 @@ def encode_labels(input_data, input_col, new_col):
     return labeled_dataset
 
 
+def encode_labels_h5ad(input_adata, input_col, new_col):
+    """
+    Encode labels as integers
+    works on AnnData
+    """
+    label_values = list(input_adata.obs[input_col].unique())
+    label_dict = {l: i for i, l in enumerate(label_values)}
+
+    input_adata.obs[new_col] = input_adata.obs[input_col].map(label_dict)
+
+    return input_adata
+
+
 def do_balanced_downsampling(class_values, input_data, n_cells_per_class=None):
     """
     Perform balanced subsampling of input data
@@ -487,23 +498,14 @@ def pad_array(arr, desired_length=2048, padding_value=-100):
 # GP wrangling
 ###################################
 
-GENE_NAME_FILE = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl'  # noqa
 
-
-# for converting between gene formats
-# load gene token dict
-with open(TOKEN_DICTIONARY_FILE, 'rb') as f:
-    token_dictionary = pickle.load(f)
-
-# load gene name to ensembl dict
-with open(GENE_NAME_FILE, 'rb') as f:
-    name_dictionary = pickle.load(f)
-
-ensembl_to_name = {v: k for k, v in name_dictionary.items()}
-token_to_gene = {v: k for k, v in token_dictionary.items()}
-
-
-def convert_gene_names_to_tokens(genes, do_ensembl_conversion=True, gp_name=None):
+def convert_gene_names_to_tokens(
+    genes,
+    name_dictionary,
+    token_dictionary,
+    do_ensembl_conversion=True,
+    gp_name=None,
+):
     # Convert gene names to Ensembl IDs
     if do_ensembl_conversion:
         ensembl_ids = [name_dictionary.get(gene_name, 'Unknown') for gene_name in genes]
@@ -528,8 +530,8 @@ def get_gp_tokens(
     gp_genes,
     do_ensembl_conversion,
     gp_name,
-    gene_token_path=TOKEN_DICTIONARY_FILE,
-    gene_name_path=GENE_NAME_FILE,
+    gene_token_path,
+    gene_name_path,
 ):
     """
     Get genes that belong to input GP program
@@ -556,7 +558,16 @@ def get_gp_tokens(
     else:
         genes = gp_genes
 
-    gp_tokens = convert_gene_names_to_tokens(genes, do_ensembl_conversion, gp_name)
+    name_dictionary = pd.read_pickle(gene_name_path)
+    token_dictionary = pd.read_pickle(gene_token_path)
+
+    gp_tokens = convert_gene_names_to_tokens(
+        genes,
+        name_dictionary,
+        token_dictionary,
+        do_ensembl_conversion,
+        gp_name,
+    )
 
     # Remove rare genes
     # rare_genes = []
@@ -573,7 +584,7 @@ def get_gp_tokens(
     return gp_tokens_set
 
 
-def count_genes_per_cell(dataset):
+def count_genes_per_cell(dataset, token_dictionary, name_dictionary):
     # Of all these genes, how many are present in at least min_cells cells?
     # Extract the 'input_ids' column as a list of lists
     input_ids_lists = dataset['input_ids']
@@ -601,111 +612,6 @@ def count_genes_per_cell(dataset):
     token_df = token_df[['gene', 'ensembl', 'token', 'counts', 'prop', 'total']]
 
     return token_df
-
-
-def find_gene_intersection(df, column_combination):
-    genes = set(df[column_combination[0]])
-    for col in column_combination[1:]:
-        genes = genes.intersection(df[col])
-    return genes
-
-
-def find_genes_in_single_gp(df):
-    all_genes = set()
-    genes_in_single_column = set()
-
-    for col in df.columns:
-        col_genes = set(df[col])
-        genes_in_single_column.update(col_genes - all_genes)
-        all_genes.update(col_genes)
-
-    return list(genes_in_single_column)
-
-
-def find_genes_in_multiple_gp(
-    gp_inputs, gpdb, token_df, do_ensembl_conversion, min_cells, downsample_to_n_genes
-):
-    """
-    Get genes that belong to more than one GP program
-    and convert them to relevant geneformer token
-    """
-
-    # Create a set to store genes present in more than one column
-    common_genes_set = set()
-
-    # Loop through different pairs of columns (2 to 5)
-    for num_columns in range(2, len(gp_inputs)):
-        column_combinations = combinations(gpdb.columns, num_columns)
-        for combination in column_combinations:
-            common_genes = find_gene_intersection(gpdb, combination)
-            common_genes_set.update(common_genes)
-
-    if np.nan in common_genes_set:
-        common_genes_set.remove(np.nan)
-
-    print(f'Union of genes present in more than one GP: {len(common_genes_set)}')
-
-    if do_ensembl_conversion:
-        # then common_genes_set is storing gene names
-        token_multi = token_df[token_df['gene'].isin(common_genes_set)]
-    else:
-        # then common_genes_set is storing ensembl IDs
-        token_multi = token_df[token_df['ensembl'].isin(common_genes_set)]
-
-    print(
-        f'Range of counts: {token_multi["counts"].min()}'
-        f'- {token_multi["counts"].max()}'
-    )
-
-    token_multi = token_multi[token_multi['counts'] > min_cells]
-    tokens_to_keep = token_multi['token'].tolist()
-
-    print(
-        'Number of genes present in more than one GP'
-        f'and at least {min_cells} cells: {len(token_multi)}'
-    )
-
-    if len(token_multi) == 0:
-        raise ValueError(
-            'No genes present in more than one GP '
-            f'are present in at least {min_cells} cells.'
-            'Please relax the threshold.'
-        )
-
-    if downsample_to_n_genes:
-        if downsample_to_n_genes < len(tokens_to_keep):
-            print(f'Downsampling to {downsample_to_n_genes} genes')
-            print('')
-            tokens_to_keep = random.sample(tokens_to_keep, downsample_to_n_genes)
-
-    return tokens_to_keep
-
-
-def get_genes_in_single_gp(gpdb, do_ensembl_conversion, downsample_to_n_genes):
-    genes_in_single_gp = find_genes_in_single_gp(gpdb)
-
-    if np.nan in genes_in_single_gp:
-        genes_in_single_gp.remove(np.nan)
-
-    if do_ensembl_conversion:
-        genes_in_single_gp = [
-            name_dictionary[g]
-            for g in genes_in_single_gp
-            if g in name_dictionary.keys()
-        ]
-
-    tokens_to_keep = [
-        token_dictionary[g] for g in genes_in_single_gp if g in token_dictionary.keys()
-    ]
-
-    print(len(genes_in_single_gp), 'genes present in exactly one GP')
-
-    if downsample_to_n_genes:
-        print(f'Downsampling to {downsample_to_n_genes} genes')
-        print('')
-        tokens_to_keep = random.sample(tokens_to_keep, downsample_to_n_genes)
-
-    return tokens_to_keep
 
 
 def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):

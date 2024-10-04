@@ -34,11 +34,31 @@ Edited to return gene embedings as tenosrs
 import logging
 import pickle
 import re
+import warnings
 
 import torch
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from geneformer import TOKEN_DICTIONARY_FILE
 
 logger = logging.getLogger(__name__)
+
+
+def get_gf_repo():
+    # site_packages_dirs = site.getsitepackages()
+
+    # geneformer_repo_path = None
+
+    # for directory in site_packages_dirs:
+    #     potential_path = Path(directory) / 'geneformer'
+    #     if potential_path.exists():
+    #         geneformer_repo_path = potential_path
+    #         break
+
+    # if geneformer_repo_path is None:
+    #     raise ValueError('Geneformer not found in site-packages directories')
+
+    geneformer_repo_path = '/lustre/scratch126/cellgen/team361/mm58/Geneformer'
+
+    return geneformer_repo_path
 
 
 class EmbExtractor:
@@ -114,6 +134,8 @@ class EmbExtractor:
             Path to pickle file containing token dictionary
             (Ensembl ID:token).
         """
+
+        warnings.warn('Make sure you are using the correct token dictonary file')
 
         self.model_type = model_type
         self.num_classes = num_classes

@@ -12,9 +12,14 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 from datasets import concatenate_datasets, load_from_disk
-from geneformer import TranscriptomeTokenizer
+from geneformer import (
+    ENSEMBL_DICTIONARY_FILE,
+    TOKEN_DICTIONARY_FILE,
+    TranscriptomeTokenizer,
+)
 from scipy.sparse import issparse
 
+from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import do_balanced_downsampling_anndata, encode_labels
 from .gp_curation import make_gpdb
 
@@ -22,10 +27,14 @@ seed = 0
 np.random.seed(seed)
 random.seed(seed)
 
+# Search for Geneformer in the site-packages directories
+geneformer_repo_path = get_gf_repo()
+
 
 def pp_and_tokenize(
     root_dir: str,
     adata_path: Optional[str] = None,
+    input_size: int = 2048,
     vars_to_keep: Union[Dict, List] = ['cell_type'],
     subsample_by: Optional[List] = ['cell_type'],
     n_cells_per_class: int = 20_000,
@@ -45,6 +54,7 @@ def pp_and_tokenize(
     save_gp_genes_object: Optional[bool] = False,
     pp_cellxgene: Optional[bool] = False,
     calculate_hvg: Optional[bool] = True,
+    do_tokenization: Optional[bool] = True,
 ):
     """
     Preprocess and tokenize data for scGPL
@@ -90,7 +100,7 @@ def pp_and_tokenize(
         tissue = root_dir.split('/')[-1]
 
     # check for anndata object in input_h5ad directory
-    if not os.path.exists(os.path.join(root_dir, 'data/input_h5ad')):
+    if not os.path.exists(os.path.join(root_dir, 'data/processed/input_h5ad')):
         if adata_path is None:
             raise ValueError('Please provide path to anndata object')
 
@@ -137,8 +147,12 @@ def pp_and_tokenize(
             adata.obs.drop('subsampling_col', axis=1, inplace=True)
 
             # save to disk - dataset with only HVG
-            os.makedirs(os.path.join(root_dir, 'data/input_h5ad'), exist_ok=True)
-            adata.write_h5ad(os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad'))
+            os.makedirs(
+                os.path.join(root_dir, 'data/processed/input_h5ad'), exist_ok=True
+            )
+            adata.write_h5ad(
+                os.path.join(root_dir, f'data/processed/input_h5ad/{tissue}.h5ad')
+            )
 
         if calculate_hvg and ('highly_variable' not in adata.var.columns):
             if hvg_batch_key is None:
@@ -153,7 +167,7 @@ def pp_and_tokenize(
             adata = adata[:, adata.var.highly_variable]
             os.makedirs(os.path.join(root_dir, 'data/input_h5ad'), exist_ok=True)
             adata.write_h5ad(
-                os.path.join(root_dir, f'data/input_h5ad/{tissue}_hvg.h5ad')
+                os.path.join(root_dir, f'data/processed/input_h5ad/{tissue}_hvg.h5ad')
             )
 
         # Save chunks
@@ -178,7 +192,7 @@ def pp_and_tokenize(
             subset_adata = adata[obs_names, :].copy()
 
             # Create a directory for the subset if it doesn't exist
-            output_directory = 'data/input_h5ad'
+            output_directory = 'data/processed/input_h5ad'
             subset_directory = os.path.join(output_directory, f'subset_{i+1}')
             os.makedirs(subset_directory, exist_ok=True)
 
@@ -188,13 +202,13 @@ def pp_and_tokenize(
 
             n_splits += 1
 
-    subset_dirs = glob.glob(f'{root_dir}/data/input_h5ad/subset_*')
+    subset_dirs = glob.glob(f'{root_dir}/data/processed/input_h5ad/subset_*')
     n_splits = (
         max([int(dir.split('_')[-1]) for dir in subset_dirs]) if subset_dirs else 0
     )
 
     # check if tokenized data exists
-    if not os.path.exists(os.path.join(root_dir, 'data/tokenized')):
+    if do_tokenization:
         vars_to_keep = {v: v for v in vars_to_keep}
 
         vars_to_keep['idx'] = 'idx'
@@ -203,12 +217,27 @@ def pp_and_tokenize(
             vars_to_keep['batch_key'] = 'batch_key'
 
         print('Tokenizing data')
-        tk = TranscriptomeTokenizer(vars_to_keep, nproc=4)
+        if input_size == 2048:
+            tk = TranscriptomeTokenizer(
+                vars_to_keep,
+                nproc=4,
+                model_input_size=2048,
+                special_token=False,
+            )
+        elif input_size == 4096:
+            tk = TranscriptomeTokenizer(
+                custom_attr_name_dict=vars_to_keep,
+                model_input_size=input_size,
+                special_token=True,
+                nproc=4,
+            )
+        else:
+            raise ValueError('Invalid input size. Please choose 2048 or 4096')
 
         if n_splits == 0:
             tk.tokenize_data(
-                f'{root_dir}/data/input_h5ad',  # h5ad data directory
-                f'{root_dir}/data/tokenized',
+                f'{root_dir}/data/processed/input_h5ad',  # h5ad data directory
+                f'{root_dir}/data/processed/tokenized',
                 tissue,
                 file_format='h5ad',
             )
@@ -217,53 +246,81 @@ def pp_and_tokenize(
             for i in range(1, n_splits + 1):
                 print(f'Tokenizing subset {i}')
                 tk.tokenize_data(
-                    f'{root_dir}/data/input_h5ad/subset_{i}',  # h5ad data directory
-                    f'{root_dir}/data/tokenized/',
+                    f'{root_dir}/data/processed/input_h5ad/subset_{i}',
+                    f'{root_dir}/data/processed/tokenized/',
                     f'{tissue}_{i}',
                     file_format='h5ad',
                 )
 
-    # Step 2 : Prepare for scGPL
-    # change directory for outputs
-    folder_path = f'{root_dir}/data/input_dataset'
+        # Step 2 : Prepare for GPformer
+        # change directory for outputs
+        folder_path = f'{root_dir}/data/processed/input_dataset'
 
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
 
-    # check if folder is empty:
-    if len(os.listdir(folder_path)) == 0:
-        # load datasets
-        if n_splits == 0:
-            input_data = load_from_disk(f'{root_dir}/data/tokenized/{tissue}.dataset')
+        # check if folder is empty:
+        if len(os.listdir(folder_path)) == 0:
+            # load datasets
+            if n_splits == 0:
+                input_data = load_from_disk(
+                    f'{root_dir}/data/processed/tokenized/{tissue}.dataset'
+                )
+            else:
+                input_data = concatenate_datasets(
+                    [
+                        load_from_disk(
+                            f'{root_dir}/data/processed/tokenized/{tissue}_{i}.dataset'
+                        )
+                        for i in range(1, n_splits + 1)
+                    ]
+                )
+
+            # change labels to numerical ids
+            if isinstance(cov_to_encode, str):
+                cov_to_encode = [cov_to_encode]
+
+            if batch_keys is not None:
+                cov_to_encode.append('batch_key')
+
+            for col in cov_to_encode:
+                if col in input_data.column_names:
+                    input_data = encode_labels(input_data, col, f'{col}_id')
+
+            input_data.save_to_disk(folder_path)
+
+            print('Saved', len(input_data), 'cells')
+
+            # Remove intermediate directories
+            os.system(f'rm -rf {root_dir}/data/processed/tokenized')
+            # optionally remove all subset folders
+            if n_splits > 0:
+                os.system(f'rm -rf {root_dir}/data/processed/input_h5ad/subset_*')
+
         else:
-            input_data = concatenate_datasets(
-                [
-                    load_from_disk(f'{root_dir}/data/tokenized/{tissue}_{i}.dataset')
-                    for i in range(1, n_splits + 1)
-                ]
-            )
-
-        # change labels to numerical ids
-        if isinstance(cov_to_encode, str):
-            cov_to_encode = [cov_to_encode]
-
-        if batch_keys is not None:
-            cov_to_encode.append('batch_key')
-
-        for col in cov_to_encode:
-            if col in input_data.column_names:
-                input_data = encode_labels(input_data, col, f'{col}_id')
-
-        input_data.save_to_disk(folder_path)
-
-        print('Saved', len(input_data), 'cells')
-
-    else:
-        print('Data already exists in', folder_path)
-        print('Skipping preprocessing step')
+            print('Skipping preprocessing step')
 
     # Step 3 : Prepare GP databases
     if not os.path.exists(f'{root_dir}/gpdb_{name_tag}.csv'):
+        if input_size == 2048:
+            token_dict = pd.read_pickle(
+                os.path.join(
+                    geneformer_repo_path,
+                    'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+                )
+            )
+
+            name_dict = pd.read_pickle(
+                os.path.join(
+                    geneformer_repo_path,
+                    'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+                )
+            )
+
+        else:
+            token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
+            name_dict = pd.read_pickle(ENSEMBL_DICTIONARY_FILE)
+
         make_gpdb(
             dataset_path=folder_path,
             output_path=root_dir,
@@ -275,6 +332,8 @@ def pp_and_tokenize(
             max_gp_len=max_gp_len,
             name_tag=name_tag,
             save_intermediate=save_intermediate,
+            token_dict=token_dict,
+            name_dict=name_dict,
         )
 
     if save_gp_genes_object:
@@ -286,9 +345,11 @@ def pp_and_tokenize(
 
         # Load anndata object
         # look for existing object in input_h5ad directory
-        if os.path.exists(os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad')):
+        if os.path.exists(
+            os.path.join(root_dir, f'data/processed/input_h5ad/{tissue}.h5ad')
+        ):
             adata = sc.read_h5ad(
-                os.path.join(root_dir, f'data/input_h5ad/{tissue}.h5ad')
+                os.path.join(root_dir, f'data/processed/input_h5ad/{tissue}.h5ad')
             )
         else:
             adata = sc.read_h5ad(adata_path)
@@ -317,5 +378,5 @@ def pp_and_tokenize(
 
         # Save to disk
         adata.write_h5ad(
-            os.path.join(root_dir, f'data/input_h5ad/{tissue}_gp_genes.h5ad')
+            os.path.join(root_dir, f'data/processed/input_h5ad/{tissue}_gp_genes.h5ad')
         )

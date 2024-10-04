@@ -12,7 +12,8 @@ import torch
 
 # set up wandb
 import wandb
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+# from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
@@ -20,7 +21,6 @@ from pytorch_lightning.utilities import rank_zero_only
 from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.baselines import gfGlobal
 from ..Models.gp_model import (
-    GENEFORMER_MODEL_PATH,
     gpTransformerBase,
     gpTransformerBaseWithPrompt,
     gpTransformerGlobal,
@@ -77,7 +77,7 @@ def run_training(
     weight_decay: float = 0.0,
     use_weighted_sampler: Optional[bool] = False,
     sample_by: Optional[str] = None,
-    geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
+    fm_encoder_name: Optional[str] = 'gf-6L-30M-i2048',
     peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
     supervised_rem_var: Optional[str] = None,
@@ -246,6 +246,7 @@ def run_training(
         label_key=sample_by,
         seed=seed,
         load_exp=use_onehot_wrapper is True,
+        fm_encoder_name=fm_encoder_name,
     )
 
     # Load gpdb
@@ -480,6 +481,7 @@ def configure_logger(args):
                 'use_onehot_wrapper': args['use_onehot_wrapper'],
                 'use_pos_emb': args['use_pos_emb'],
                 'precision': args['precision'],
+                'fm_encoder_name': args['fm_encoder_name'],
             }
         )
 
@@ -545,7 +547,6 @@ def configure_model(args):
         'gp_inputs': args['gp_inputs'],
         'use_flash': args['use_flash'],
         'learn_new_gp': args['learn_new_gp'],
-        'geneformer_model': args['geneformer_model_path'],
         'peft_config_path': args['peft_config_path'],
         'use_baseline_tk': args['use_baseline_tk'],
         'tk_vocab_size': args['tk_vocab_size'],
@@ -554,6 +555,7 @@ def configure_model(args):
         'use_onehot_wrapper': args['use_onehot_wrapper'],
         'vocab_gene_names': args['vocab_gene_names'],
         'do_ensembl_conversion': args['gene_format'] == 'symbol',
+        'fm_encoder_name': args['fm_encoder_name'],
     }
 
     global_params = {
@@ -608,9 +610,10 @@ def configure_lightning_module(model, gp_similarity, args):
         'output_dir': args['output_dir'],
         'lambda_gp_similarity': args['lambda_gp_similarity'],
         'weight_decay': args['weight_decay'],
-        'optimizer': DeepSpeedCPUAdam
-        if args['strategy'].startswith('deepspeed')
-        else torch.optim.AdamW,
+        'optimizer': torch.optim.AdamW
+        # DeepSpeedCPUAdam
+        # if args['strategy'].startswith('deepspeed')
+        # else ,
     }
 
     global_params = {
@@ -683,7 +686,10 @@ def load_from_ckpt(mode, pl_model, args):
 
     elif mode == 'resume_training':
         latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-        pl_model = pl_model.load_from_checkpoint(latest_ckpt, map_location='cpu')
+        if model_type == 'Global':
+            pl_model = gpGlobal.load_from_checkpoint(latest_ckpt, map_location='cpu')
+        else:
+            pl_model = gpBase.load_from_checkpoint(latest_ckpt, map_location='cpu')
 
         return pl_model
 

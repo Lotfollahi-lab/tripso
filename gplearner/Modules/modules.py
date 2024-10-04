@@ -229,8 +229,8 @@ class PositionalEncoding(nn.Module):
             x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
         """
 
-        pe = self.pe[:, : x.size(1)]  # (1, seq_len, 256)
-        x = x + pe  # (batch, seq_len, 256)
+        pe = self.pe[:, : x.size(1)]  # (1, seq_len, 512)
+        x = x + pe  # (batch, seq_len, 512)
 
         return self.dropout(x)
 
@@ -261,7 +261,7 @@ class gpTransformerEncoder(nn.Module):
         n_gp_tokens,
         depth,  # number of blocks
         mlm_masking_prob,
-        embed_dim=256,
+        embed_dim=512,
         num_heads=1,
         mlp_ratio=0.5,  # factor of how much MLP reduces layer size
         qkv_bias=False,
@@ -379,7 +379,7 @@ class gpTransformerEncoder(nn.Module):
         B = x.shape[0]  # batch size
 
         # add the [CLS] token to the embed patch tokens
-        cls_tokens = self.cls_token.expand(B, -1, -1)  # (256, 1, 256)
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # (512, 1, 512)
 
         x = torch.cat((cls_tokens, x), dim=1)
 

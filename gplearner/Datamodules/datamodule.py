@@ -5,13 +5,13 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import scanpy as sc
 import torch
 import torch.nn.functional as F
 from datasets import load_from_disk
-from geneformer.in_silico_perturber import pad_tensor_list
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
-from lamindb.core import MappedCollection
+from geneformer import TOKEN_DICTIONARY_FILE
+from geneformer.perturber_utils import pad_tensor_list
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import (
     DataLoader,
@@ -19,14 +19,11 @@ from torch.utils.data import (
     WeightedRandomSampler,
     random_split,
 )
-from transformers import BertForMaskedLM
 
-from ..Models.gp_model import (
-    GENE_NAME_FILE,
-    GENEFORMER_MODEL_PATH,
-    gfWrapper,
-)
+from ..Models.gp_model import gfWrapper
+from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import build_gp_input_matrix, get_gp_tokens
+from .mapped_collection import MappedCollection
 
 random.seed(0)
 
@@ -325,10 +322,11 @@ class txDataModule(LightningDataModule):
         filter_key=None,
         filter_value=None,
         frac_for_generation=1,
+        fm_encoder_name='gf-6L-30M-i2048',
         # development only:
         frac_for_training=1,
         data_split_to_pass_to_test_step='val',
-        seed=42,
+        seed=0,
         load_exp=False,
     ):
         """Create a datamodule from a tokenized Geneformer dataset
@@ -349,7 +347,7 @@ class txDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.shuffle = shuffle
-        token_dictionary_file = TOKEN_DICTIONARY_FILE
+
         self.frac_for_training = frac_for_training
         self.data_for_test_step = data_split_to_pass_to_test_step
         self.label_key = label_key
@@ -360,11 +358,18 @@ class txDataModule(LightningDataModule):
         self.seed = seed
         self.load_exp = load_exp
 
-        with open(token_dictionary_file, 'rb') as f:
-            self.gene_token_dict = pickle.load(f)
+        if '4096' in fm_encoder_name:
+            self.gene_token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
+
+            self.max_len = 4096
+
+        else:
+            self.gene_token_dict = pd.read_pickle(
+                os.path.join(get_gf_repo(), 'gene_token_dict.pkl')
+            )
+            self.max_len = 2048
 
         self.pad_token_id = self.gene_token_dict.get('<pad>')
-        self.max_len = 2048
 
         self.use_weighted_sampler = use_weighted_sampler
 
@@ -574,14 +579,11 @@ class iTxDataModule(txDataModule):
         gp,
         gpdb,
         do_ensembl_conversion,
-        geneformer_model=GENEFORMER_MODEL_PATH,
+        geneformer_model,
+        gene_token_path,
+        gene_name_path,
         peft_config_path=None,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
         gf_layer_to_quant=-1,
-        gene_counts_df=None,
-        hvg_list=None,
-        gp_inputs=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -702,16 +704,6 @@ class EmbDataModule(LightningDataModule):
         self.condition_variable = condition_variable
         self.frac_for_training = frac_for_training
         self.mode = mode
-
-        self.geneformer = BertForMaskedLM.from_pretrained(GENEFORMER_MODEL_PATH)
-        # Access the embedding layer
-        embedding_layer = self.geneformer.bert.embeddings.word_embeddings
-
-        # get pad token id
-        pad_token_id = torch.tensor([0])
-
-        # Retrieve the embedding for the pad token
-        self.pad_token_embedding = embedding_layer.weight[pad_token_id]
 
     def prepare_data(self):
         folder_path = Path(self.folder_path)
@@ -845,15 +837,6 @@ class EmbDataModule(LightningDataModule):
                             x_tensor = torch.randn(
                                 torch.tensor(d[self.emb_to_keep]).shape
                             )
-                            emb.append(x_tensor)
-                        else:
-                            emb.append(torch.tensor(d[self.emb_to_keep]))
-
-                elif self.mode == 'pad_embedding':
-                    emb = []
-                    for d in batch:
-                        if d[f'{self.emb_to_keep}_num_genes'] == 0:
-                            x_tensor = self.pad_token_embedding.detach().squeeze()
                             emb.append(x_tensor)
                         else:
                             emb.append(torch.tensor(d[self.emb_to_keep]))

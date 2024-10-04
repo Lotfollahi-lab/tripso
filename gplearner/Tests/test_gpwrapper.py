@@ -3,9 +3,9 @@ import unittest
 import numpy as np
 import pandas as pd
 import torch
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from geneformer import ENSEMBL_MAPPING_FILE, TOKEN_DICTIONARY_FILE
 
-from gplearner.Models.gp_model import GENE_NAME_FILE, gpWrapper
+from gplearner.Models.gp_model import gpWrapper
 from gplearner.Utils.utils import convert_gene_names_to_tokens
 
 
@@ -33,7 +33,7 @@ class TestGpWrapper(unittest.TestCase):
             self.database,
             do_ensembl_conversion=True,
             gene_token_path=TOKEN_DICTIONARY_FILE,
-            gene_name_path=GENE_NAME_FILE,
+            gene_name_path=ENSEMBL_MAPPING_FILE,
             gp_latent_size=10,
             n_blocks=2,
             num_heads=2,
@@ -41,13 +41,13 @@ class TestGpWrapper(unittest.TestCase):
             use_flash=False,
             model_type='Base',
             learn_new_gp=False,
-            use_pos_emb=True,
+            use_pos_emb='sin_cos',
         )
 
         # Mock inputs for the model
         self.gf_emb = torch.randn(2, 5, 10)
         self.input_ids = torch.tensor(
-            [[15244, 7913, 12504, 1821, 254], [12504, 5616, 11834, 7067, 4093]]
+            [[14988, 7913, 5573, 1811, 12365], [14988, 4064, 12365, 7067, 7842]]
         )
 
         self.input_dataset = {'input_ids': self.input_ids}

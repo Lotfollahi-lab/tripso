@@ -3,11 +3,9 @@ import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 
 from ..Utils.utils import build_gp_input_matrix
 from .gp_model import (
-    GENE_NAME_FILE,
     gpTransformerBase,
     gpTransformerGlobal,
     gpWrapper,
@@ -140,8 +138,6 @@ class gpAverager(gpWrapper):
 class gfBaseline(gpTransformerBase):
     def __init__(
         self,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -153,8 +149,6 @@ class gfBaseline(gpTransformerBase):
             n_blocks=self.n_blocks,
             num_heads=self.num_heads,
             mgm_mask_ratio=self.mgm_mask_ratio,
-            gene_token_path=gene_token_path,
-            gene_name_path=gene_name_path,
             gp_inputs=self.gp_inputs,
             use_flash=False,
             model_type='Mean',
@@ -192,8 +186,6 @@ class gfGlobal(gpTransformerGlobal):
         self,
         database,
         do_ensembl_conversion,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
         **kwargs,
     ):
         super().__init__(
@@ -206,8 +198,8 @@ class gfGlobal(gpTransformerGlobal):
             gp_latent_size=self.gp_latent_size,
             n_blocks=self.n_blocks,
             mgm_mask_ratio=self.mgm_mask_ratio,
-            gene_token_path=gene_token_path,
-            gene_name_path=gene_name_path,
+            gene_token_path=self.gene_token_path,
+            gene_name_path=self.gene_name_path,
             gp_inputs=self.gp_inputs,
             use_flash=False,
             model_type='Mean',

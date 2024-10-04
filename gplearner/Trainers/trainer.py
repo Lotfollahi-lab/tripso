@@ -183,6 +183,8 @@ class gpBase(pl.LightningModule):
                         pd.Series(go_similarity.index),
                         do_ensembl_conversion=self.model.do_ensembl_conversion,
                         gp_name=go_similarity_gp,
+                        gene_token_path=self.model.gene_token_path,
+                        gene_name_path=self.model.gene_name_path,
                     )
                 )
             )
@@ -1477,7 +1479,7 @@ if __name__ == '__main__':
 
     model = gpTransformerBase(
         database=gpdb,
-        gp_latent_size=256,
+        gp_latent_size=512,
     )
 
     gp_transformer = gpBase(

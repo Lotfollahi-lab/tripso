@@ -15,7 +15,7 @@ import seaborn as sns
 import torch
 from captum.attr import GuidedGradCam
 from datasets import load_from_disk
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from geneflow import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
@@ -28,7 +28,6 @@ from ..Datamodules.datamodule import (
 )
 from ..Metrics.metrics import evaluate_emd_ref_vs_query
 from ..Models.baselines import gfGlobal
-from ..Models.gp_model import GENE_NAME_FILE, GENEFORMER_MODEL_PATH
 from ..Models.interpretability import iGlobalWrapper, iGpWrapper
 from ..Trainers.trainer import (
     EmbEvaluator,
@@ -36,6 +35,7 @@ from ..Trainers.trainer import (
     gpGlobal,
     gpPrototypes,
 )
+from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import (
     MidpointNormalize,
     find_latest_file,
@@ -478,8 +478,6 @@ class gpEval:
         genes_to_keep=None,
         output_tag=None,
         do_ensembl_conversion=True,
-        gene_name_path=GENE_NAME_FILE,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
     ):
         """
         Save gene embeddings as Dataset
@@ -520,9 +518,9 @@ class gpEval:
             gene_dir_tag += f'_{output_tag}'
 
         # converting between different gene labels
-        with open(gene_name_path, 'rb') as f:
+        with open(self.gp_transformer.model.gene_name_path, 'rb') as f:
             name_dictionary = pickle.load(f)
-        with open(gene_token_path, 'rb') as f:
+        with open(self.gp_transformer.model, 'rb') as f:
             token_dictionary = pickle.load(f)
 
         if do_ensembl_conversion:
@@ -838,7 +836,7 @@ def calculate_gp_attribution_scores(
     gp_inputs=None,
     model_type='Base',
     peft_config_path=None,
-    geneformer_model=GENEFORMER_MODEL_PATH,
+    geneformer_model_name='gf-6L-30M-i2048',
     output_file_name=None,
 ):
     '''
@@ -859,6 +857,28 @@ def calculate_gp_attribution_scores(
     torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+    # --------------------------
+    # Set up Geneformer
+    # --------------------------
+
+    gf_repo_path = get_gf_repo()
+    geneformer_model_path = os.path.join(gf_repo_path, geneformer_model_name)
+
+    if '4096' in geneformer_model_name:
+        gene_token_path = TOKEN_DICTIONARY_FILE
+        gene_name_path = ENSEMBL_DICTIONARY_FILE
+
+    else:
+        gene_token_path = os.path.join(
+            gf_repo_path,
+            'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+        )
+
+        gene_name_path = os.path.join(
+            gf_repo_path,
+            'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+        )
 
     # --------------------------
     # Set up dataloader
@@ -885,8 +905,10 @@ def calculate_gp_attribution_scores(
         filter_key=obs_key,
         filter_value=obs_value,
         gene_counts_df=gene_counts_df,
-        geneformer_model=geneformer_model,
+        geneformer_model=geneformer_model_path,
         peft_config_path=peft_config_path,
+        gene_name_path=gene_name_path,
+        gene_token_path=gene_token_path,
     )
 
     txdata.setup()

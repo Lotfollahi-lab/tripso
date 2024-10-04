@@ -7,10 +7,9 @@ import pytorch_lightning as pl
 import torch
 from datasets import Dataset
 
-from gplearner.Trainers.trainer import gpBase
-
 from ..Datamodules.datamodule import txDataModule
 from ..Models.gp_model import gpTransformerBase
+from ..Trainers.trainer import gpBase
 
 
 class TestGpBase(unittest.TestCase):
@@ -29,10 +28,10 @@ class TestGpBase(unittest.TestCase):
         dummy_dataset = Dataset.from_dict(
             {
                 'input_ids': [
-                    [15244, 7913, 12504, 1821, 254],
-                    [12504, 5616, 11834, 7067, 4093],
-                    [15244, 7913, 12504, 1821, 254],
-                    [12504, 5616, 11834, 7067, 4093],
+                    [14988, 7913, 5573, 1811, 12365],
+                    [14988, 7913, 5573, 1811, 12365],
+                    [14988, 7913, 5573, 1811, 12365],
+                    [14988, 7913, 5573, 1811, 12365],
                 ],
                 'length': [5, 5, 5, 5],
             }
@@ -67,7 +66,7 @@ class TestGpBase(unittest.TestCase):
 
         # Check the output shapes
         # shape.[0] is the batch size
-        self.assertEqual(output['z'].shape, torch.Size([2, len(self.gp_inputs), 256]))
+        self.assertEqual(output['z'].shape, torch.Size([2, len(self.gp_inputs), 512]))
         self.assertEqual(len(output['logits_lm_list']), len(self.gp_inputs))
         self.assertEqual(
             output['logits_lm_list'][0].shape,

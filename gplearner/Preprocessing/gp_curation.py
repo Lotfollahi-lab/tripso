@@ -35,6 +35,8 @@ def make_gpdb(
     max_gp_len,
     name_tag,
     save_intermediate,
+    token_dict,
+    name_dict,
 ):
     """
     Main function for building gene program database
@@ -72,7 +74,7 @@ def make_gpdb(
     if os.path.exists(os.path.join(output_path, 'genes_per_cell.csv')):
         token_df = pd.read_csv(os.path.join(output_path, 'genes_per_cell.csv'))
     else:
-        token_df = count_genes_per_cell(subset)
+        token_df = count_genes_per_cell(subset, token_dict, name_dict)
         token_df.to_csv(os.path.join(output_path, 'genes_per_cell.csv'), index=False)
 
     # get list of genes which are expressed in at least 50% of the cells

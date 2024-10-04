@@ -10,14 +10,14 @@ import torch
 
 # set up wandb
 import wandb
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+# from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import TQDMProgressBar
 from pytorch_lightning.utilities import rank_zero_only
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.baselines import gfGlobal
 from ..Models.gp_model import (
-    GENEFORMER_MODEL_PATH,
     gpTransformerBase,
     gpTransformerBaseWithPrompt,
     gpTransformerGlobal,
@@ -82,7 +82,7 @@ def run_training_from_select_gps(
     weight_decay: float = 0.0,
     use_weighted_sampler: Optional[bool] = False,
     sample_by: Optional[str] = 'cell_type',
-    geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
+    fm_encoder_name: Optional[str] = 'gf-6L-30M-i2048',
     seed: Optional[int] = 0,
     set_gpfinder_weight_decay: Optional[float] = None,
     calc_gp_loss: bool = True,
@@ -393,7 +393,7 @@ def configure_model_version(args, tag):
         'gp_inputs': args[f'gp_inputs_{tag}'],
         'use_flash': args['use_flash'],
         'learn_new_gp': args['learn_new_gp'],
-        'geneformer_model': args['geneformer_model_path'],
+        'fm_encoder_name': args['fm_encoder_name'],
         'peft_config_path': args['peft_config_path'],
         'use_baseline_tk': args['use_baseline_tk'],
         'tk_vocab_size': args['tk_vocab_size'],
@@ -463,9 +463,10 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
         'lambda_gp_similarity': args['lambda_gp_similarity'],
         'weight_decay': args['weight_decay'],
         'set_gpfinder_weight_decay': args['set_gpfinder_weight_decay'],
-        'optimizer': DeepSpeedCPUAdam
-        if args['strategy'].startswith('deepspeed')
-        else torch.optim.AdamW,
+        'optimizer': torch.optim.AdamW,
+        # DeepSpeedCPUAdam
+        # if args['strategy'].startswith('deepspeed')
+        # else
     }
 
     global_params = {
