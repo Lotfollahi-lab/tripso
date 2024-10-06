@@ -57,7 +57,6 @@ def run_training(
     lr: float = 1e-3,
     finetune_lr: float = 1e-5,
     resume_training: Optional[bool] = False,
-    gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
     frac_for_training: Optional[float] = 1.0,
     lambda_gp_similarity: Optional[float] = 1e-2,
@@ -152,8 +151,6 @@ def run_training(
         Model trainer learning rate
     resume_training : bool
         Set to True to resume training from checkpoint
-    gene_counts_df : str
-        Dataframe with the counts of each gene in the dataset
     gp_inputs : list
         Which GP from GPDB to include in model if None, defaults to all GP
     frac_for_training : float
@@ -537,7 +534,6 @@ def configure_logger(args):
 
 def configure_model(args):
     common_params = {
-        'gene_counts_df': args['gene_counts_df'],
         'database': args['gpdb'],
         'n_blocks': args['n_blocks'],
         'mgm_mask_ratio': args['mgm'],

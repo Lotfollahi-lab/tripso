@@ -60,7 +60,6 @@ def run_training_from_select_gps(
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
     finetune_lr: float = 1e-5,
-    gene_counts_df: Optional[str] = None,
     gp_inputs_old: Optional[list] = None,
     gp_inputs_new: Optional[list] = None,
     frac_for_training: Optional[float] = 1.0,
@@ -158,8 +157,6 @@ def run_training_from_select_gps(
         Model trainer learning rate
     resume_training : bool
         Set to True to resume training from checkpoint
-    gene_counts_df : str
-        Dataframe with the counts of each gene in the dataset
     gp_inputs : list
         Which GP from GPDB to include in model if None, defaults to all GP
     frac_for_training : float
@@ -383,7 +380,6 @@ def run_training_from_select_gps(
 
 def configure_model_version(args, tag):
     common_params = {
-        'gene_counts_df': args['gene_counts_df'],
         'database': args[f'gpdb_{tag}'],
         'n_blocks': args['n_blocks'],
         'mgm_mask_ratio': args['mgm'],

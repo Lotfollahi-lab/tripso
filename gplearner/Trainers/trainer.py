@@ -820,7 +820,7 @@ class gpGlobal(gpBase):
                     on_epoch=True,
                     prog_bar=True,
                     logger=True,
-                    sync_dist=True,
+                    # sync_dist=True,
                 )
 
                 # empty lists
@@ -835,7 +835,7 @@ class gpGlobal(gpBase):
                 on_epoch=True,
                 prog_bar=True,
                 logger=True,
-                sync_dist=True,
+                # sync_dist=True,
             )
 
         if self.global_loss == 'reconstruction':
@@ -1312,7 +1312,6 @@ class EmbEvaluator(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         x = batch[self.emb_label]
-        # print('x', x)
 
         y = batch[self.y_label]
 
