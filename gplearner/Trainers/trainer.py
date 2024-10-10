@@ -7,7 +7,6 @@ from typing import (
     Union,
 )
 
-# from deepspeed.ops.adam import DeepSpeedCPUAdam
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -506,6 +505,7 @@ class gpBase(pl.LightningModule):
         return holder
 
     def configure_optimizers(self):
+        # return DeepSpeedCPUAdam(self.parameters())
         # Define optimizer and may be consider weight decay
         # to improve generalization L2 regularization
 

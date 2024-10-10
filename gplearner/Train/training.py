@@ -52,7 +52,6 @@ def run_training(
     gene_format: Literal['symbol', 'ensembl'] = 'symbol',
     model_type: str = 'Base',
     strategy: str = 'ddp_find_unused_parameters_true',
-    gp_latent_size: int = 256,
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
     finetune_lr: float = 1e-5,
@@ -77,6 +76,7 @@ def run_training(
     use_weighted_sampler: Optional[bool] = False,
     sample_by: Optional[str] = None,
     fm_encoder_name: Optional[str] = 'gf-6L-30M-i2048',
+    fm_encoder_pkg: Optional[str] = 'geneformer',
     peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
     supervised_rem_var: Optional[str] = None,
@@ -99,6 +99,7 @@ def run_training(
     use_onehot_wrapper: Optional[bool] = False,
     vocab_gene_names: Optional[list] = None,
     precision=32,  # 'bf16-mixed',
+    bert_config: Optional[str] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -140,10 +141,6 @@ def run_training(
         extra self-attention head to learn a cell token based on GP tokens
     strategy : str
         strategy for multi-GPU lightning trainer
-    gp_latent_size : int
-        size of latent space for GP tokens if <256,
-        will use MLP to reduce dimensions of Geneformer gene embeddings
-        else take embeddings directly
     attn_dropout : float
         Dropout for attention layers
         NB only for final self attention block for now
@@ -216,7 +213,7 @@ def run_training(
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # torch.set_float32_matmul_precision('medium')
+    torch.set_float32_matmul_precision('medium')
 
     args = locals()
 
@@ -328,7 +325,7 @@ def run_training(
         devices=-1,
         accelerator='auto',
         precision=precision,
-        # profiler='advanced',
+        profiler='advanced',
         num_nodes=num_nodes,
         strategy=strategy,
         limit_val_batches=limit_val_batches,
@@ -463,7 +460,6 @@ def configure_logger(args):
                 'lr_scheduler': args['lr_scheduler'],
                 'batch_size': args['batch_size'],
                 'strategy': args['strategy'],
-                'gp_latent_size': args['gp_latent_size'],
                 'attn_dropout': args['attn_dropout'],
                 'transformer_block': 'preLN',
                 'learning_rate': args['lr'],
@@ -479,6 +475,8 @@ def configure_logger(args):
                 'use_pos_emb': args['use_pos_emb'],
                 'precision': args['precision'],
                 'fm_encoder_name': args['fm_encoder_name'],
+                'fm_encoder_pkg': args['fm_encoder_pkg'],
+                'bert_config': args['bert_config'],
             }
         )
 
@@ -538,7 +536,6 @@ def configure_model(args):
         'n_blocks': args['n_blocks'],
         'mgm_mask_ratio': args['mgm'],
         'num_heads': args['n_heads'],
-        'gp_latent_size': args['gp_latent_size'],
         'attn_dropout': args['attn_dropout'],
         'gp_inputs': args['gp_inputs'],
         'use_flash': args['use_flash'],
@@ -552,6 +549,8 @@ def configure_model(args):
         'vocab_gene_names': args['vocab_gene_names'],
         'do_ensembl_conversion': args['gene_format'] == 'symbol',
         'fm_encoder_name': args['fm_encoder_name'],
+        'fm_encoder_pkg': args['fm_encoder_pkg'],
+        'bert_config': args['bert_config'],
     }
 
     global_params = {
@@ -606,10 +605,9 @@ def configure_lightning_module(model, gp_similarity, args):
         'output_dir': args['output_dir'],
         'lambda_gp_similarity': args['lambda_gp_similarity'],
         'weight_decay': args['weight_decay'],
-        'optimizer': torch.optim.AdamW
-        # DeepSpeedCPUAdam
+        'optimizer': torch.optim.AdamW,  # DeepSpeedCPUAdam
         # if args['strategy'].startswith('deepspeed')
-        # else ,
+        # else
     }
 
     global_params = {

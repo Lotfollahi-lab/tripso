@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from peft import PeftConfig, get_peft_model
-from transformers import BertForMaskedLM
+from transformers import BertConfig, BertForMaskedLM
 
 from ..Modules.modules import (
     Mlp,
@@ -126,6 +126,37 @@ class gfWrapper(nn.Module):
             input_data=input_dataset,
             # turn off Geneformer dropout
             inference=True,
+        )
+
+        return emb_out
+
+
+class BertWrapper(nn.Module):
+    def __init__(
+        self,
+        config_dict,
+        fm_layer_to_quant,
+        token_dictionary_file,
+    ):
+        super().__init__()
+
+        config = BertConfig(**config_dict)
+
+        # Initialize geneformer model for getting geneformer embeddings
+        self.model = BertForMaskedLM(config)
+
+        self.gf_emb_extractor = EmbExtractor(
+            emb_layer=fm_layer_to_quant, token_dictionary_file=token_dictionary_file
+        )
+
+    def forward(self, input_dataset):
+        # input is tokenized dataset
+
+        emb_out = self.gf_emb_extractor.extract_embs(
+            model=self.model,
+            input_data=input_dataset,
+            # dropout only when training
+            inference=(not self.training),
         )
 
         return emb_out
@@ -776,8 +807,8 @@ class gpTransformerBase(nn.Module):
         use_pos_emb='sin_cos',
         use_onehot_wrapper=False,
         vocab_gene_names=None,
-        # for benchmarking only
-        gp_latent_size=512,
+        bert_config=None,
+        gp_latent_size=256,  # legacy, for baselines
     ):
         """
         database :
@@ -870,6 +901,55 @@ class gpTransformerBase(nn.Module):
                     peft_config_path=peft_config_path,
                     token_dictionary_file=self.gene_token_path,
                 )
+        elif fm_encoder_pkg == 'geneformer_2021':
+            geneformer_repo_path = get_gf_repo()
+            geneformer_model = fm_encoder_name
+
+            gp_latent_size = 256
+            fm_model_input_size = 2048
+            self.gene_token_path = os.path.join(
+                geneformer_repo_path,
+                'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+            )
+
+            self.gene_name_path = os.path.join(
+                geneformer_repo_path,
+                'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+            )
+
+            self.gf_wrapper = gfWrapper(
+                geneformer_model=geneformer_model,
+                fm_layer_to_quant=fm_layer_to_quant,
+                peft_config_path=peft_config_path,
+                token_dictionary_file=self.gene_token_path,
+            )
+
+        elif fm_encoder_pkg == 'from_scratch':
+            fm_model_input_size = bert_config['max_position_embeddings']
+            gp_latent_size = bert_config['hidden_size']
+
+            geneformer_repo_path = get_gf_repo()
+
+            if fm_model_input_size == 4096:
+                self.gene_token_path = TOKEN_DICTIONARY_FILE
+                self.gene_name_path = ENSEMBL_DICTIONARY_FILE
+            else:
+                self.gene_token_path = os.path.join(
+                    geneformer_repo_path,
+                    'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+                )
+
+                self.gene_name_path = os.path.join(
+                    geneformer_repo_path,
+                    'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+                )
+
+            self.gf_wrapper = BertWrapper(
+                config_dict=bert_config,
+                fm_layer_to_quant=fm_layer_to_quant,
+                token_dictionary_file=self.gene_token_path,
+            )
+
         else:
             raise ValueError('Only geneformer is supported for now')
 

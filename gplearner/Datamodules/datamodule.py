@@ -434,9 +434,9 @@ class txDataModule(LightningDataModule):
         )  # Remaining for test
 
         # # FOR DEBUGGING
-        # train_size = 1
-        # val_size = 1
-        # test_size = 1
+        # train_size = 2560
+        # val_size = 256
+        # test_size = 256
 
         discard = dataset_size - train_size - val_size - test_size
 

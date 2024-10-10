@@ -1,5 +1,4 @@
 import math
-import warnings
 from functools import partial
 from typing import Optional
 
@@ -9,9 +8,7 @@ import pandas as pd
 import torch
 from scipy.sparse import issparse
 from scipy.stats import wasserstein_distance
-from sklearn.metrics import homogeneity_score
 from sklearn.metrics.pairwise import rbf_kernel
-from sklearn_extra.cluster import KMedoids
 from tqdm import tqdm
 
 
@@ -385,89 +382,89 @@ def compute_distribution_distances(pred: torch.Tensor, true: torch.Tensor):
     return dict(zip(names, to_return))
 
 
-#############################################
-# Concept alignment score
-# from https://github.com/mateoespinosa/cem
-#############################################
+# #############################################
+# # Concept alignment score
+# # from https://github.com/mateoespinosa/cem
+# #############################################
 
 
-def concept_alignment_score(
-    c_vec,
-    c_test,
-    step,
-    progress_bar=False,
-):
-    """
-    Computes the concept alignment score between learnt concepts and labels.
+# def concept_alignment_score(
+#     c_vec,
+#     c_test,
+#     step,
+#     progress_bar=False,
+# ):
+#     """
+#     Computes the concept alignment score between learnt concepts and labels.
 
-    :param c_vec: predicted concept representations (can be concept embeddings)
-    :param c_test: concept ground truth labels
-    :param y_test: task ground truth labels
-    :param step: number of integration steps
-    :return: concept alignment AUC, task alignment AUC
+#     :param c_vec: predicted concept representations (can be concept embeddings)
+#     :param c_test: concept ground truth labels
+#     :param y_test: task ground truth labels
+#     :param step: number of integration steps
+#     :return: concept alignment AUC, task alignment AUC
 
-    adapted from https://github.com/mateoespinosa/cem/blob/main/cem/metrics/cas.py
-    accessed 27.04.2024
+#     adapted from https://github.com/mateoespinosa/cem/blob/main/cem/metrics/cas.py
+#     accessed 27.04.2024
 
-    EDIT : removed option to force alignment
-    """
+#     EDIT : removed option to force alignment
+#     """
 
-    warnings.simplefilter('ignore', UserWarning)
+#     warnings.simplefilter('ignore', UserWarning)
 
-    # First lets compute an alignment between concept
-    # scores and ground truth concepts
-    # compute the maximum value for the AUC
-    n_clusters = np.linspace(
-        2,
-        c_vec.shape[0],
-        step,
-    ).astype(int)
+#     # First lets compute an alignment between concept
+#     # scores and ground truth concepts
+#     # compute the maximum value for the AUC
+#     n_clusters = np.linspace(
+#         2,
+#         c_vec.shape[0],
+#         step,
+#     ).astype(int)
 
-    max_auc = np.trapz(np.ones(len(n_clusters)))
+#     max_auc = np.trapz(np.ones(len(n_clusters)))
 
-    # for each concept:
-    #   1. find clusters
-    #   2. compare cluster assignments with ground truth concept/task labels
-    concept_auc = []
-    if progress_bar:
-        bar = tqdm(range(c_test.shape[1]))
-    else:
-        bar = range(c_test.shape[1])
-    for concept_id in bar:
-        concept_homogeneity = []
-        for nc in n_clusters:
-            kmedoids = KMedoids(n_clusters=nc, random_state=0)
-            if c_vec.shape[1] != c_test.shape[1]:
-                c_cluster_labels = kmedoids.fit_predict(
-                    np.hstack(
-                        [
-                            c_vec[:, concept_id][:, np.newaxis],
-                            c_vec[:, c_test.shape[1] :],
-                        ]
-                    )
-                )
-            elif c_vec.shape[1] == c_test.shape[1] and len(c_vec.shape) == 2:
-                c_cluster_labels = kmedoids.fit_predict(
-                    c_vec[:, concept_id].reshape(-1, 1)
-                )
-            else:
-                c_cluster_labels = kmedoids.fit_predict(c_vec[:, concept_id, :])
+#     # for each concept:
+#     #   1. find clusters
+#     #   2. compare cluster assignments with ground truth concept/task labels
+#     concept_auc = []
+#     if progress_bar:
+#         bar = tqdm(range(c_test.shape[1]))
+#     else:
+#         bar = range(c_test.shape[1])
+#     for concept_id in bar:
+#         concept_homogeneity = []
+#         for nc in n_clusters:
+#             kmedoids = KMedoids(n_clusters=nc, random_state=0)
+#             if c_vec.shape[1] != c_test.shape[1]:
+#                 c_cluster_labels = kmedoids.fit_predict(
+#                     np.hstack(
+#                         [
+#                             c_vec[:, concept_id][:, np.newaxis],
+#                             c_vec[:, c_test.shape[1] :],
+#                         ]
+#                     )
+#                 )
+#             elif c_vec.shape[1] == c_test.shape[1] and len(c_vec.shape) == 2:
+#                 c_cluster_labels = kmedoids.fit_predict(
+#                     c_vec[:, concept_id].reshape(-1, 1)
+#                 )
+#             else:
+#                 c_cluster_labels = kmedoids.fit_predict(c_vec[:, concept_id, :])
 
-            # compute alignment with ground truth labels
-            concept_homogeneity.append(
-                homogeneity_score(c_test[:, concept_id], c_cluster_labels)
-            )
+#             # compute alignment with ground truth labels
+#             concept_homogeneity.append(
+#                 homogeneity_score(c_test[:, concept_id], c_cluster_labels)
+#             )
 
-            # EDIT ---- here we only have one set of labels
-            # task_homogeneity.append(
-            #     homogeneity_score(y_test, c_cluster_labels)
-            # )
+#             # EDIT ---- here we only have one set of labels
+#             # task_homogeneity.append(
+#             #     homogeneity_score(y_test, c_cluster_labels)
+#             # )
 
-        # compute the area under the curve
-        concept_auc.append(np.trapz(np.array(concept_homogeneity)) / max_auc)
-        # task_auc.append(np.trapz(np.array(task_homogeneity)) / max_auc)
+#         # compute the area under the curve
+#         concept_auc.append(np.trapz(np.array(concept_homogeneity)) / max_auc)
+#         # task_auc.append(np.trapz(np.array(task_homogeneity)) / max_auc)
 
-    # return the average alignment across all concepts
-    concept_auc = np.mean(concept_auc)
+#     # return the average alignment across all concepts
+#     concept_auc = np.mean(concept_auc)
 
-    return concept_auc
+#     return concept_auc

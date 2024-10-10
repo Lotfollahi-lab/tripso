@@ -24,8 +24,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
+from linformer import LinformerSelfAttention
 
-from ..Utils import (
+from gplearner.Utils import (
     drop_path,
     mlm_mask_generator,
     trunc_normal_,
@@ -175,19 +176,33 @@ class Block(nn.Module):
         # act_layer=nn.ReLU,
         norm_layer=nn.LayerNorm,
         use_flash=False,
+        use_lin=False,
+        seq_len=2048,
     ):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = Attention(
-            dim,
-            input_dim=dim,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            qk_scale=qk_scale,
-            attn_drop=attn_drop,
-            proj_drop=drop,
-            use_flash=use_flash,
-        )
+        self.use_lin = use_lin
+
+        if use_lin:
+            self.attn = LinformerSelfAttention(
+                dim=dim,
+                seq_len=seq_len,
+                heads=num_heads,
+                one_kv_head=True,
+                share_kv=True,
+            )
+
+        else:
+            self.attn = Attention(
+                dim,
+                input_dim=dim,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                attn_drop=attn_drop,
+                proj_drop=drop,
+                use_flash=use_flash,
+            )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -199,13 +214,20 @@ class Block(nn.Module):
         )
 
     def forward(self, x, attn_mask, return_attention):
-        y, attn = self.attn(
-            self.norm1(x), attn_mask=attn_mask, return_attention=return_attention
-        )  # attn is None when using flash attention
-        # y = self.attn(self.norm1(x), attn_mask=attn_mask)
+        if self.use_lin:
+            y = self.attn(self.norm1(x))
+        else:
+            y, attn = self.attn(
+                self.norm1(x), attn_mask=attn_mask, return_attention=return_attention
+            )  # attn is None when using flash attention
+            # y = self.attn(self.norm1(x), attn_mask=attn_mask)
 
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+
+        if self.use_lin:
+            attn = None
+
         return x, attn
 
 
@@ -273,6 +295,8 @@ class gpTransformerEncoder(nn.Module):
         use_pos_emb='sin_cos',
         vocab_size=None,
         use_flash=False,
+        use_lin=False,  # use linformer self attention
+        seq_len=2048,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -312,6 +336,8 @@ class gpTransformerEncoder(nn.Module):
                     drop_path=dpr[i],
                     norm_layer=norm_layer,
                     use_flash=use_flash,
+                    use_lin=use_lin,
+                    seq_len=seq_len + 1,  # +1 for cls
                 )
                 for i in range(depth)
             ]
@@ -661,9 +687,29 @@ class PromptEncoder(torch.nn.Module):
 if __name__ == '__main__':
     print('Testing the model')
     model = gpTransformerEncoder(
-        n_gp_tokens=5, depth=1, mlm_masking_prob=0.4, embed_dim=32
+        n_gp_tokens=5,
+        depth=1,
+        mlm_masking_prob=0.4,
+        embed_dim=32,
+        use_lin=True,
+        seq_len=6,
     )
+
+    for n, p in model.named_parameters():
+        print(n, p.shape)
+
     x = torch.randn(1, 5, 32)
     gene_labels = torch.randint(0, 10, (1, 5))
-    out = model(x, gene_labels, inference=False, attn_mask=None, return_attention=False)
+    attn_mask = torch.ones(1, 6)
+    out = model(
+        x,
+        gene_labels,
+        masking=True,
+        attn_mask=attn_mask,
+        return_attention=False,
+    )
+
+    for k, v in out.items():
+        print(k, v.shape)
+
     print(out['gene_labels'])
