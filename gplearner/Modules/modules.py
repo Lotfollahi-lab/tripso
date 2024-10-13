@@ -19,18 +19,157 @@ Mostly copy-paste from timm library.
 https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
 """
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
+from flash_attn import flash_attn_func
 from linformer import LinformerSelfAttention
+from torch import Tensor
 
-from gplearner.Utils import (
+from ..Utils.utils import (
+    RMSNorm,
+    apply_rotary_emb,
     drop_path,
     mlm_mask_generator,
     trunc_normal_,
 )
+
+######################################################################
+# Differential transformer
+# from https://github.com/microsoft/unilm/blob/master/
+# Diff-Transformer/multihead_flashdiff_2.py
+# Accessed 10/10/2024
+######################################################################
+
+
+def init_method(tensor, **kwargs):
+    nn.init.kaiming_uniform_(tensor, a=math.sqrt(5))
+
+
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
+    bs, n_kv_heads, slen, head_dim = x.shape
+    if n_rep == 1:
+        return x
+    return (
+        x[:, :, None, :, :]
+        .expand(bs, n_kv_heads, n_rep, slen, head_dim)
+        .reshape(bs, n_kv_heads * n_rep, slen, head_dim)
+    )
+
+
+def lambda_init_fn(depth):
+    return 0.8 - 0.6 * math.exp(-0.3 * depth)
+
+
+class MultiheadFlashDiff2(nn.Module):
+    """
+    DiffAttn implemented with FlashAttention,
+    for packages that does not support different qk/v dimensions
+    e.g., flash-attention (https://github.com/Dao-AILab/flash-attention)
+    """
+
+    def __init__(
+        self,
+        embed_dim,
+        depth,
+        num_heads,
+        # args:
+        model_parallel_size,
+        decoder_kv_attention_heads,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        # num_heads set to half of Transformer's #heads
+        self.num_heads = num_heads // model_parallel_size
+        self.num_kv_heads = (
+            decoder_kv_attention_heads // model_parallel_size
+            if decoder_kv_attention_heads is not None
+            else num_heads // model_parallel_size
+        )
+        self.n_rep = self.num_heads // self.num_kv_heads
+
+        self.head_dim = embed_dim // num_heads  # // 2 (otherwise cant reshape)
+        self.scaling = self.head_dim**-0.5
+
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.k_proj = nn.Linear(embed_dim, embed_dim // self.n_rep, bias=False)
+        self.v_proj = nn.Linear(embed_dim, embed_dim // self.n_rep, bias=False)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        self.lambda_init = lambda_init_fn(depth)
+        self.lambda_q1 = nn.Parameter(
+            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
+        )
+        self.lambda_k1 = nn.Parameter(
+            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
+        )
+        self.lambda_q2 = nn.Parameter(
+            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
+        )
+        self.lambda_k2 = nn.Parameter(
+            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
+        )
+
+        self.subln = RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=False)
+
+    def forward(
+        self,
+        x,
+        rel_pos,
+        attn_mask=None,
+    ):
+        bsz, tgt_len, embed_dim = x.size()
+        src_len = tgt_len
+
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        q = q.view(bsz, tgt_len, 2 * self.num_heads, self.head_dim)
+        k = k.view(bsz, src_len, 2 * self.num_kv_heads, self.head_dim)
+        v = v.view(bsz, src_len, self.num_kv_heads, 2, self.head_dim)
+
+        q = apply_rotary_emb(q, *rel_pos, interleaved=True)
+        k = apply_rotary_emb(k, *rel_pos, interleaved=True)
+
+        q = q.reshape(bsz, tgt_len, self.num_heads, 2, self.head_dim)
+        k = k.reshape(bsz, src_len, self.num_kv_heads, 2, self.head_dim)
+        q1, q2 = q[:, :, :, 0], q[:, :, :, 1]
+        k1, k2 = k[:, :, :, 0], k[:, :, :, 1]
+        v1, v2 = v[:, :, :, 0], v[:, :, :, 1]
+
+        attn11 = flash_attn_func(q1, k1, v1, causal=True)
+        attn12 = flash_attn_func(q1, k1, v2, causal=True)
+        attn1 = torch.cat([attn11, attn12], dim=-1)
+
+        attn21 = flash_attn_func(q2, k2, v1, causal=True)
+        attn22 = flash_attn_func(q2, k2, v2, causal=True)
+        attn2 = torch.cat([attn21, attn22], dim=-1)
+
+        lambda_1 = torch.exp(
+            torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()
+        ).type_as(q)
+        lambda_2 = torch.exp(
+            torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()
+        ).type_as(q)
+        lambda_full = lambda_1 - lambda_2 + self.lambda_init
+        attn = attn1 - lambda_full * attn2
+
+        attn = self.subln(attn)
+        attn = attn * (1 - self.lambda_init)
+        attn = attn.reshape(bsz, tgt_len, self.num_heads * 2 * self.head_dim)
+
+        attn = self.out_proj(attn)
+        return attn
+
+
+######################################################################
+# Dino
+######################################################################
 
 
 class DropPath(nn.Module):
@@ -231,6 +370,11 @@ class Block(nn.Module):
         return x, attn
 
 
+# --------------------------------------------------------------------
+# Positional encoding
+# --------------------------------------------------------------------
+
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
         super().__init__()
@@ -275,6 +419,103 @@ class LearntPositionalEncoding(nn.Module):
         return x + self.position_embeddings(position_ids)
 
 
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+
+class RotaryPositionalEmbeddings(nn.Module):
+    """
+    This class implements Rotary Positional Embeddings (RoPE)
+    proposed in https://arxiv.org/abs/2104.09864.
+
+    Reference implementation (used for correctness verfication)
+    can be found here:
+    https://github.com/facebookresearch/llama/blob/main/llama/model.py#L450
+
+    In this implementation we cache the embeddings for each position upto
+    ``max_seq_len`` by computing this during init.
+
+    Args:
+        dim (int): Embedding dimension. This is usually set to the dim of each
+            head in the attention module computed as ````embed_dim`` // ``num_heads````
+        max_seq_len (int): Maximum expected sequence length for the
+            model, if exceeded the cached freqs will be recomputed
+        base (int): The base for the geometric progression used to compute
+            the rotation angles
+
+    From https://pytorch.org/torchtune/0.1/_modules/torchtune/modules/
+    position_embeddings.html#RotaryPositionalEmbeddings
+
+    accessed 11/10/2024
+
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        max_seq_len: int = 4096,
+        base: int = 10_000,
+    ) -> None:
+        super().__init__()
+        self.dim = dim
+        self.base = base
+        self.max_seq_len = max_seq_len
+        self._rope_init()
+
+    # We need to explicitly define reset_parameters for FSDP initialization, see
+    # https://github.com/pytorch/pytorch/blob/
+    # 797d4fbdf423dd9320ebe383fb57ffb1135c4a99/torch/distributed/fsdp/_init_utils.py#L885
+    def reset_parameters(self):
+        self._rope_init()
+
+    def _rope_init(self):
+        theta = 1.0 / (
+            self.base
+            ** (torch.arange(0, self.dim, 2)[: (self.dim // 2)].float() / self.dim)
+        )
+        self.register_buffer('theta', theta, persistent=False)
+        self.build_rope_cache(self.max_seq_len)
+
+    def build_rope_cache(self, max_seq_len: int = 4096) -> None:
+        # Create position indexes `[0, 1, ..., max_seq_len - 1]`
+        seq_idx = torch.arange(
+            max_seq_len, dtype=self.theta.dtype, device=self.theta.device
+        )
+
+        # Outer product of theta and position index; output tensor has
+        # a shape of [max_seq_len, dim // 2]
+        idx_theta = torch.einsum('i, j -> ij', seq_idx, self.theta).float()
+
+        # cache includes both the cos and sin components and so the output shape is
+        # [max_seq_len, dim // 2, 2]
+        # modified to return cos and sin separately
+        # cache = torch.stack([torch.cos(idx_theta), torch.sin(idx_theta)], dim=-1)
+        # self.register_buffer("cache", cache, persistent=False)
+
+        cache_cos = torch.cos(idx_theta)
+        cache_sin = torch.sin(idx_theta)
+
+        # convert to bf16
+        cache_cos = cache_cos.to(torch.bfloat16)
+        cache_sin = cache_sin.to(torch.bfloat16)
+
+        self.register_buffer('cache_cos', cache_cos, persistent=False)
+        self.register_buffer('cache_sin', cache_sin, persistent=False)
+
+    def forward(self, x: Tensor, input_pos: Optional[Tensor] = None) -> Tensor:
+        pass
+
+    # pytorch implementation returns tensor with RoPE already applied
+
+
+# --------------------------------------------------------------------
+# Main encoder class
+# --------------------------------------------------------------------
+
+
 class gpTransformerEncoder(nn.Module):
     """GP Transformer main block"""
 
@@ -296,6 +537,7 @@ class gpTransformerEncoder(nn.Module):
         vocab_size=None,
         use_flash=False,
         use_lin=False,  # use linformer self attention
+        use_diffl=False,  # use differential transformer
         seq_len=2048,
     ):
         super().__init__()
@@ -323,25 +565,42 @@ class gpTransformerEncoder(nn.Module):
             no_mask_tokens=[None],
         )
 
-        self.blocks = nn.ModuleList(
-            [
-                Block(
-                    dim=embed_dim,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    qk_scale=qk_scale,
-                    drop=drop_rate,
-                    attn_drop=attn_drop_rate,
-                    drop_path=dpr[i],
-                    norm_layer=norm_layer,
-                    use_flash=use_flash,
-                    use_lin=use_lin,
-                    seq_len=seq_len + 1,  # +1 for cls
-                )
-                for i in range(depth)
-            ]
-        )
+        self.use_diffl = use_diffl
+        if use_diffl:
+            if num_heads == 1:
+                raise ValueError('Differential transformer requires num_heads > 1')
+            self.blocks = nn.ModuleList(
+                [
+                    MultiheadFlashDiff2(
+                        embed_dim,
+                        depth,
+                        num_heads,
+                        model_parallel_size=2,
+                        decoder_kv_attention_heads=num_heads,
+                    )
+                ]
+            )
+
+        else:
+            self.blocks = nn.ModuleList(
+                [
+                    Block(
+                        dim=embed_dim,
+                        num_heads=num_heads,
+                        mlp_ratio=mlp_ratio,
+                        qkv_bias=qkv_bias,
+                        qk_scale=qk_scale,
+                        drop=drop_rate,
+                        attn_drop=attn_drop_rate,
+                        drop_path=dpr[i],
+                        norm_layer=norm_layer,
+                        use_flash=use_flash,
+                        use_lin=use_lin,
+                        seq_len=seq_len + 1,  # +1 for cls
+                    )
+                    for i in range(depth)
+                ]
+            )
 
         self.norm = norm_layer(embed_dim)
         trunc_normal_(self.cls_token, std=0.02)
@@ -362,11 +621,19 @@ class gpTransformerEncoder(nn.Module):
             self.pos_embed = PositionalEncoding(
                 d_model=embed_dim,
                 dropout=drop_rate,
-                max_len=3000,  # 2048
+                max_len=seq_len + 1,  # 2048
             )
         elif self.use_pos_emb == 'learned':
             self.pos_embed = LearntPositionalEncoding(
-                d_model=embed_dim, max_seq_length=2048
+                d_model=embed_dim, max_seq_length=seq_len + 1
+            )
+
+        if self.use_diffl:
+            # Differential transformer uses rotatory embeddings
+            self.pos_embed = nn.Identity()
+            self.rope = RotaryPositionalEmbeddings(
+                dim=embed_dim // num_heads // 2,
+                max_seq_len=seq_len + 1,
             )
 
     def _init_weights(self, m):
@@ -391,7 +658,7 @@ class gpTransformerEncoder(nn.Module):
         # x = x.masked_fill(mask.unsqueeze(-1), 0)
 
         # Add random tokens to the masked positions
-        random_tokens = torch.randn(x.shape, device=x.device)
+        random_tokens = torch.randn(x.shape, device=x.device, dtype=x.dtype)
 
         x[random_mask] = random_tokens[random_mask]
 
@@ -442,7 +709,19 @@ class gpTransformerEncoder(nn.Module):
         x, gene_labels = self.prepare_tokens(x, gene_labels)
 
         for blk in self.blocks:
-            x, attn = blk(x, attn_mask=attn_mask, return_attention=return_attention)
+            if self.use_diffl:
+                x = blk(
+                    x,
+                    rel_pos=(self.rope.cache_cos, self.rope.cache_sin),
+                    attn_mask=attn_mask,
+                )
+                attn = None
+            else:
+                x, attn = blk(
+                    x,
+                    attn_mask=attn_mask,
+                    return_attention=return_attention,
+                )
 
         x = self.norm(x)
 
@@ -690,17 +969,28 @@ if __name__ == '__main__':
         n_gp_tokens=5,
         depth=1,
         mlm_masking_prob=0.4,
-        embed_dim=32,
-        use_lin=True,
-        seq_len=6,
+        embed_dim=8,
+        use_diffl=True,
+        seq_len=16,
+        num_heads=8,
     )
 
     for n, p in model.named_parameters():
         print(n, p.shape)
 
-    x = torch.randn(1, 5, 32)
-    gene_labels = torch.randint(0, 10, (1, 5))
-    attn_mask = torch.ones(1, 6)
+    x = torch.randn(1, 15, 8, dtype=torch.float16)
+    gene_labels = torch.randint(0, 10, (1, 15), dtype=torch.long)
+    attn_mask = torch.ones(1, 6, 6, dtype=torch.float16)
+
+    # move everything to cuda
+    x = x.to('cuda')
+    gene_labels = gene_labels.to('cuda')
+    attn_mask = attn_mask.to('cuda')
+    model = model.to('cuda')
+
+    # make model fp16 for flash attention
+    model = model.half()
+
     out = model(
         x,
         gene_labels,

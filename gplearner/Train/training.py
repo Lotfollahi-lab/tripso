@@ -100,6 +100,7 @@ def run_training(
     vocab_gene_names: Optional[list] = None,
     precision=32,  # 'bf16-mixed',
     bert_config: Optional[str] = None,
+    use_diffl: Optional[bool] = False,
 ):
     """
     Wrapper function for training gpLearner model
@@ -477,6 +478,7 @@ def configure_logger(args):
                 'fm_encoder_name': args['fm_encoder_name'],
                 'fm_encoder_pkg': args['fm_encoder_pkg'],
                 'bert_config': args['bert_config'],
+                'use_diffl': args['use_diffl'],
             }
         )
 
@@ -551,6 +553,7 @@ def configure_model(args):
         'fm_encoder_name': args['fm_encoder_name'],
         'fm_encoder_pkg': args['fm_encoder_pkg'],
         'bert_config': args['bert_config'],
+        'use_diffl': args['use_diffl'],
     }
 
     global_params = {

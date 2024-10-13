@@ -265,11 +265,12 @@ class gpBase(pl.LightningModule):
 
         for i, gp in enumerate(self.model.gp_inputs):
             # only log if requires_grad = True
-            if (
-                self.model.multi_gp_encoder.encoder[i]
-                .blocks[0]
-                .attn.qkv.weight.requires_grad
-            ):
+            # if (
+            #     self.model.multi_gp_encoder.encoder[i]
+            #     .blocks[0]
+            #     .attn.qkv.weight.requires_grad
+            # ):
+            if True:
                 self.log(
                     f'train/{gp}_MGM_loss',
                     loss_per_gp[gp],
@@ -456,13 +457,14 @@ class gpBase(pl.LightningModule):
 
         for i in range(len(self.model.gp_inputs)):
             # Loss
-            if self.calc_gp_loss and (
-                (
-                    self.model.multi_gp_encoder.encoder[i]
-                    .blocks[0]
-                    .attn.qkv.weight.requires_grad
-                )
-            ):
+            # if self.calc_gp_loss and (
+            #     (
+            #         self.model.multi_gp_encoder.encoder[i]
+            #         .blocks[0]
+            #         .attn.qkv.weight.requires_grad
+            #     )
+            # ):
+            if True:
                 loss_i = F.cross_entropy(
                     output['logits_lm_list'][i].reshape(
                         -1, output['logits_lm_list'][i].shape[-1]

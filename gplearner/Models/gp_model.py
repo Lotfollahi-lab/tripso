@@ -184,6 +184,7 @@ class gpWrapper(nn.Module):
         learn_new_gp,
         use_pos_emb,
         fm_model_input_size,
+        use_diffl,
     ):
         super().__init__()
 
@@ -251,6 +252,7 @@ class gpWrapper(nn.Module):
                     mlm_masking_prob=self.mgm_mask_ratio,
                     use_flash=use_flash,
                     use_pos_emb=use_pos_emb,
+                    use_diffl=use_diffl,
                 )
                 for i in range(len(gp_inputs))
             ]
@@ -794,6 +796,7 @@ class gpTransformerBase(nn.Module):
         n_blocks=1,
         mgm_mask_ratio=0.5,
         use_flash=False,
+        use_diffl=False,
         fm_encoder_pkg='geneformer',
         fm_encoder_name='gf-6L-30M-i2048',
         peft_config_path=None,
@@ -997,6 +1000,7 @@ class gpTransformerBase(nn.Module):
             learn_new_gp=learn_new_gp,
             use_pos_emb=use_pos_emb,
             fm_model_input_size=fm_model_input_size,
+            use_diffl=use_diffl,
         )
 
     def forward(
