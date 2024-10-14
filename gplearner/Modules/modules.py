@@ -23,19 +23,37 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange, repeat
 from flash_attn import flash_attn_func
 from linformer import LinformerSelfAttention
 from torch import Tensor
 
-from ..Utils.utils import (
+try:
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
+except ModuleNotFoundError:
+    print('flex_attention not available')
+
+
+from gplearner.Utils.utils import (
     RMSNorm,
     apply_rotary_emb,
     drop_path,
     mlm_mask_generator,
     trunc_normal_,
 )
+
+######################################################################
+# Flex attention
+######################################################################
+
+# Compile flex_attention function if available
+try:
+    flex_attention = torch.compile(
+        flex_attention, dynamic=False, mode='max-autotune-no-cudagraphs'
+    )
+except AttributeError:
+    pass
 
 ######################################################################
 # Differential transformer
@@ -224,6 +242,7 @@ class Attention(nn.Module):
         attn_drop=0.0,
         proj_drop=0.0,
         use_flash=False,
+        use_flex=False,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -235,13 +254,9 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         self.use_flash = use_flash
+        self.use_flex = use_flex
 
-    def forward(self, x, attn_mask, return_attention):
-        # for compatibility with previous versions
-        # if no use_flash attribute, set to false
-        if not hasattr(self, 'use_flash'):
-            self.use_flash = False
-
+    def forward(self, x, attn_mask, return_attention, block_mask):
         if self.use_flash:
             return_attention = False
             # do masking here
@@ -258,19 +273,30 @@ class Attention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         if self.use_flash:
-            with torch.backends.cuda.sdp_kernel(enable_flash=True):
-                # from https://discuss.pytorch.org/t/flash-attention/174955/14
-                attn_out = F.scaled_dot_product_attention(
-                    q,
-                    k,
-                    v,
-                    # pytorch flash attention does not support mask
-                    scale=self.scale,
-                    dropout_p=0.0,
-                )
-                # if scale is None, default is 1/sqrt(dim)
+            attn_out = flash_attn_func(q, k, v)  # (batch_size, seqlen, nheads, headdim)
+
+            # with torch.backends.cuda.sdp_kernel(enable_flash=True):
+            #     # from https://discuss.pytorch.org/t/flash-attention/174955/14
+            #     attn_out = F.scaled_dot_product_attention(
+            #         q,
+            #         k,
+            #         v,
+            #         # pytorch flash attention does not support mask
+            #         scale=self.scale,
+            #         dropout_p=0.0,
+            #     )
+            #     # if scale is None, default is 1/sqrt(dim)
 
             x = attn_out.transpose(1, 2).reshape(B, N, C)
+
+        elif self.use_flex:
+            attn_out = flex_attention(
+                q,
+                k,
+                v,
+                # score_mod = score_mod,
+                block_mask=block_mask,
+            )
 
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -316,6 +342,7 @@ class Block(nn.Module):
         norm_layer=nn.LayerNorm,
         use_flash=False,
         use_lin=False,
+        use_flex=False,
         seq_len=2048,
     ):
         super().__init__()
@@ -341,6 +368,7 @@ class Block(nn.Module):
                 attn_drop=attn_drop,
                 proj_drop=drop,
                 use_flash=use_flash,
+                use_flex=use_flex,
             )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -352,12 +380,15 @@ class Block(nn.Module):
             drop=drop,
         )
 
-    def forward(self, x, attn_mask, return_attention):
+    def forward(self, x, attn_mask, return_attention, block_mask):
         if self.use_lin:
             y = self.attn(self.norm1(x))
         else:
             y, attn = self.attn(
-                self.norm1(x), attn_mask=attn_mask, return_attention=return_attention
+                self.norm1(x),
+                attn_mask=attn_mask,
+                return_attention=return_attention,
+                block_mask=block_mask,
             )  # attn is None when using flash attention
             # y = self.attn(self.norm1(x), attn_mask=attn_mask)
 
@@ -539,17 +570,16 @@ class gpTransformerEncoder(nn.Module):
         use_lin=False,  # use linformer self attention
         use_diffl=False,  # use differential transformer
         seq_len=2048,
+        use_flex=False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
-
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-
         self.mask_emb = nn.Parameter(torch.zeros(1, 1, embed_dim))
-
         self.use_pos_emb = use_pos_emb
-
         self.pos_drop = nn.Dropout(p=drop_rate)
+        self.use_flex = use_flex
+        self.num_heads = num_heads
 
         dpr = [
             x.item() for x in torch.linspace(0, drop_path_rate, depth)
@@ -596,6 +626,7 @@ class gpTransformerEncoder(nn.Module):
                         norm_layer=norm_layer,
                         use_flash=use_flash,
                         use_lin=use_lin,
+                        use_flex=use_flex,
                         seq_len=seq_len + 1,  # +1 for cls
                     )
                     for i in range(depth)
@@ -708,6 +739,38 @@ class gpTransformerEncoder(nn.Module):
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
 
+        # Optionally prepare mask to be shared across heads and layers
+        if self.use_flex:
+            # B, H, Q_LEN, KV_LEN
+            # convert attention mask to bool
+            attn_mask = attn_mask.bool()
+            attn_mask = (
+                attn_mask.unsqueeze(1)
+                .unsqueeze(2)
+                .expand(x.shape[0], self.num_heads, x.shape[1], x.shape[1])
+            )
+
+            torch._dynamo.config.optimize_ddp = False
+            torch._dynamo.config.suppress_errors = True
+
+            def padding(b, h, q_idx, kv_idx):
+                # print('q_idx', q_idx)
+                # return attn_mask #[b, q_idx]
+                return attn_mask[b, h, q_idx, kv_idx]
+
+            block_mask = create_block_mask(
+                padding,
+                B=x.shape[0],
+                H=self.num_heads,
+                Q_LEN=x.shape[1],
+                KV_LEN=x.shape[1],
+                BLOCK_SIZE=x.shape[1],
+                # _compile=True
+            )
+
+        else:
+            block_mask = None
+
         for blk in self.blocks:
             if self.use_diffl:
                 x = blk(
@@ -721,6 +784,7 @@ class gpTransformerEncoder(nn.Module):
                     x,
                     attn_mask=attn_mask,
                     return_attention=return_attention,
+                    block_mask=block_mask,
                 )
 
         x = self.norm(x)
@@ -969,18 +1033,18 @@ if __name__ == '__main__':
         n_gp_tokens=5,
         depth=1,
         mlm_masking_prob=0.4,
-        embed_dim=8,
-        use_diffl=True,
+        embed_dim=32,
         seq_len=16,
         num_heads=8,
+        use_flex=True,
     )
 
-    for n, p in model.named_parameters():
-        print(n, p.shape)
+    # for n, p in model.named_parameters():
+    #     print(n, p.shape)
 
-    x = torch.randn(1, 15, 8, dtype=torch.float16)
+    x = torch.randn(1, 15, 32, dtype=torch.float16)
     gene_labels = torch.randint(0, 10, (1, 15), dtype=torch.long)
-    attn_mask = torch.ones(1, 6, 6, dtype=torch.float16)
+    attn_mask = torch.ones(1, 16, dtype=torch.float16)
 
     # move everything to cuda
     x = x.to('cuda')

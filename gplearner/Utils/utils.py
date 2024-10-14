@@ -621,7 +621,7 @@ def count_genes_per_cell(dataset, token_dictionary, name_dictionary):
     return token_df
 
 
-def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=False):
+def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):
     """
     Build a matrix of shape (n_cells, n_gp_tokens, 256)
     where (i, j, :) = 0 if gene j in cell i does not belong to the current GP

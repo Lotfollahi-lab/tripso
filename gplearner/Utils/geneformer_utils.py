@@ -84,6 +84,7 @@ class EmbExtractor:
         nproc=4,
         summary_stat=None,
         token_dictionary_file=None,  # so will raise an error if not provided
+        max_len=2048,
     ):
         """
         Initialize embedding extractor.
@@ -141,6 +142,7 @@ class EmbExtractor:
         self.emb_layer = emb_layer
         self.nproc = nproc
         self.summary_stat = summary_stat
+        self.max_len = max_len
 
         # load token dictionary (Ensembl IDs:token)
         with open(token_dictionary_file, 'rb') as f:
@@ -206,9 +208,8 @@ class EmbExtractor:
 
     #     return torch.tensor(attention_mask).to(minibatch_encoding['input_ids'].device)
 
-    def gen_attention_mask(self, minibatch_encoding, max_len=2048):
-        if max_len is None:
-            max_len = max(minibatch_encoding['length'])
+    def gen_attention_mask(self, minibatch_encoding):
+        max_len = self.max_len
 
         # Get device from the 'input_ids' tensor
         device = minibatch_encoding['input_ids'].device
@@ -252,7 +253,7 @@ class EmbExtractor:
 
         model_input_size = self.get_model_input_size(model)
 
-        max_len = 2048  # max(minibatch["length"])
+        max_len = self.max_len  # max(minibatch["length"])
 
         input_data_minibatch = input_data['input_ids']
         input_data_minibatch = self.pad_tensor_list(

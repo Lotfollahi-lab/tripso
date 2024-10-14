@@ -98,7 +98,7 @@ class tkDataset(Dataset):
         ]
 
         if label_key is not None:
-            self.labels = np.array(self.gdata[label_key])
+            self.labels = np.array(self.gdata[label_key])  # FIX this
         else:
             self.labels = None
 
@@ -328,6 +328,7 @@ class txDataModule(LightningDataModule):
         data_split_to_pass_to_test_step='val',
         seed=0,
         load_exp=False,
+        max_len=None,
     ):
         """Create a datamodule from a tokenized Geneformer dataset
 
@@ -362,6 +363,21 @@ class txDataModule(LightningDataModule):
             self.gene_token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
 
             self.max_len = 4096
+
+        elif fm_encoder_name == 'from_scratch':
+            if max_len is None:
+                raise ValueError('max_len must be provided for from_scratch model')
+            self.max_len = max_len
+
+            if max_len == 4096:
+                self.gene_token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
+            else:
+                self.gene_token_dict = pd.read_pickle(
+                    os.path.join(
+                        get_gf_repo(),
+                        'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+                    )
+                )
 
         else:
             self.gene_token_dict = pd.read_pickle(
@@ -434,9 +450,9 @@ class txDataModule(LightningDataModule):
         )  # Remaining for test
 
         # # FOR DEBUGGING
-        # train_size = 2560
-        # val_size = 256
-        # test_size = 256
+        # train_size = 128
+        # val_size = 128
+        # test_size = 128
 
         discard = dataset_size - train_size - val_size - test_size
 
@@ -523,12 +539,12 @@ class txDataModule(LightningDataModule):
         # Step 1 : tokenized dataset
         tokenized_batch = [d['tk'] for d in batch]
 
-        model_input_size = 2048
+        model_input_size = self.max_len
         input_batch_id = [torch.tensor(d['input_ids']) for d in tokenized_batch]
         length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
         input_batch_id = pad_tensor_list(
-            input_batch_id, 2048, self.pad_token_id, model_input_size
+            input_batch_id, self.max_len, self.pad_token_id, model_input_size
         )
 
         output_dict = {

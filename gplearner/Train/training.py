@@ -3,7 +3,11 @@ import os
 import random
 import uuid
 import warnings
-from typing import Literal, Optional
+from typing import (
+    Dict,
+    Literal,
+    Optional,
+)
 
 import numpy as np
 import pandas as pd
@@ -99,8 +103,9 @@ def run_training(
     use_onehot_wrapper: Optional[bool] = False,
     vocab_gene_names: Optional[list] = None,
     precision=32,  # 'bf16-mixed',
-    bert_config: Optional[str] = None,
+    bert_config: Dict = {},
     use_diffl: Optional[bool] = False,
+    use_flex: Optional[bool] = False,
 ):
     """
     Wrapper function for training gpLearner model
@@ -231,6 +236,11 @@ def run_training(
     ############################################################################
 
     # Instantiate datamodule
+    if fm_encoder_pkg == 'from_scratch':
+        max_len = bert_config['max_position_embeddings']
+        fm_encoder_name = 'from_scratch'
+    else:
+        max_len = None
 
     txdata = txDataModule(
         folder=dataset_path,
@@ -242,6 +252,7 @@ def run_training(
         seed=seed,
         load_exp=use_onehot_wrapper is True,
         fm_encoder_name=fm_encoder_name,
+        max_len=max_len,
     )
 
     # Load gpdb
@@ -479,6 +490,7 @@ def configure_logger(args):
                 'fm_encoder_pkg': args['fm_encoder_pkg'],
                 'bert_config': args['bert_config'],
                 'use_diffl': args['use_diffl'],
+                'use_flex': args['use_flex'],
             }
         )
 
@@ -554,6 +566,7 @@ def configure_model(args):
         'fm_encoder_pkg': args['fm_encoder_pkg'],
         'bert_config': args['bert_config'],
         'use_diffl': args['use_diffl'],
+        'use_flex': args['use_flex'],
     }
 
     global_params = {

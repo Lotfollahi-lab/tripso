@@ -95,6 +95,7 @@ class gfWrapper(nn.Module):
         fm_layer_to_quant,
         peft_config_path,
         token_dictionary_file,
+        max_len,
     ):
         super().__init__()
 
@@ -115,7 +116,9 @@ class gfWrapper(nn.Module):
             param.requires_grad = False
 
         self.gf_emb_extractor = EmbExtractor(
-            emb_layer=fm_layer_to_quant, token_dictionary_file=token_dictionary_file
+            emb_layer=fm_layer_to_quant,
+            token_dictionary_file=token_dictionary_file,
+            max_len=max_len,
         )
 
     def forward(self, input_dataset):
@@ -146,12 +149,13 @@ class BertWrapper(nn.Module):
         self.model = BertForMaskedLM(config)
 
         self.gf_emb_extractor = EmbExtractor(
-            emb_layer=fm_layer_to_quant, token_dictionary_file=token_dictionary_file
+            emb_layer=fm_layer_to_quant,
+            token_dictionary_file=token_dictionary_file,
+            max_len=config_dict['max_position_embeddings'],
         )
 
     def forward(self, input_dataset):
         # input is tokenized dataset
-
         emb_out = self.gf_emb_extractor.extract_embs(
             model=self.model,
             input_data=input_dataset,
@@ -185,6 +189,7 @@ class gpWrapper(nn.Module):
         use_pos_emb,
         fm_model_input_size,
         use_diffl,
+        use_flex,
     ):
         super().__init__()
 
@@ -251,8 +256,10 @@ class gpWrapper(nn.Module):
                     num_heads=self.num_heads,
                     mlm_masking_prob=self.mgm_mask_ratio,
                     use_flash=use_flash,
+                    seq_len=fm_model_input_size,
                     use_pos_emb=use_pos_emb,
                     use_diffl=use_diffl,
+                    use_flex=use_flex,
                 )
                 for i in range(len(gp_inputs))
             ]
@@ -797,6 +804,7 @@ class gpTransformerBase(nn.Module):
         mgm_mask_ratio=0.5,
         use_flash=False,
         use_diffl=False,
+        use_flex=False,
         fm_encoder_pkg='geneformer',
         fm_encoder_name='gf-6L-30M-i2048',
         peft_config_path=None,
@@ -903,6 +911,7 @@ class gpTransformerBase(nn.Module):
                     fm_layer_to_quant=fm_layer_to_quant,
                     peft_config_path=peft_config_path,
                     token_dictionary_file=self.gene_token_path,
+                    max_len=fm_model_input_size,
                 )
         elif fm_encoder_pkg == 'geneformer_2021':
             geneformer_repo_path = get_gf_repo()
@@ -925,6 +934,7 @@ class gpTransformerBase(nn.Module):
                 fm_layer_to_quant=fm_layer_to_quant,
                 peft_config_path=peft_config_path,
                 token_dictionary_file=self.gene_token_path,
+                max_len=fm_model_input_size,
             )
 
         elif fm_encoder_pkg == 'from_scratch':
@@ -1001,6 +1011,7 @@ class gpTransformerBase(nn.Module):
             use_pos_emb=use_pos_emb,
             fm_model_input_size=fm_model_input_size,
             use_diffl=use_diffl,
+            use_flex=use_flex,
         )
 
     def forward(
