@@ -7,9 +7,9 @@ import pytorch_lightning as pl
 import torch
 from datasets import Dataset
 
-from ..Datamodules.datamodule import txDataModule
-from ..Models.gp_model import gpTransformerBase
-from ..Trainers.trainer import gpBase
+from gplearner.Datamodules.datamodule import txDataModule
+from gplearner.Models.gp_model import gpTransformerBase
+from gplearner.Trainers.trainer import gpBase
 
 
 class TestGpBase(unittest.TestCase):

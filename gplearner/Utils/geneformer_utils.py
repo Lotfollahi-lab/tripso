@@ -209,7 +209,10 @@ class EmbExtractor:
     #     return torch.tensor(attention_mask).to(minibatch_encoding['input_ids'].device)
 
     def gen_attention_mask(self, minibatch_encoding):
-        max_len = self.max_len
+        if hasattr(self, 'max_len'):
+            max_len = self.max_len
+        else:
+            max_len = 2048
 
         # Get device from the 'input_ids' tensor
         device = minibatch_encoding['input_ids'].device
@@ -230,7 +233,7 @@ class EmbExtractor:
 
         return attention_mask
 
-    def extract_embs(self, model, input_data, inference):
+    def extract_embs(self, model, input_data, inference, use_grad=False):
         """
         Extract embeddings from input data and save as results in output_directory.
 
@@ -253,7 +256,10 @@ class EmbExtractor:
 
         model_input_size = self.get_model_input_size(model)
 
-        max_len = self.max_len  # max(minibatch["length"])
+        if hasattr(self, 'max_len'):
+            max_len = self.max_len  # max(minibatch["length"])
+        else:
+            max_len = 2048
 
         input_data_minibatch = input_data['input_ids']
         input_data_minibatch = self.pad_tensor_list(
@@ -263,11 +269,17 @@ class EmbExtractor:
         if inference:
             model.eval()
 
-        with torch.no_grad():
+        if use_grad:
             outputs = model(
                 input_ids=input_data_minibatch,
                 attention_mask=self.gen_attention_mask(input_data),
             )
+        else:
+            with torch.no_grad():
+                outputs = model(
+                    input_ids=input_data_minibatch,
+                    attention_mask=self.gen_attention_mask(input_data),
+                )
 
         embs = outputs.hidden_states[layer_to_quant]
 

@@ -358,10 +358,10 @@ class txDataModule(LightningDataModule):
         self.frac_for_generation = frac_for_generation
         self.seed = seed
         self.load_exp = load_exp
+        self.fm_encoder_name = fm_encoder_name
 
         if '4096' in fm_encoder_name:
             self.gene_token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
-
             self.max_len = 4096
 
         elif fm_encoder_name == 'from_scratch':
@@ -539,12 +539,11 @@ class txDataModule(LightningDataModule):
         # Step 1 : tokenized dataset
         tokenized_batch = [d['tk'] for d in batch]
 
-        model_input_size = self.max_len
         input_batch_id = [torch.tensor(d['input_ids']) for d in tokenized_batch]
         length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
         input_batch_id = pad_tensor_list(
-            input_batch_id, self.max_len, self.pad_token_id, model_input_size
+            input_batch_id, self.max_len, self.pad_token_id
         )
 
         output_dict = {
@@ -607,12 +606,17 @@ class iTxDataModule(txDataModule):
     ):
         super().__init__(**kwargs)
 
-        # Initialize geneformer model for getting geneformer embeddings
-        self.gf_wrapper = gfWrapper(
-            geneformer_model=geneformer_model,
-            gf_layer_to_quant=gf_layer_to_quant,
-            peft_config_path=peft_config_path,
-        )
+        # Initialize geneformer model for getting gene embeddings
+        if self.fm_encoder_name == 'from_scratch':
+            # extract bert wrapper from GPformer
+            self.gf_wrapper = geneformer_model
+
+        else:
+            self.gf_wrapper = gfWrapper(
+                geneformer_model=geneformer_model,
+                gf_layer_to_quant=gf_layer_to_quant,
+                peft_config_path=peft_config_path,
+            )
 
         # Get vocab size
         with open(gene_token_path, 'rb') as f:
@@ -635,12 +639,11 @@ class iTxDataModule(txDataModule):
         # Step 1 : tokenized dataset
         tokenized_batch = [d['tk'] for d in batch]
 
-        model_input_size = 2048
         input_batch_id = [torch.tensor(d['input_ids']) for d in tokenized_batch]
         length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
         input_batch_id = pad_tensor_list(
-            input_batch_id, 2048, self.pad_token_id, model_input_size
+            input_batch_id, self.max_len, self.pad_token_id
         )
 
         # Get Geneformer embeddings

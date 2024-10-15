@@ -253,6 +253,22 @@ class gpEval:
         self.model = gp_transformer.model
         self.gp_inputs = gp_transformer.model.gp_inputs
 
+        # Extract pretrained encoder config
+        self.fm_encoder_pkg = gp_transformer.model.fm_encoder_pkg
+
+        if hasattr(gp_transformer.model, 'fm_encoder_name'):
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_name
+        else:
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
+
+        if self.fm_encoder_pkg == 'geneformer':
+            if '4096' in self.fm_encoder_name:
+                self.max_len = 4096
+            else:
+                self.max_len = 2048
+        elif self.fm_encoder_pkg == 'from_scratch':
+            self.max_len = self.model.gf_wrapper.model.config.max_position_embeddings
+
         # Disable flash for attention matrix generation
         if return_attention:
             for i, gp in enumerate(self.gp_inputs):
@@ -286,6 +302,8 @@ class gpEval:
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
             seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
         trainer = pl.Trainer(
@@ -551,9 +569,9 @@ class gpEval:
             filter_key=obs_key,
             filter_value=obs_value,
             frac_for_generation=data_frac,
-            # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
-            # -> comment out to reproduce original
             seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
@@ -644,6 +662,8 @@ class gpEval:
             folder=self.dataset_path,
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
         gp_transformer = self._init_trainer(
@@ -680,6 +700,8 @@ class gpEval:
             batch_size=self.batch_size,
             adata_path=adata_path,
             seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
         gp_transformer = self._init_trainer(
@@ -693,6 +715,8 @@ class gpEval:
             folder=self.dataset_path,
             batch_size=self.batch_size,
             seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
@@ -714,6 +738,8 @@ class gpEval:
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
             seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
@@ -836,7 +862,8 @@ def calculate_gp_attribution_scores(
     gp_inputs=None,
     model_type='Base',
     peft_config_path=None,
-    geneformer_model_name='gf-6L-30M-i2048',
+    fm_encoder_pkg='geneformer',
+    fm_encoder_name='gf-6L-30M-i2048',
     output_file_name=None,
 ):
     '''
@@ -862,22 +889,56 @@ def calculate_gp_attribution_scores(
     # Set up Geneformer
     # --------------------------
 
-    gf_repo_path = get_gf_repo()
-    geneformer_model_path = os.path.join(gf_repo_path, geneformer_model_name)
+    if fm_encoder_pkg == 'geneformer':
+        gf_repo_path = get_gf_repo()
+        geneformer_model = os.path.join(gf_repo_path, fm_encoder_name)
 
-    if '4096' in geneformer_model_name:
-        gene_token_path = TOKEN_DICTIONARY_FILE
-        gene_name_path = ENSEMBL_DICTIONARY_FILE
+        if '4096' in fm_encoder_name:
+            gene_token_path = TOKEN_DICTIONARY_FILE
+            gene_name_path = ENSEMBL_DICTIONARY_FILE
+
+        else:
+            gene_token_path = os.path.join(
+                gf_repo_path,
+                'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+            )
+
+            gene_name_path = os.path.join(
+                gf_repo_path,
+                'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+            )
+
+    elif fm_encoder_pkg == 'from_scratch':
+        if model_type == 'Base':
+            gpformer = gpBase.load_from_checkpoint(
+                model_checkpoint,
+                strict=False,
+                map_location='cpu',
+            )
+        elif model_type == 'Global':
+            gpformer = gpGlobal.load_from_checkpoint(
+                model_checkpoint, strict=False, map_location='cpu'
+            )
+
+        geneformer_model = gpformer.model.gf_wrapper.model
+
+        if geneformer_model.config.max_position_embeddings == 4096:
+            gene_token_path = TOKEN_DICTIONARY_FILE
+            gene_name_path = ENSEMBL_DICTIONARY_FILE
+        else:
+            gene_token_path = os.path.join(
+                gf_repo_path,
+                'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+            )
+
+            gene_name_path = os.path.join(
+                gf_repo_path,
+                'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+            )
 
     else:
-        gene_token_path = os.path.join(
-            gf_repo_path,
-            'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
-        )
-
-        gene_name_path = os.path.join(
-            gf_repo_path,
-            'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+        raise ValueError(
+            'Please provide valid fm_encoder_pkg (geneformer or from_scratch)'
         )
 
     # --------------------------
@@ -905,7 +966,7 @@ def calculate_gp_attribution_scores(
         filter_key=obs_key,
         filter_value=obs_value,
         gene_counts_df=gene_counts_df,
-        geneformer_model=geneformer_model_path,
+        geneformer_model=geneformer_model,
         peft_config_path=peft_config_path,
         gene_name_path=gene_name_path,
         gene_token_path=gene_token_path,

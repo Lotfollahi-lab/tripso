@@ -5,8 +5,8 @@ import pandas as pd
 import torch
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 
-from ..Models.gp_model import gpWrapper
-from ..Utils.utils import convert_gene_names_to_tokens
+from gplearner.Models.gp_model import gpWrapper
+from gplearner.Utils.utils import convert_gene_names_to_tokens
 
 
 class TestGpWrapper(unittest.TestCase):
@@ -52,6 +52,9 @@ class TestGpWrapper(unittest.TestCase):
             model_type='Base',
             learn_new_gp=False,
             use_pos_emb='sin_cos',
+            fm_model_input_size=4096,  # goes with dictionary files
+            use_flex=False,
+            use_diffl=False,
         )
 
         # Mock inputs for the model

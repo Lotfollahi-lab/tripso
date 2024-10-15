@@ -52,7 +52,7 @@ try:
     flex_attention = torch.compile(
         flex_attention, dynamic=False, mode='max-autotune-no-cudagraphs'
     )
-except AttributeError:
+except NameError:
     pass
 
 ######################################################################

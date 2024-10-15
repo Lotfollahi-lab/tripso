@@ -1,7 +1,11 @@
 import os
 import random
 import warnings
-from typing import Literal, Optional
+from typing import (
+    Dict,
+    Literal,
+    Optional,
+)
 
 import numpy as np
 import pandas as pd
@@ -56,7 +60,6 @@ def run_training_from_select_gps(
     model_type: str = 'Base',
     model_type_old: str = 'Base',
     strategy: str = 'ddp_find_unused_parameters_true',
-    gp_latent_size: int = 256,
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
     finetune_lr: float = 1e-5,
@@ -75,13 +78,15 @@ def run_training_from_select_gps(
     path_to_base_model: str = 'path/to/pretrained/model',
     learn_new_gp: Optional[bool] = False,
     global_n_blocks: int = 1,
-    reconstruction_loss: Optional[str] = 'mse',
+    reconstruction_loss: Optional[str] = 'nb',
     adata_path: Optional[str] = None,
     use_flash: Optional[bool] = False,
     weight_decay: float = 0.0,
     use_weighted_sampler: Optional[bool] = False,
     sample_by: Optional[str] = 'cell_type',
+    fm_encoder_pkg: Optional[str] = 'geneformer',
     fm_encoder_name: Optional[str] = 'gf-6L-30M-i2048',
+    peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
     set_gpfinder_weight_decay: Optional[float] = None,
     calc_gp_loss: bool = True,
@@ -100,11 +105,13 @@ def run_training_from_select_gps(
     use_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: bool = False,
     vocab_gene_names: Optional[str] = None,
-    peft_config_path: Optional[str] = None,
     num_nodes: int = 1,
     limit_val_batches: float = 1.0,
     val_check_interval: float = 1.0,
     precision=32,  # 'bf16-mixed',
+    bert_config: Dict = {},
+    use_diffl: Optional[bool] = False,
+    use_flex: Optional[bool] = False,
 ):
     """
     Wrapper function for training gpLearner model
@@ -146,10 +153,6 @@ def run_training_from_select_gps(
         extra self-attention head to learn a cell token based on GP tokens
     strategy : str
         strategy for multi-GPU lightning trainer
-    gp_latent_size : int
-        size of latent space for GP tokens if <256,
-        will use MLP to reduce dimensions of Geneformer gene embeddings
-        else take embeddings directly
     attn_dropout : float
         Dropout for attention layers
         NB only for final self attention block for now
@@ -226,6 +229,11 @@ def run_training_from_select_gps(
     ############################################################################
 
     # Instantiate datamodule
+    if fm_encoder_pkg == 'from_scratch':
+        max_len = bert_config['max_position_embeddings']
+        fm_encoder_name = 'from_scratch'
+    else:
+        max_len = None
 
     txdata = txDataModule(
         folder=dataset_path,
@@ -236,6 +244,8 @@ def run_training_from_select_gps(
         label_key=sample_by,
         seed=seed,
         load_exp=use_onehot_wrapper is True,
+        fm_encoder_name=fm_encoder_name,
+        max_len=max_len,
     )
 
     # Load gpdb
@@ -384,11 +394,11 @@ def configure_model_version(args, tag):
         'n_blocks': args['n_blocks'],
         'mgm_mask_ratio': args['mgm'],
         'num_heads': args['n_heads'],
-        'gp_latent_size': args['gp_latent_size'],
         'attn_dropout': args['attn_dropout'],
         'gp_inputs': args[f'gp_inputs_{tag}'],
         'use_flash': args['use_flash'],
         'learn_new_gp': args['learn_new_gp'],
+        'fm_encoder_pkg': args['fm_encoder_pkg'],
         'fm_encoder_name': args['fm_encoder_name'],
         'peft_config_path': args['peft_config_path'],
         'use_baseline_tk': args['use_baseline_tk'],
@@ -398,6 +408,9 @@ def configure_model_version(args, tag):
         'use_onehot_wrapper': args['use_onehot_wrapper'],
         'vocab_gene_names': args['vocab_gene_names'],
         'do_ensembl_conversion': args['gene_format'] == 'symbol',
+        'berf_config': args['bert_config'],
+        'use_diffl': args['use_diffl'],
+        'use_flex': args['use_flex'],
     }
 
     global_params = {

@@ -138,8 +138,8 @@ class BertWrapper(nn.Module):
     def __init__(
         self,
         config_dict,
-        fm_layer_to_quant,
         token_dictionary_file,
+        fm_layer_to_quant,
     ):
         super().__init__()
 
@@ -161,6 +161,7 @@ class BertWrapper(nn.Module):
             input_data=input_dataset,
             # dropout only when training
             inference=(not self.training),
+            use_grad=self.training,
         )
 
         return emb_out
@@ -871,6 +872,9 @@ class gpTransformerBase(nn.Module):
         """
         super().__init__()
 
+        self.fm_encoder_pkg = fm_encoder_pkg
+        self.fm_encoder_name = fm_encoder_name
+
         if fm_encoder_pkg == 'geneformer':
             geneformer_repo_path = get_gf_repo()
 
@@ -959,7 +963,7 @@ class gpTransformerBase(nn.Module):
 
             self.gf_wrapper = BertWrapper(
                 config_dict=bert_config,
-                fm_layer_to_quant=fm_layer_to_quant,
+                fm_layer_to_quant=0,
                 token_dictionary_file=self.gene_token_path,
             )
 
