@@ -542,8 +542,10 @@ class txDataModule(LightningDataModule):
         input_batch_id = [torch.tensor(d['input_ids']) for d in tokenized_batch]
         length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
+        # because we only use fixed padding
+        # max_len = model input size
         input_batch_id = pad_tensor_list(
-            input_batch_id, self.max_len, self.pad_token_id
+            input_batch_id, self.max_len, self.pad_token_id, self.max_len
         )
 
         output_dict = {
@@ -643,7 +645,7 @@ class iTxDataModule(txDataModule):
         length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
         input_batch_id = pad_tensor_list(
-            input_batch_id, self.max_len, self.pad_token_id
+            input_batch_id, self.max_len, self.pad_token_id, self.max_len
         )
 
         # Get Geneformer embeddings
