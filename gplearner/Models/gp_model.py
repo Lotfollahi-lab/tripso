@@ -892,13 +892,13 @@ class gpTransformerBase(nn.Module):
                     fm_encoder_name,
                 )
 
-                if '4096' in geneformer_model:
+                if '4096' in str(geneformer_model):
                     gp_latent_size = 512
                     fm_model_input_size = 4096
                     self.gene_token_path = TOKEN_DICTIONARY_FILE
                     self.gene_name_path = ENSEMBL_DICTIONARY_FILE
                 else:
-                    gp_latent_size = 256
+                    gp_latent_size = 512
                     fm_model_input_size = 2048
                     self.gene_token_path = os.path.join(
                         geneformer_repo_path,
