@@ -186,6 +186,11 @@ def pp_and_tokenize(
                 # print(column, adata.obs[column].dtype)
                 # print('Number of missing values:', adata.obs[column].isnull().sum())
 
+        # Drop genes which are missing ensembl_id
+        if 'ensembl_id' not in adata.var.columns:
+            raise ValueError('Please provide ensembl_id in adata.var')
+        adata = adata[:, adata.var['ensembl_id'].notnull()]
+
         # Iterate over each group and subset the AnnData object
         n_splits = 0
         for i, obs_names in enumerate(obs_groups):
