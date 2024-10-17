@@ -25,7 +25,6 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 from flash_attn import flash_attn_func
-from linformer import LinformerSelfAttention
 from torch import Tensor
 
 try:
@@ -341,35 +340,24 @@ class Block(nn.Module):
         # act_layer=nn.ReLU,
         norm_layer=nn.LayerNorm,
         use_flash=False,
-        use_lin=False,
         use_flex=False,
         seq_len=2048,
     ):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.use_lin = use_lin
 
-        if use_lin:
-            self.attn = LinformerSelfAttention(
-                dim=dim,
-                seq_len=seq_len,
-                heads=num_heads,
-                one_kv_head=True,
-                share_kv=True,
-            )
+        self.attn = Attention(
+            dim,
+            input_dim=dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qk_scale=qk_scale,
+            attn_drop=attn_drop,
+            proj_drop=drop,
+            use_flash=use_flash,
+            use_flex=use_flex,
+        )
 
-        else:
-            self.attn = Attention(
-                dim,
-                input_dim=dim,
-                num_heads=num_heads,
-                qkv_bias=qkv_bias,
-                qk_scale=qk_scale,
-                attn_drop=attn_drop,
-                proj_drop=drop,
-                use_flash=use_flash,
-                use_flex=use_flex,
-            )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -381,22 +369,16 @@ class Block(nn.Module):
         )
 
     def forward(self, x, attn_mask, return_attention, block_mask):
-        if self.use_lin:
-            y = self.attn(self.norm1(x))
-        else:
-            y, attn = self.attn(
-                self.norm1(x),
-                attn_mask=attn_mask,
-                return_attention=return_attention,
-                block_mask=block_mask,
-            )  # attn is None when using flash attention
-            # y = self.attn(self.norm1(x), attn_mask=attn_mask)
+        y, attn = self.attn(
+            self.norm1(x),
+            attn_mask=attn_mask,
+            return_attention=return_attention,
+            block_mask=block_mask,
+        )  # attn is None when using flash attention
+        # y = self.attn(self.norm1(x), attn_mask=attn_mask)
 
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
-
-        if self.use_lin:
-            attn = None
 
         return x, attn
 
@@ -567,7 +549,6 @@ class gpTransformerEncoder(nn.Module):
         use_pos_emb='sin_cos',
         vocab_size=None,
         use_flash=False,
-        use_lin=False,  # use linformer self attention
         use_diffl=False,  # use differential transformer
         seq_len=2048,
         use_flex=False,
@@ -625,7 +606,6 @@ class gpTransformerEncoder(nn.Module):
                         drop_path=dpr[i],
                         norm_layer=norm_layer,
                         use_flash=use_flash,
-                        use_lin=use_lin,
                         use_flex=use_flex,
                         seq_len=seq_len + 1,  # +1 for cls
                     )
