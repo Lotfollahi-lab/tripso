@@ -892,14 +892,15 @@ class gpTransformerBase(nn.Module):
                     fm_encoder_name,
                 )
 
-                if '4096' in str(geneformer_model):
-                    gp_latent_size = 512
-                    fm_model_input_size = 4096
+                # Load config json file
+                gf_config = BertConfig.from_pretrained(geneformer_model)
+                gp_latent_size = gf_config.hidden_size
+                fm_model_input_size = gf_config.max_position_embeddings
+
+                if fm_model_input_size == 4096:
                     self.gene_token_path = TOKEN_DICTIONARY_FILE
                     self.gene_name_path = ENSEMBL_DICTIONARY_FILE
                 else:
-                    gp_latent_size = 512
-                    fm_model_input_size = 2048
                     self.gene_token_path = os.path.join(
                         geneformer_repo_path,
                         'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',

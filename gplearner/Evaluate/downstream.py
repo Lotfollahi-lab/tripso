@@ -17,6 +17,14 @@ from captum.attr import GuidedGradCam
 from datasets import load_from_disk
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+)
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 
@@ -41,6 +49,7 @@ from ..Utils.utils import (
     find_latest_file,
     remove_single_data_points,
     summarize_attributions,
+    wrangle_classification_report,
 )
 
 # for exporting pdfs
@@ -256,17 +265,13 @@ class gpEval:
         # Extract pretrained encoder config
         self.fm_encoder_pkg = gp_transformer.model.fm_encoder_pkg
 
-        if hasattr(gp_transformer.model, 'fm_encoder_name'):
-            self.fm_encoder_name = gp_transformer.model.fm_encoder_name
-        else:
-            self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
-
         if self.fm_encoder_pkg == 'geneformer':
-            if '4096' in self.fm_encoder_name:
-                self.max_len = 4096
-            else:
-                self.max_len = 2048
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_name
+            self.max_len = (
+                gp_transformer.model.gf_wrapper.model.config.max_position_embeddings
+            )
         elif self.fm_encoder_pkg == 'from_scratch':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
             self.max_len = self.model.gf_wrapper.model.config.max_position_embeddings
 
         # Disable flash for attention matrix generation
@@ -296,6 +301,9 @@ class gpEval:
             hparam_save=self.hparam_save,
             num_virtual_tokens=self.num_virtual_tokens,
         )
+
+        print('self.fm_encoder_name', self.fm_encoder_name)
+        print('self.max_len', self.max_len)
 
         txdata = txDataModule(
             folder=self.dataset_path,
@@ -1524,3 +1532,118 @@ def visualize_with_gene_exp(
 
     if return_adata:
         return adata
+
+
+def eval_with_knn(
+    train_set,
+    test_set,
+    gp,
+    label,
+    output_dir,
+    k=20,
+    data_type='dataset',
+    task='classification',
+):
+    np.random.seed(0)
+    random.seed(0)
+
+    # Extract features and labels based on the data type
+    if data_type == 'dataset':
+        X_train = train_set[gp]
+        X_test = test_set[gp]
+        y_train = train_set[label]
+        y_test = test_set[label]
+    elif data_type == 'h5ad':
+        if gp != 'cell_token':
+            X_train = train_set[:, train_set.var.index.str.contains(gp, case=False)].X
+            X_test = test_set[:, test_set.var.index.str.contains(gp, case=False)].X
+            # Normalize
+            X_train = X_train / X_train.sum(axis=1)[:, None]
+            X_test = X_test / X_test.sum(axis=1)[:, None]
+        else:
+            X_train = train_set.X
+            X_test = test_set.X
+            # Normalize
+            X_train = X_train / X_train.sum(axis=1)[:, None]
+            X_test = X_test / X_test.sum(axis=1)[:, None]
+        y_train = train_set.obs[label]
+        y_test = test_set.obs[label]
+
+    # Initialize KNN based on the task (classification or regression)
+    if task == 'classification':
+        knn = KNeighborsClassifier(n_neighbors=k)
+    elif task == 'regression':
+        knn = KNeighborsRegressor(n_neighbors=k)
+
+    # Train the model
+    knn.fit(X_train, y_train)
+
+    # Make predictions
+    y_pred = knn.predict(X_test)
+
+    # Evaluate based on the task
+    if task == 'classification':
+        # Classification task evaluation
+        accuracy = accuracy_score(y_test, y_pred)
+        print(f'Accuracy: {accuracy:.2f}')
+
+        # Generate classification report and wrangle output
+        report = classification_report(y_test, y_pred, output_dict=True)
+        output_df = wrangle_classification_report(report)
+        output_df = output_df[
+            ~output_df['output_class'].isin(['macro avg', 'weighted avg'])
+        ]
+
+        # Wrangle labels
+        if data_type == 'dataset':
+            label_conversion = (
+                test_set.select_columns([label, label.replace('_id', '')])
+                .to_pandas()
+                .drop_duplicates()
+            )
+        elif data_type == 'h5ad':
+            label_conversion = test_set.obs[
+                [label, label.replace('_id', '')]
+            ].drop_duplicates()
+
+        conversion_dict = {
+            str(k): v
+            for k, v in zip(
+                label_conversion[label], label_conversion[label.replace('_id', '')]
+            )
+        }
+
+        output_df['output_class'] = output_df['output_class'].astype(str)
+        output_df['output_class'] = output_df['output_class'].map(conversion_dict)
+
+        # Save the classification output
+        os.makedirs(output_dir, exist_ok=True)
+        output_df.to_csv(
+            os.path.join(output_dir, f'{label}_from_{gp}.csv'), index=False
+        )
+
+    elif task == 'regression':
+        # Regression task evaluation
+        mse = mean_squared_error(y_test, y_pred)
+        mae = mean_absolute_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+
+        print(f'Mean Squared Error (MSE): {mse:.2f}')
+        print(f'Mean Absolute Error (MAE): {mae:.2f}')
+        print(f'R-squared (R2): {r2:.2f}')
+
+        # Save regression evaluation metrics
+        metrics = {
+            'Mean Squared Error': mse,
+            'Mean Absolute Error': mae,
+            'R-squared': r2,
+        }
+        os.makedirs(output_dir, exist_ok=True)
+        metrics_path = os.path.join(
+            output_dir, f'{label}_regression_metrics_from_{gp}.csv'
+        )
+        with open(metrics_path, 'w') as f:
+            for key, value in metrics.items():
+                f.write(f'{key},{value}\n')
+
+    return None

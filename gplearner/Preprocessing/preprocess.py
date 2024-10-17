@@ -1,6 +1,7 @@
 import glob
 import os
 import random
+import warnings
 from typing import (
     Dict,
     List,
@@ -188,7 +189,20 @@ def pp_and_tokenize(
 
         # Drop genes which are missing ensembl_id
         if 'ensembl_id' not in adata.var.columns:
-            raise ValueError('Please provide ensembl_id in adata.var')
+            warnings.warn('Converting ensembl_id to index')
+
+            if input_size == 2048:
+                ensembl_to_name = pd.read_pickle(
+                    os.path.join(
+                        geneformer_repo_path,
+                        'geneformer/gene_dictionaries_30m/gene_id_name_dict_gc30M.pkl',
+                    )
+                )
+            else:
+                ensembl_to_name = pd.read_pickle(ENSEMBL_DICTIONARY_FILE)
+
+            adata.var['ensembl_id'] = adata.var.index.map(ensembl_to_name)
+
         adata = adata[:, adata.var['ensembl_id'].notnull()]
 
         # Iterate over each group and subset the AnnData object
