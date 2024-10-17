@@ -95,7 +95,6 @@ class gfWrapper(nn.Module):
         fm_layer_to_quant,
         peft_config_path,
         token_dictionary_file,
-        max_len,
     ):
         super().__init__()
 
@@ -118,7 +117,6 @@ class gfWrapper(nn.Module):
         self.gf_emb_extractor = EmbExtractor(
             emb_layer=fm_layer_to_quant,
             token_dictionary_file=token_dictionary_file,
-            max_len=max_len,
         )
 
     def forward(self, input_dataset):
@@ -151,7 +149,8 @@ class BertWrapper(nn.Module):
         self.gf_emb_extractor = EmbExtractor(
             emb_layer=fm_layer_to_quant,
             token_dictionary_file=token_dictionary_file,
-            max_len=config_dict['max_position_embeddings'],
+            # max_len=config_dict['max_position_embeddings'],
+            # use dynamic padding instead
         )
 
     def forward(self, input_dataset):
@@ -916,7 +915,7 @@ class gpTransformerBase(nn.Module):
                     fm_layer_to_quant=fm_layer_to_quant,
                     peft_config_path=peft_config_path,
                     token_dictionary_file=self.gene_token_path,
-                    max_len=fm_model_input_size,
+                    # max_len=fm_model_input_size,
                 )
         elif fm_encoder_pkg == 'geneformer_2021':
             geneformer_repo_path = get_gf_repo()
@@ -939,7 +938,6 @@ class gpTransformerBase(nn.Module):
                 fm_layer_to_quant=fm_layer_to_quant,
                 peft_config_path=peft_config_path,
                 token_dictionary_file=self.gene_token_path,
-                max_len=fm_model_input_size,
             )
 
         elif fm_encoder_pkg == 'from_scratch':

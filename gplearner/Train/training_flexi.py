@@ -18,6 +18,7 @@ import wandb
 # from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import TQDMProgressBar
 from pytorch_lightning.utilities import rank_zero_only
+from transformers import BertConfig
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.baselines import gfGlobal
@@ -33,6 +34,7 @@ from ..Trainers.trainer import (
     gpGlobal,
     gpPrototypes,
 )
+from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import find_latest_file
 from .training import (
     configure_callbacks,
@@ -84,8 +86,8 @@ def run_training_from_select_gps(
     weight_decay: float = 0.0,
     use_weighted_sampler: Optional[bool] = False,
     sample_by: Optional[str] = 'cell_type',
-    fm_encoder_pkg: Optional[str] = 'geneformer',
-    fm_encoder_name: Optional[str] = 'gf-6L-30M-i2048',
+    fm_encoder_pkg: str = 'geneformer',
+    fm_encoder_name: str = 'gf-6L-30M-i2048',
     peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
     set_gpfinder_weight_decay: Optional[float] = None,
@@ -231,9 +233,16 @@ def run_training_from_select_gps(
     # Instantiate datamodule
     if fm_encoder_pkg == 'from_scratch':
         max_len = bert_config['max_position_embeddings']
-        fm_encoder_name = 'from_scratch'
     else:
-        max_len = None
+        # Get Geneformer model config
+        geneformer_repo_path = get_gf_repo()
+        geneformer_model = os.path.join(
+            geneformer_repo_path,
+            fm_encoder_name,
+        )
+
+        gf_config = BertConfig.from_pretrained(geneformer_model)
+        model_input_size = gf_config.max_position_embeddings
 
     txdata = txDataModule(
         folder=dataset_path,
@@ -244,8 +253,7 @@ def run_training_from_select_gps(
         label_key=sample_by,
         seed=seed,
         load_exp=use_onehot_wrapper is True,
-        fm_encoder_name=fm_encoder_name,
-        max_len=max_len,
+        model_input_size=model_input_size,
     )
 
     # Load gpdb

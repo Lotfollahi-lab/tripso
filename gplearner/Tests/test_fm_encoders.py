@@ -118,7 +118,7 @@ class TestFmEncoderBase(unittest.TestCase):
         dm = txDataModule(
             folder=load_from_disk(config_i['data_path']),
             fm_encoder_name=config_i['fm_encoder_name'],
-            max_len=config_i['max_len'],
+            model_input_size=config_i['max_len'],
             batch_size=2,
         )
 
@@ -149,7 +149,9 @@ class TestFmEncoderBase(unittest.TestCase):
             batch = next(iter(self.dataloader))
 
             # check batch matches expected size
-            self.assertEqual(len(batch['input_ids'][0]), self.max_len)
+            # now switched to dynamic padding
+            # self.assertEqual(len(batch['input_ids'][0]), self.max_len)
+            self.assertLessEqual(len(batch['input_ids'][0]), self.max_len)
 
             # do forward pass
             output = self.model(batch, masking=True)

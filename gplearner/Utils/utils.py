@@ -668,6 +668,7 @@ def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):
     mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
     if crop_to_gp_len:
+        max_num_gp_genes = 0
         # Apply the mask to the data using broadcasting
         masked_latent = gf * mask_expanded
 
@@ -680,6 +681,10 @@ def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):
             x = masked_latent[i, :, :]
             c = masked_latent[i, :, 1]  # find which genes have been 0'd out
             idx = c != 0
+
+            # track number of gp genes
+            max_num_gp_genes = max(max_num_gp_genes, idx.sum().item())
+
             idx_zero = c == 0
             z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
             holder += [z]
@@ -700,7 +705,7 @@ def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):
         masked_labels_output = torch.stack(holder)
 
         # crop
-        n_genes_to_keep = gp_tokens.shape[0]
+        n_genes_to_keep = max_num_gp_genes  # gp_tokens.shape[0]
         result_matrix = result_matrix[:, :n_genes_to_keep, :]
         masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
 

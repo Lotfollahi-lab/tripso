@@ -1,6 +1,7 @@
 import os
 import pickle
 import random
+import warnings
 from collections import Counter
 from pathlib import Path
 
@@ -21,7 +22,6 @@ from torch.utils.data import (
 )
 
 from ..Models.gp_model import gfWrapper
-from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import build_gp_input_matrix, get_gp_tokens
 from .mapped_collection import MappedCollection
 
@@ -328,7 +328,7 @@ class txDataModule(LightningDataModule):
         data_split_to_pass_to_test_step='val',
         seed=0,
         load_exp=False,
-        max_len=None,
+        model_input_size=None,
     ):
         """Create a datamodule from a tokenized Geneformer dataset
 
@@ -358,37 +358,17 @@ class txDataModule(LightningDataModule):
         self.frac_for_generation = frac_for_generation
         self.seed = seed
         self.load_exp = load_exp
-        self.fm_encoder_name = fm_encoder_name
+        self.model_input_size = model_input_size
+        if model_input_size is None:
+            raise ValueError('Please specify input sequence length')
 
-        if '4096' in fm_encoder_name:
-            self.gene_token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
-            self.max_len = 4096
+        gene_token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
 
-        elif fm_encoder_name == 'from_scratch':
-            if max_len is None:
-                raise ValueError('max_len must be provided for from_scratch model')
-            self.max_len = max_len
-
-            if max_len == 4096:
-                self.gene_token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
-            else:
-                self.gene_token_dict = pd.read_pickle(
-                    os.path.join(
-                        get_gf_repo(),
-                        'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
-                    )
-                )
-
-        else:
-            self.gene_token_dict = pd.read_pickle(
-                os.path.join(
-                    get_gf_repo(),
-                    'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
-                )
-            )
-            self.max_len = 2048
-
-        self.pad_token_id = self.gene_token_dict.get('<pad>')
+        self.pad_token_id = gene_token_dict.get('<pad>')
+        warnings.warn(
+            f'Setting pad token ID to {self.pad_token_id}.'
+            'Please ensure this matches your tokenization.'
+        )
 
         self.use_weighted_sampler = use_weighted_sampler
 
@@ -542,10 +522,8 @@ class txDataModule(LightningDataModule):
         input_batch_id = [torch.tensor(d['input_ids']) for d in tokenized_batch]
         length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
-        # because we only use fixed padding
-        # max_len = model input size
         input_batch_id = pad_tensor_list(
-            input_batch_id, self.max_len, self.pad_token_id, self.max_len
+            input_batch_id, 'dynamic', self.pad_token_id, self.model_input_size
         )
 
         output_dict = {

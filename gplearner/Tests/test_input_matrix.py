@@ -18,9 +18,9 @@ class TestBuildGPInputMatrix(unittest.TestCase):
         self.gp_tokens = torch.tensor([1, 4, 5, 8, 9])
 
         # Expected values
-        self.expected_labels = torch.tensor([[1, 4, 8, 0, 0], [9, 1, 0, 0, 0]])
+        self.expected_labels = torch.tensor([[1, 4, 8], [9, 1, 0]])
         self.expected_num_genes_per_cell = torch.tensor([3, 2])
-        self.expected_attn_mask = torch.tensor([[1, 1, 1, 1, 0, 0], [1, 1, 1, 0, 0, 0]])
+        self.expected_attn_mask = torch.tensor([[1, 1, 1, 1], [1, 1, 1, 0]])
         self.expected_result_matrix_zeros = torch.zeros(10)
 
     def test_input_matrix_shapes(self):
@@ -32,10 +32,10 @@ class TestBuildGPInputMatrix(unittest.TestCase):
         ) = build_gp_input_matrix(self.gf, self.input_ids, self.gp_tokens)
 
         # Check the shapes
-        self.assertEqual(result_matrix.shape, (2, 5, 10))
-        self.assertEqual(masked_labels_output.shape, (2, 5))
+        self.assertEqual(result_matrix.shape, (2, 3, 10))
+        self.assertEqual(masked_labels_output.shape, (2, 3))
         self.assertEqual(num_genes_per_cell.shape, (2,))
-        self.assertEqual(attn_mask.shape, (2, 6))
+        self.assertEqual(attn_mask.shape, (2, 4))
 
     def test_input_matrix_values(self):
         (
@@ -56,23 +56,11 @@ class TestBuildGPInputMatrix(unittest.TestCase):
         self.assertTrue(torch.equal(result_matrix[0, 0], self.gf[0, 0]))
         self.assertTrue(torch.equal(result_matrix[0, 1], self.gf[0, 1]))
         self.assertTrue(torch.equal(result_matrix[0, 2], self.gf[0, 3]))
-        self.assertTrue(
-            torch.allclose(result_matrix[0, 3], self.expected_result_matrix_zeros)
-        )
-        self.assertTrue(
-            torch.allclose(result_matrix[0, 4], self.expected_result_matrix_zeros)
-        )
 
         self.assertTrue(torch.equal(result_matrix[1, 0], self.gf[1, 3]))
         self.assertTrue(torch.equal(result_matrix[1, 1], self.gf[1, 4]))
         self.assertTrue(
             torch.allclose(result_matrix[1, 2], self.expected_result_matrix_zeros)
-        )
-        self.assertTrue(
-            torch.allclose(result_matrix[1, 3], self.expected_result_matrix_zeros)
-        )
-        self.assertTrue(
-            torch.allclose(result_matrix[1, 4], self.expected_result_matrix_zeros)
         )
 
 
