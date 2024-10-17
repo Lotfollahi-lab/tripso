@@ -3,7 +3,11 @@ import os
 import random
 import uuid
 import warnings
-from typing import Literal, Optional
+from typing import (
+    Dict,
+    Literal,
+    Optional,
+)
 
 import numpy as np
 import pandas as pd
@@ -12,15 +16,16 @@ import torch
 
 # set up wandb
 import wandb
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+
+# from deepspeed.ops.adam import DeepSpeedCPUAdam
 from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
+from transformers import BertConfig
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.baselines import gfGlobal
 from ..Models.gp_model import (
-    GENEFORMER_MODEL_PATH,
     gpTransformerBase,
     gpTransformerBaseWithPrompt,
     gpTransformerGlobal,
@@ -32,6 +37,7 @@ from ..Trainers.trainer import (
     gpGlobal,
     gpPrototypes,
 )
+from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import find_latest_file
 
 
@@ -52,12 +58,10 @@ def run_training(
     gene_format: Literal['symbol', 'ensembl'] = 'symbol',
     model_type: str = 'Base',
     strategy: str = 'ddp_find_unused_parameters_true',
-    gp_latent_size: int = 256,
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
     finetune_lr: float = 1e-5,
     resume_training: Optional[bool] = False,
-    gene_counts_df: Optional[str] = None,
     gp_inputs: Optional[list] = None,
     frac_for_training: Optional[float] = 1.0,
     lambda_gp_similarity: Optional[float] = 1e-2,
@@ -77,7 +81,8 @@ def run_training(
     weight_decay: float = 0.0,
     use_weighted_sampler: Optional[bool] = False,
     sample_by: Optional[str] = None,
-    geneformer_model_path: Optional[str] = GENEFORMER_MODEL_PATH,
+    fm_encoder_name: str = 'gf-6L-30M-i2048',
+    fm_encoder_pkg: str = 'geneformer',
     peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
     supervised_rem_var: Optional[str] = None,
@@ -99,7 +104,10 @@ def run_training(
     use_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: Optional[bool] = False,
     vocab_gene_names: Optional[list] = None,
-    precision='bf16-mixed',
+    precision=32,  # 'bf16-mixed',
+    bert_config: Dict = {},
+    use_diffl: Optional[bool] = False,
+    use_flex: Optional[bool] = False,
 ):
     """
     Wrapper function for training gpLearner model
@@ -141,10 +149,6 @@ def run_training(
         extra self-attention head to learn a cell token based on GP tokens
     strategy : str
         strategy for multi-GPU lightning trainer
-    gp_latent_size : int
-        size of latent space for GP tokens if <256,
-        will use MLP to reduce dimensions of Geneformer gene embeddings
-        else take embeddings directly
     attn_dropout : float
         Dropout for attention layers
         NB only for final self attention block for now
@@ -152,8 +156,6 @@ def run_training(
         Model trainer learning rate
     resume_training : bool
         Set to True to resume training from checkpoint
-    gene_counts_df : str
-        Dataframe with the counts of each gene in the dataset
     gp_inputs : list
         Which GP from GPDB to include in model if None, defaults to all GP
     frac_for_training : float
@@ -204,6 +206,7 @@ def run_training(
         from https://github.com/EveryVoiceTTS/EveryVoice/issues/204
 
     """
+
     ##########################################
     # Setup
     ##########################################
@@ -219,7 +222,7 @@ def run_training(
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # torch.set_float32_matmul_precision('medium')
+    torch.set_float32_matmul_precision('medium')
 
     args = locals()
 
@@ -236,6 +239,18 @@ def run_training(
     ############################################################################
 
     # Instantiate datamodule
+    if fm_encoder_pkg == 'from_scratch':
+        max_len = bert_config['max_position_embeddings']
+    else:
+        # Get Geneformer model config
+        geneformer_repo_path = get_gf_repo()
+        geneformer_model = os.path.join(
+            geneformer_repo_path,
+            fm_encoder_name,
+        )
+
+        gf_config = BertConfig.from_pretrained(geneformer_model)
+        model_input_size = gf_config.max_position_embeddings
 
     txdata = txDataModule(
         folder=dataset_path,
@@ -246,6 +261,7 @@ def run_training(
         label_key=sample_by,
         seed=seed,
         load_exp=use_onehot_wrapper is True,
+        model_input_size=model_input_size,
     )
 
     # Load gpdb
@@ -330,7 +346,7 @@ def run_training(
         devices=-1,
         accelerator='auto',
         precision=precision,
-        # profiler='advanced',
+        profiler='advanced',
         num_nodes=num_nodes,
         strategy=strategy,
         limit_val_batches=limit_val_batches,
@@ -465,7 +481,6 @@ def configure_logger(args):
                 'lr_scheduler': args['lr_scheduler'],
                 'batch_size': args['batch_size'],
                 'strategy': args['strategy'],
-                'gp_latent_size': args['gp_latent_size'],
                 'attn_dropout': args['attn_dropout'],
                 'transformer_block': 'preLN',
                 'learning_rate': args['lr'],
@@ -480,6 +495,11 @@ def configure_logger(args):
                 'use_onehot_wrapper': args['use_onehot_wrapper'],
                 'use_pos_emb': args['use_pos_emb'],
                 'precision': args['precision'],
+                'fm_encoder_name': args['fm_encoder_name'],
+                'fm_encoder_pkg': args['fm_encoder_pkg'],
+                'bert_config': args['bert_config'],
+                'use_diffl': args['use_diffl'],
+                'use_flex': args['use_flex'],
             }
         )
 
@@ -535,17 +555,14 @@ def configure_logger(args):
 
 def configure_model(args):
     common_params = {
-        'gene_counts_df': args['gene_counts_df'],
         'database': args['gpdb'],
         'n_blocks': args['n_blocks'],
         'mgm_mask_ratio': args['mgm'],
         'num_heads': args['n_heads'],
-        'gp_latent_size': args['gp_latent_size'],
         'attn_dropout': args['attn_dropout'],
         'gp_inputs': args['gp_inputs'],
         'use_flash': args['use_flash'],
         'learn_new_gp': args['learn_new_gp'],
-        'geneformer_model': args['geneformer_model_path'],
         'peft_config_path': args['peft_config_path'],
         'use_baseline_tk': args['use_baseline_tk'],
         'tk_vocab_size': args['tk_vocab_size'],
@@ -554,6 +571,11 @@ def configure_model(args):
         'use_onehot_wrapper': args['use_onehot_wrapper'],
         'vocab_gene_names': args['vocab_gene_names'],
         'do_ensembl_conversion': args['gene_format'] == 'symbol',
+        'fm_encoder_name': args['fm_encoder_name'],
+        'fm_encoder_pkg': args['fm_encoder_pkg'],
+        'bert_config': args['bert_config'],
+        'use_diffl': args['use_diffl'],
+        'use_flex': args['use_flex'],
     }
 
     global_params = {
@@ -608,9 +630,9 @@ def configure_lightning_module(model, gp_similarity, args):
         'output_dir': args['output_dir'],
         'lambda_gp_similarity': args['lambda_gp_similarity'],
         'weight_decay': args['weight_decay'],
-        'optimizer': DeepSpeedCPUAdam
-        if args['strategy'].startswith('deepspeed')
-        else torch.optim.AdamW,
+        'optimizer': torch.optim.AdamW,  # DeepSpeedCPUAdam
+        # if args['strategy'].startswith('deepspeed')
+        # else
     }
 
     global_params = {
@@ -683,7 +705,10 @@ def load_from_ckpt(mode, pl_model, args):
 
     elif mode == 'resume_training':
         latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-        pl_model = pl_model.load_from_checkpoint(latest_ckpt, map_location='cpu')
+        if model_type == 'Global':
+            pl_model = gpGlobal.load_from_checkpoint(latest_ckpt, map_location='cpu')
+        else:
+            pl_model = gpBase.load_from_checkpoint(latest_ckpt, map_location='cpu')
 
         return pl_model
 

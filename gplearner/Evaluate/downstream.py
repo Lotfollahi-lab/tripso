@@ -15,8 +15,16 @@ import seaborn as sns
 import torch
 from captum.attr import GuidedGradCam
 from datasets import load_from_disk
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+)
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 
@@ -26,8 +34,8 @@ from ..Datamodules.datamodule import (
     iTxDataModule,
     txDataModule,
 )
+from ..Metrics.metrics import evaluate_emd_ref_vs_query
 from ..Models.baselines import gfGlobal
-from ..Models.gp_model import GENE_NAME_FILE, GENEFORMER_MODEL_PATH
 from ..Models.interpretability import iGlobalWrapper, iGpWrapper
 from ..Trainers.trainer import (
     EmbEvaluator,
@@ -35,16 +43,18 @@ from ..Trainers.trainer import (
     gpGlobal,
     gpPrototypes,
 )
+from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import (
     MidpointNormalize,
     find_latest_file,
     remove_single_data_points,
     summarize_attributions,
+    wrangle_classification_report,
 )
 
 # for exporting pdfs
 matplotlib.rcParams['pdf.fonttype'] = 42
-torch.set_float32_matmul_precision('medium')
+# torch.set_float32_matmul_precision('medium')
 
 ############################################
 # Main class
@@ -252,6 +262,18 @@ class gpEval:
         self.model = gp_transformer.model
         self.gp_inputs = gp_transformer.model.gp_inputs
 
+        # Extract pretrained encoder config
+        self.fm_encoder_pkg = gp_transformer.model.fm_encoder_pkg
+
+        if self.fm_encoder_pkg == 'geneformer':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_name
+            self.max_len = (
+                gp_transformer.model.gf_wrapper.model.config.max_position_embeddings
+            )
+        elif self.fm_encoder_pkg == 'from_scratch':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
+            self.max_len = self.model.gf_wrapper.model.config.max_position_embeddings
+
         # Disable flash for attention matrix generation
         if return_attention:
             for i, gp in enumerate(self.gp_inputs):
@@ -268,7 +290,7 @@ class gpEval:
 
         return gp_transformer
 
-    def generate_embeddings(self, split='train', precision=16):
+    def generate_embeddings(self, split='train', precision=32):
         '''
         Save embeddings as Dataset
         '''
@@ -280,11 +302,16 @@ class gpEval:
             num_virtual_tokens=self.num_virtual_tokens,
         )
 
+        print('self.fm_encoder_name', self.fm_encoder_name)
+        print('self.max_len', self.max_len)
+
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
             seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
         trainer = pl.Trainer(
@@ -477,8 +504,6 @@ class gpEval:
         genes_to_keep=None,
         output_tag=None,
         do_ensembl_conversion=True,
-        gene_name_path=GENE_NAME_FILE,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
     ):
         """
         Save gene embeddings as Dataset
@@ -519,9 +544,9 @@ class gpEval:
             gene_dir_tag += f'_{output_tag}'
 
         # converting between different gene labels
-        with open(gene_name_path, 'rb') as f:
+        with open(self.gp_transformer.model.gene_name_path, 'rb') as f:
             name_dictionary = pickle.load(f)
-        with open(gene_token_path, 'rb') as f:
+        with open(self.gp_transformer.model, 'rb') as f:
             token_dictionary = pickle.load(f)
 
         if do_ensembl_conversion:
@@ -552,12 +577,12 @@ class gpEval:
             filter_key=obs_key,
             filter_value=obs_value,
             frac_for_generation=data_frac,
-            # NOTE INTIIAL RUNS WHERE DONE WITH SEED = 42 FOR DATAMODULE
-            # -> comment out to reproduce original
             seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
         trainer.test(gp_transformer, txdata)
 
     def visualize_gene_embeddings(
@@ -645,6 +670,8 @@ class gpEval:
             folder=self.dataset_path,
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
         gp_transformer = self._init_trainer(
@@ -654,7 +681,7 @@ class gpEval:
             split_label=split,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
 
         trainer.test(gp_transformer, txdata)
 
@@ -681,12 +708,14 @@ class gpEval:
             batch_size=self.batch_size,
             adata_path=adata_path,
             seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
         gp_transformer = self._init_trainer(
             test_random_baseline=True, num_virtual_tokens=self.num_virtual_tokens
         )
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
         trainer.test(gp_transformer, txdata)
 
     def evaluate_supervised_model(self):
@@ -694,9 +723,11 @@ class gpEval:
             folder=self.dataset_path,
             batch_size=self.batch_size,
             seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
         trainer.test(self.gp_transformer, txdata)
 
     def generate_virtual_tokens(self, split='test'):
@@ -715,15 +746,107 @@ class gpEval:
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
             seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            max_len=self.max_len,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=16)
+        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
 
         trainer.validate(gp_transformer, txdata)
 
 
 ################################
-# For attributions
+# Reference/query distance
+################################
+
+
+def calculate_gp_emd(
+    data,
+    source_key,
+    ref_label,
+    query_label,
+    condition_key,
+    output_dir,
+    filename=None,
+    gp=None,
+    gpdb=None,
+    filtering_dict=None,
+):
+    '''
+    Calculate EMD between reference and query distributions
+
+    '''
+
+    if isinstance(data, str):
+        if data.endswith('.h5ad'):
+            data = sc.read(data)
+        else:
+            data = load_from_disk(data)
+
+    if (gpdb is None) and (gp is None):
+        raise ValueError('Please provide either gp or gpdb')
+
+    if gp is None:
+        gpdb = pd.read_csv(gpdb)
+        gpx = list(gpdb.columns)
+    elif isinstance(gp, str):
+        gpx = [gp]
+    else:
+        gpx = gp
+
+    holder = []
+
+    for gp in gpx:
+        if filtering_dict is None:
+            adata = sc.AnnData(
+                X=np.array(data[gp]),
+                obs=data.select_columns(
+                    list(set([source_key, condition_key]))
+                ).to_pandas(),
+            )
+
+        else:
+            adata = sc.AnnData(
+                X=np.array(data[gp]),
+                obs=data.select_columns(
+                    list(set([source_key, condition_key])) + list(filtering_dict.keys())
+                ).to_pandas(),
+            )
+
+            for k, v in filtering_dict.items():
+                if k not in adata.obs.columns:
+                    print(f'Key {k} not found in adata.obs columns. Skipping.')
+                    continue
+                if isinstance(v, list):
+                    adata = adata[adata.obs[k].isin(v)]
+                else:
+                    adata = adata[adata.obs[k] == v]
+
+        # get reference distribution
+        ref = adata[adata.obs[source_key] == ref_label]
+        query = adata[adata.obs[source_key] == query_label]
+
+        # calculate EMD
+        emd_df = evaluate_emd_ref_vs_query(ref, query, condition_key, condition_key)
+        emd_df['embedding'] = gp
+        holder.append(emd_df)
+        print('embdf', emd_df.head())
+
+    output_df = pd.concat(holder)
+
+    if filename is None:
+        filename = f'{ref_label}_vs_{query_label}_emd.csv'
+
+    output_df.to_csv(
+        os.path.join(output_dir, filename),
+        index=False,
+    )
+
+    return None
+
+
+################################
+# Grad-CAM
 ################################
 
 
@@ -747,7 +870,8 @@ def calculate_gp_attribution_scores(
     gp_inputs=None,
     model_type='Base',
     peft_config_path=None,
-    geneformer_model=GENEFORMER_MODEL_PATH,
+    fm_encoder_pkg='geneformer',
+    fm_encoder_name='gf-6L-30M-i2048',
     output_file_name=None,
 ):
     '''
@@ -768,6 +892,62 @@ def calculate_gp_attribution_scores(
     torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+    # --------------------------
+    # Set up Geneformer
+    # --------------------------
+
+    if fm_encoder_pkg == 'geneformer':
+        gf_repo_path = get_gf_repo()
+        geneformer_model = os.path.join(gf_repo_path, fm_encoder_name)
+
+        if '4096' in fm_encoder_name:
+            gene_token_path = TOKEN_DICTIONARY_FILE
+            gene_name_path = ENSEMBL_DICTIONARY_FILE
+
+        else:
+            gene_token_path = os.path.join(
+                gf_repo_path,
+                'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+            )
+
+            gene_name_path = os.path.join(
+                gf_repo_path,
+                'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+            )
+
+    elif fm_encoder_pkg == 'from_scratch':
+        if model_type == 'Base':
+            gpformer = gpBase.load_from_checkpoint(
+                model_checkpoint,
+                strict=False,
+                map_location='cpu',
+            )
+        elif model_type == 'Global':
+            gpformer = gpGlobal.load_from_checkpoint(
+                model_checkpoint, strict=False, map_location='cpu'
+            )
+
+        geneformer_model = gpformer.model.gf_wrapper.model
+
+        if geneformer_model.config.max_position_embeddings == 4096:
+            gene_token_path = TOKEN_DICTIONARY_FILE
+            gene_name_path = ENSEMBL_DICTIONARY_FILE
+        else:
+            gene_token_path = os.path.join(
+                gf_repo_path,
+                'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+            )
+
+            gene_name_path = os.path.join(
+                gf_repo_path,
+                'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+            )
+
+    else:
+        raise ValueError(
+            'Please provide valid fm_encoder_pkg (geneformer or from_scratch)'
+        )
 
     # --------------------------
     # Set up dataloader
@@ -796,6 +976,8 @@ def calculate_gp_attribution_scores(
         gene_counts_df=gene_counts_df,
         geneformer_model=geneformer_model,
         peft_config_path=peft_config_path,
+        gene_name_path=gene_name_path,
+        gene_token_path=gene_token_path,
     )
 
     txdata.setup()
@@ -1350,3 +1532,118 @@ def visualize_with_gene_exp(
 
     if return_adata:
         return adata
+
+
+def eval_with_knn(
+    train_set,
+    test_set,
+    gp,
+    label,
+    output_dir,
+    k=20,
+    data_type='dataset',
+    task='classification',
+):
+    np.random.seed(0)
+    random.seed(0)
+
+    # Extract features and labels based on the data type
+    if data_type == 'dataset':
+        X_train = train_set[gp]
+        X_test = test_set[gp]
+        y_train = train_set[label]
+        y_test = test_set[label]
+    elif data_type == 'h5ad':
+        if gp != 'cell_token':
+            X_train = train_set[:, train_set.var.index.str.contains(gp, case=False)].X
+            X_test = test_set[:, test_set.var.index.str.contains(gp, case=False)].X
+            # Normalize
+            X_train = X_train / X_train.sum(axis=1)[:, None]
+            X_test = X_test / X_test.sum(axis=1)[:, None]
+        else:
+            X_train = train_set.X
+            X_test = test_set.X
+            # Normalize
+            X_train = X_train / X_train.sum(axis=1)[:, None]
+            X_test = X_test / X_test.sum(axis=1)[:, None]
+        y_train = train_set.obs[label]
+        y_test = test_set.obs[label]
+
+    # Initialize KNN based on the task (classification or regression)
+    if task == 'classification':
+        knn = KNeighborsClassifier(n_neighbors=k)
+    elif task == 'regression':
+        knn = KNeighborsRegressor(n_neighbors=k)
+
+    # Train the model
+    knn.fit(X_train, y_train)
+
+    # Make predictions
+    y_pred = knn.predict(X_test)
+
+    # Evaluate based on the task
+    if task == 'classification':
+        # Classification task evaluation
+        accuracy = accuracy_score(y_test, y_pred)
+        print(f'Accuracy: {accuracy:.2f}')
+
+        # Generate classification report and wrangle output
+        report = classification_report(y_test, y_pred, output_dict=True)
+        output_df = wrangle_classification_report(report)
+        output_df = output_df[
+            ~output_df['output_class'].isin(['macro avg', 'weighted avg'])
+        ]
+
+        # Wrangle labels
+        if data_type == 'dataset':
+            label_conversion = (
+                test_set.select_columns([label, label.replace('_id', '')])
+                .to_pandas()
+                .drop_duplicates()
+            )
+        elif data_type == 'h5ad':
+            label_conversion = test_set.obs[
+                [label, label.replace('_id', '')]
+            ].drop_duplicates()
+
+        conversion_dict = {
+            str(k): v
+            for k, v in zip(
+                label_conversion[label], label_conversion[label.replace('_id', '')]
+            )
+        }
+
+        output_df['output_class'] = output_df['output_class'].astype(str)
+        output_df['output_class'] = output_df['output_class'].map(conversion_dict)
+
+        # Save the classification output
+        os.makedirs(output_dir, exist_ok=True)
+        output_df.to_csv(
+            os.path.join(output_dir, f'{label}_from_{gp}.csv'), index=False
+        )
+
+    elif task == 'regression':
+        # Regression task evaluation
+        mse = mean_squared_error(y_test, y_pred)
+        mae = mean_absolute_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+
+        print(f'Mean Squared Error (MSE): {mse:.2f}')
+        print(f'Mean Absolute Error (MAE): {mae:.2f}')
+        print(f'R-squared (R2): {r2:.2f}')
+
+        # Save regression evaluation metrics
+        metrics = {
+            'Mean Squared Error': mse,
+            'Mean Absolute Error': mae,
+            'R-squared': r2,
+        }
+        os.makedirs(output_dir, exist_ok=True)
+        metrics_path = os.path.join(
+            output_dir, f'{label}_regression_metrics_from_{gp}.csv'
+        )
+        with open(metrics_path, 'w') as f:
+            for key, value in metrics.items():
+                f.write(f'{key},{value}\n')
+
+    return None

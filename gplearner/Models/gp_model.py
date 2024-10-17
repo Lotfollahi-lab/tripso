@@ -2,6 +2,7 @@
 # Load packages
 ####################################
 
+import os
 import pickle
 from typing import Dict, Optional
 
@@ -9,9 +10,9 @@ from typing import Dict, Optional
 import pandas as pd
 import torch
 import torch.nn as nn
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from peft import PeftConfig, get_peft_model
-from transformers import BertForMaskedLM
+from transformers import BertConfig, BertForMaskedLM
 
 from ..Modules.modules import (
     Mlp,
@@ -19,7 +20,7 @@ from ..Modules.modules import (
     gpTransformerEncoder,
     gpTransformerEncoderWithPrompt,
 )
-from ..Utils.geneformer_utils import EmbExtractor
+from ..Utils.geneformer_utils import EmbExtractor, get_gf_repo
 from ..Utils.utils import (
     bin_gene_expression,
     build_gp_input_matrix,
@@ -30,22 +31,13 @@ from ..Utils.utils import (
 # Geneformer
 ####################################
 
-GENE_NAME_FILE = '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/geneformer/gene_name_id_dict.pkl'  # noqa
-GENEFORMER_MODEL_PATH = (
-    '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium/Geneformer/'
-)
-
 
 class BaselineWrapper(nn.Module):
-    def __init__(
-        self,
-        vocab_size,
-        gene2vec,
-    ):
+    def __init__(self, vocab_size, gene2vec, gp_latent_size):
         super().__init__()
 
         if gene2vec is None:
-            self.gene_embeddings = nn.Embedding(vocab_size, 256)
+            self.gene_embeddings = nn.Embedding(vocab_size, gp_latent_size)
         else:
             # Load gene embeddings gene2vec
             # nn.Embedding from pretrained automatically turns off gradient
@@ -100,8 +92,9 @@ class gfWrapper(nn.Module):
     def __init__(
         self,
         geneformer_model,
-        gf_layer_to_quant,
+        fm_layer_to_quant,
         peft_config_path,
+        token_dictionary_file,
     ):
         super().__init__()
 
@@ -121,7 +114,10 @@ class gfWrapper(nn.Module):
         for name, param in self.gf.named_parameters():
             param.requires_grad = False
 
-        self.gf_emb_extractor = EmbExtractor(emb_layer=gf_layer_to_quant)
+        self.gf_emb_extractor = EmbExtractor(
+            emb_layer=fm_layer_to_quant,
+            token_dictionary_file=token_dictionary_file,
+        )
 
     def forward(self, input_dataset):
         # input is tokenized dataset
@@ -131,6 +127,40 @@ class gfWrapper(nn.Module):
             input_data=input_dataset,
             # turn off Geneformer dropout
             inference=True,
+        )
+
+        return emb_out
+
+
+class BertWrapper(nn.Module):
+    def __init__(
+        self,
+        config_dict,
+        token_dictionary_file,
+        fm_layer_to_quant,
+    ):
+        super().__init__()
+
+        config = BertConfig(**config_dict)
+
+        # Initialize geneformer model for getting geneformer embeddings
+        self.model = BertForMaskedLM(config)
+
+        self.gf_emb_extractor = EmbExtractor(
+            emb_layer=fm_layer_to_quant,
+            token_dictionary_file=token_dictionary_file,
+            # max_len=config_dict['max_position_embeddings'],
+            # use dynamic padding instead
+        )
+
+    def forward(self, input_dataset):
+        # input is tokenized dataset
+        emb_out = self.gf_emb_extractor.extract_embs(
+            model=self.model,
+            input_data=input_dataset,
+            # dropout only when training
+            inference=(not self.training),
+            use_grad=self.training,
         )
 
         return emb_out
@@ -157,6 +187,9 @@ class gpWrapper(nn.Module):
         model_type,
         learn_new_gp,
         use_pos_emb,
+        fm_model_input_size,
+        use_diffl,
+        use_flex,
     ):
         super().__init__()
 
@@ -195,8 +228,18 @@ class gpWrapper(nn.Module):
 
             # Set up look up tensor
             # for converting gene tokens to encoded values inside transformer block
-            # +2 because in geneformer 0 --> padding and 1 --> mask
-            lookup_tensor = torch.full((self.vocab_size + 2,), -100, dtype=torch.int32)
+            # +4 because in geneformer 0 --> padding
+            # 1 --> mask
+            # 2 --> cls
+            # 3 --> eos
+            if fm_model_input_size == 4096:
+                lookup_tensor = torch.full(
+                    (self.vocab_size + 4,), -100, dtype=torch.int32
+                )
+            else:
+                lookup_tensor = torch.full(
+                    (self.vocab_size + 2,), -100, dtype=torch.int32
+                )
             # Create a tensor of indices corresponding to positions in gp_tokens
             indices = torch.arange(gp_tokens_tensor.shape[0], dtype=torch.int32)
 
@@ -213,7 +256,10 @@ class gpWrapper(nn.Module):
                     num_heads=self.num_heads,
                     mlm_masking_prob=self.mgm_mask_ratio,
                     use_flash=use_flash,
+                    seq_len=fm_model_input_size,
                     use_pos_emb=use_pos_emb,
+                    use_diffl=use_diffl,
+                    use_flex=use_flex,
                 )
                 for i in range(len(gp_inputs))
             ]
@@ -670,7 +716,7 @@ class CountHead(nn.Module):
         self,
         loss_mode: str = 'mse',
         n_genes: int = 25426,
-        d_model: int = 256,
+        d_model: int = 512,
     ):
         super().__init__()
         self.loss_mode = loss_mode
@@ -720,7 +766,7 @@ class BinDecoder(nn.Module):
     def __init__(
         self,
         n_genes: int = 25426,
-        d_model: int = 256,
+        d_model: int = 512,
     ):
         super().__init__()
 
@@ -752,18 +798,17 @@ class gpTransformerBase(nn.Module):
         database,
         attn_dropout=0,
         gp_inputs=None,
-        gene_counts_df=None,
         do_ensembl_conversion=True,
-        gp_latent_size=256,
         num_heads=1,
         n_blocks=1,
         mgm_mask_ratio=0.5,
         use_flash=False,
-        geneformer_model=GENEFORMER_MODEL_PATH,
+        use_diffl=False,
+        use_flex=False,
+        fm_encoder_pkg='geneformer',
+        fm_encoder_name='gf-6L-30M-i2048',
         peft_config_path=None,
-        gf_layer_to_quant=-1,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
+        fm_layer_to_quant=-1,
         model_type='Base',
         learn_new_gp=False,
         gp_of_interest=None,
@@ -773,6 +818,8 @@ class gpTransformerBase(nn.Module):
         use_pos_emb='sin_cos',
         use_onehot_wrapper=False,
         vocab_gene_names=None,
+        bert_config=None,
+        gp_latent_size=256,  # legacy, for baselines
     ):
         """
         database :
@@ -808,7 +855,7 @@ class gpTransformerBase(nn.Module):
         geneformer_model :
             path to pretrained geneformer model
 
-        gf_layer_to_quant :
+        fm_layer_to_quant :
             layer of geneformer to use for extracting embeddings
             (added to numnber of total layers so that -1 corresponds
             to penumltimate layer)
@@ -824,17 +871,103 @@ class gpTransformerBase(nn.Module):
         """
         super().__init__()
 
-        # Initialize geneformer model for getting geneformer embeddings
-        if use_baseline_tk:
-            self.gf_wrapper = BaselineWrapper(tk_vocab_size, gene2vec)
-        elif use_onehot_wrapper:
-            self.gf_wrapper = OneHotWrapper(gene_names=vocab_gene_names)
-        else:
+        self.fm_encoder_pkg = fm_encoder_pkg
+        self.fm_encoder_name = fm_encoder_name
+
+        if fm_encoder_pkg == 'geneformer':
+            geneformer_repo_path = get_gf_repo()
+
+            # Initialize geneformer model for getting geneformer embeddings
+            if use_baseline_tk:
+                self.gf_wrapper = BaselineWrapper(
+                    tk_vocab_size, gene2vec, gp_latent_size
+                )
+            elif use_onehot_wrapper:
+                self.gf_wrapper = OneHotWrapper(gene_names=vocab_gene_names)
+            else:
+                # Unpack arguments for geneformer model
+                geneformer_model = os.path.join(
+                    geneformer_repo_path,
+                    fm_encoder_name,
+                )
+
+                # Load config json file
+                gf_config = BertConfig.from_pretrained(geneformer_model)
+                gp_latent_size = gf_config.hidden_size
+                fm_model_input_size = gf_config.max_position_embeddings
+
+                if fm_model_input_size == 4096:
+                    self.gene_token_path = TOKEN_DICTIONARY_FILE
+                    self.gene_name_path = ENSEMBL_DICTIONARY_FILE
+                else:
+                    self.gene_token_path = os.path.join(
+                        geneformer_repo_path,
+                        'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+                    )
+
+                    self.gene_name_path = os.path.join(
+                        geneformer_repo_path,
+                        'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+                    )
+
+                self.gf_wrapper = gfWrapper(
+                    geneformer_model=geneformer_model,
+                    fm_layer_to_quant=fm_layer_to_quant,
+                    peft_config_path=peft_config_path,
+                    token_dictionary_file=self.gene_token_path,
+                    # max_len=fm_model_input_size,
+                )
+        elif fm_encoder_pkg == 'geneformer_2021':
+            geneformer_repo_path = get_gf_repo()
+            geneformer_model = fm_encoder_name
+
+            gp_latent_size = 256
+            fm_model_input_size = 2048
+            self.gene_token_path = os.path.join(
+                geneformer_repo_path,
+                'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+            )
+
+            self.gene_name_path = os.path.join(
+                geneformer_repo_path,
+                'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+            )
+
             self.gf_wrapper = gfWrapper(
                 geneformer_model=geneformer_model,
-                gf_layer_to_quant=gf_layer_to_quant,
+                fm_layer_to_quant=fm_layer_to_quant,
                 peft_config_path=peft_config_path,
+                token_dictionary_file=self.gene_token_path,
             )
+
+        elif fm_encoder_pkg == 'from_scratch':
+            fm_model_input_size = bert_config['max_position_embeddings']
+            gp_latent_size = bert_config['hidden_size']
+
+            geneformer_repo_path = get_gf_repo()
+
+            if fm_model_input_size == 4096:
+                self.gene_token_path = TOKEN_DICTIONARY_FILE
+                self.gene_name_path = ENSEMBL_DICTIONARY_FILE
+            else:
+                self.gene_token_path = os.path.join(
+                    geneformer_repo_path,
+                    'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+                )
+
+                self.gene_name_path = os.path.join(
+                    geneformer_repo_path,
+                    'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
+                )
+
+            self.gf_wrapper = BertWrapper(
+                config_dict=bert_config,
+                fm_layer_to_quant=0,
+                token_dictionary_file=self.gene_token_path,
+            )
+
+        else:
+            raise ValueError('Only geneformer is supported for now')
 
         # # Optionally: extract Geneformer cell embeddings
         # only need if MSE with gf cell embedding
@@ -868,8 +1001,8 @@ class gpTransformerBase(nn.Module):
         self.multi_gp_encoder = gpWrapper(
             database=self.gpdb,
             do_ensembl_conversion=self.do_ensembl_conversion,
-            gene_token_path=gene_token_path,
-            gene_name_path=gene_name_path,
+            gene_token_path=self.gene_token_path,
+            gene_name_path=self.gene_name_path,
             gp_latent_size=self.gp_latent_size,
             n_blocks=self.n_blocks,
             num_heads=num_heads,
@@ -879,6 +1012,9 @@ class gpTransformerBase(nn.Module):
             model_type=model_type,
             learn_new_gp=learn_new_gp,
             use_pos_emb=use_pos_emb,
+            fm_model_input_size=fm_model_input_size,
+            use_diffl=use_diffl,
+            use_flex=use_flex,
         )
 
     def forward(
@@ -1733,7 +1869,7 @@ class gpTransformerBaseWithPrompt(gpTransformerBase):
         num_prompt_classes,
         # for gpWrapper
         gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
+        gene_name_path=ENSEMBL_DICTIONARY_FILE,
         num_heads=1,
         model_type='Base',
         learn_new_gp=False,
@@ -1742,7 +1878,7 @@ class gpTransformerBaseWithPrompt(gpTransformerBase):
     ):
         super().__init__(
             gene_token_path=TOKEN_DICTIONARY_FILE,
-            gene_name_path=GENE_NAME_FILE,
+            gene_name_path=ENSEMBL_DICTIONARY_FILE,
             num_heads=1,
             model_type='Base',
             learn_new_gp=False,

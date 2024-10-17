@@ -36,9 +36,28 @@ import pickle
 import re
 
 import torch
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from geneformer.perturber_utils import pad_tensor_list
 
 logger = logging.getLogger(__name__)
+
+
+def get_gf_repo():
+    # site_packages_dirs = site.getsitepackages()
+
+    # geneformer_repo_path = None
+
+    # for directory in site_packages_dirs:
+    #     potential_path = Path(directory) / 'geneformer'
+    #     if potential_path.exists():
+    #         geneformer_repo_path = potential_path
+    #         break
+
+    # if geneformer_repo_path is None:
+    #     raise ValueError('Geneformer not found in site-packages directories')
+
+    geneformer_repo_path = '/lustre/scratch126/cellgen/team361/mm58/Geneformer'
+
+    return geneformer_repo_path
 
 
 class EmbExtractor:
@@ -65,7 +84,7 @@ class EmbExtractor:
         emb_layer=-1,
         nproc=4,
         summary_stat=None,
-        token_dictionary_file=TOKEN_DICTIONARY_FILE,
+        token_dictionary_file=None,  # so will raise an error if not provided
     ):
         """
         Initialize embedding extractor.
@@ -139,28 +158,28 @@ class EmbExtractor:
         )
         return tensor
 
-    def pad_tensor_list(
-        self, tensor_list, dynamic_or_constant, pad_token_id, model_input_size
-    ):
-        # Determine maximum tensor length
-        if dynamic_or_constant == 'dynamic':
-            max_len = max([tensor.squeeze().numel() for tensor in tensor_list])
-        elif type(dynamic_or_constant) == int:
-            max_len = dynamic_or_constant
-        else:
-            max_len = model_input_size
-            logger.warning(
-                'If padding style is constant, must provide integer value. '
-                f'Setting padding to max input size {model_input_size}.'
-            )
+    # def pad_tensor_list(
+    #     self, tensor_list, dynamic_or_constant, pad_token_id, model_input_size
+    # ):
+    #     # Determine maximum tensor length
+    #     if dynamic_or_constant == 'dynamic':
+    #         max_len = max([tensor.squeeze().numel() for tensor in tensor_list])
+    #     elif type(dynamic_or_constant) == int:
+    #         max_len = dynamic_or_constant
+    #     else:
+    #         max_len = model_input_size
+    #         logger.warning(
+    #             'If padding style is constant, must provide integer value. '
+    #             f'Setting padding to max input size {model_input_size}.'
+    #         )
 
-        # pad all tensors to maximum length
-        tensor_list = [
-            self.pad_tensor(tensor, pad_token_id, max_len) for tensor in tensor_list
-        ]
+    #     # pad all tensors to maximum length
+    #     tensor_list = [
+    #         self.pad_tensor(tensor, pad_token_id, max_len) for tensor in tensor_list
+    #     ]
 
-        # return stacked tensors
-        return torch.stack(tensor_list)
+    #     # return stacked tensors
+    #     return torch.stack(tensor_list)
 
     def get_model_input_size(self, model):
         return int(
@@ -188,15 +207,13 @@ class EmbExtractor:
 
     #     return torch.tensor(attention_mask).to(minibatch_encoding['input_ids'].device)
 
-    def gen_attention_mask(self, minibatch_encoding, max_len=2048):
-        if max_len is None:
-            max_len = max(minibatch_encoding['length'])
-
+    def gen_attention_mask(self, minibatch_encoding):
         # Get device from the 'input_ids' tensor
         device = minibatch_encoding['input_ids'].device
 
         # Convert 'original_lens' to a tensor
         original_lens = minibatch_encoding['length']
+        max_len = max(original_lens)
         if not isinstance(original_lens, torch.Tensor):
             original_lens = torch.tensor(original_lens, device=device)
 
@@ -211,7 +228,7 @@ class EmbExtractor:
 
         return attention_mask
 
-    def extract_embs(self, model, input_data, inference):
+    def extract_embs(self, model, input_data, inference, use_grad=False):
         """
         Extract embeddings from input data and save as results in output_directory.
 
@@ -234,21 +251,25 @@ class EmbExtractor:
 
         model_input_size = self.get_model_input_size(model)
 
-        max_len = 2048  # max(minibatch["length"])
-
         input_data_minibatch = input_data['input_ids']
-        input_data_minibatch = self.pad_tensor_list(
-            input_data_minibatch, max_len, self.pad_token_id, model_input_size
+        input_data_minibatch = pad_tensor_list(
+            input_data_minibatch, 'dynamic', self.pad_token_id, model_input_size
         )
 
         if inference:
             model.eval()
 
-        with torch.no_grad():
+        if use_grad:
             outputs = model(
                 input_ids=input_data_minibatch,
                 attention_mask=self.gen_attention_mask(input_data),
             )
+        else:
+            with torch.no_grad():
+                outputs = model(
+                    input_ids=input_data_minibatch,
+                    attention_mask=self.gen_attention_mask(input_data),
+                )
 
         embs = outputs.hidden_states[layer_to_quant]
 

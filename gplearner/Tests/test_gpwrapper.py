@@ -3,9 +3,9 @@ import unittest
 import numpy as np
 import pandas as pd
 import torch
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
+from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 
-from gplearner.Models.gp_model import GENE_NAME_FILE, gpWrapper
+from gplearner.Models.gp_model import gpWrapper
 from gplearner.Utils.utils import convert_gene_names_to_tokens
 
 
@@ -22,18 +22,28 @@ class TestGpWrapper(unittest.TestCase):
         )
 
         self.gpdb_tokens = {}
+
+        name_dict = pd.read_pickle(ENSEMBL_DICTIONARY_FILE)
+        token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
+
         for gp in self.gp_inputs:
             self.gpdb_tokens[gp] = list(
-                convert_gene_names_to_tokens(self.database[gp].values, gp_name=gp)
+                convert_gene_names_to_tokens(
+                    self.database[gp].values,
+                    gp_name=gp,
+                    name_dictionary=name_dict,
+                    token_dictionary=token_dict,
+                )
             )
 
         # Initialize the gpWrapper model
+        # this code matches dictionaries for Geneformer 4096
         self.gp_wrapper = gpWrapper(
             self.gp_inputs,
             self.database,
             do_ensembl_conversion=True,
             gene_token_path=TOKEN_DICTIONARY_FILE,
-            gene_name_path=GENE_NAME_FILE,
+            gene_name_path=ENSEMBL_DICTIONARY_FILE,
             gp_latent_size=10,
             n_blocks=2,
             num_heads=2,
@@ -41,13 +51,16 @@ class TestGpWrapper(unittest.TestCase):
             use_flash=False,
             model_type='Base',
             learn_new_gp=False,
-            use_pos_emb=True,
+            use_pos_emb='sin_cos',
+            fm_model_input_size=4096,  # goes with dictionary files
+            use_flex=False,
+            use_diffl=False,
         )
 
         # Mock inputs for the model
         self.gf_emb = torch.randn(2, 5, 10)
         self.input_ids = torch.tensor(
-            [[15244, 7913, 12504, 1821, 254], [12504, 5616, 11834, 7067, 4093]]
+            [[14988, 7913, 5573, 1811, 12365], [14988, 4064, 12365, 7067, 7842]]
         )
 
         self.input_dataset = {'input_ids': self.input_ids}

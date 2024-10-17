@@ -7,7 +7,6 @@ from typing import (
     Union,
 )
 
-# from deepspeed.ops.adam import DeepSpeedCPUAdam
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -183,6 +182,8 @@ class gpBase(pl.LightningModule):
                         pd.Series(go_similarity.index),
                         do_ensembl_conversion=self.model.do_ensembl_conversion,
                         gp_name=go_similarity_gp,
+                        gene_token_path=self.model.gene_token_path,
+                        gene_name_path=self.model.gene_name_path,
                     )
                 )
             )
@@ -269,6 +270,7 @@ class gpBase(pl.LightningModule):
                 .blocks[0]
                 .attn.qkv.weight.requires_grad
             ):
+                # if True:
                 self.log(
                     f'train/{gp}_MGM_loss',
                     loss_per_gp[gp],
@@ -504,6 +506,7 @@ class gpBase(pl.LightningModule):
         return holder
 
     def configure_optimizers(self):
+        # return DeepSpeedCPUAdam(self.parameters())
         # Define optimizer and may be consider weight decay
         # to improve generalization L2 regularization
 
@@ -818,7 +821,7 @@ class gpGlobal(gpBase):
                     on_epoch=True,
                     prog_bar=True,
                     logger=True,
-                    sync_dist=True,
+                    # sync_dist=True,
                 )
 
                 # empty lists
@@ -833,7 +836,7 @@ class gpGlobal(gpBase):
                 on_epoch=True,
                 prog_bar=True,
                 logger=True,
-                sync_dist=True,
+                # sync_dist=True,
             )
 
         if self.global_loss == 'reconstruction':
@@ -1310,7 +1313,6 @@ class EmbEvaluator(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         x = batch[self.emb_label]
-        # print('x', x)
 
         y = batch[self.y_label]
 
@@ -1477,7 +1479,7 @@ if __name__ == '__main__':
 
     model = gpTransformerBase(
         database=gpdb,
-        gp_latent_size=256,
+        gp_latent_size=512,
     )
 
     gp_transformer = gpBase(

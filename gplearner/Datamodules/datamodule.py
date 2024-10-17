@@ -1,17 +1,18 @@
 import os
 import pickle
 import random
+import warnings
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import scanpy as sc
 import torch
 import torch.nn.functional as F
 from datasets import load_from_disk
-from geneformer.in_silico_perturber import pad_tensor_list
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
-from lamindb.core import MappedCollection
+from geneformer import TOKEN_DICTIONARY_FILE
+from geneformer.perturber_utils import pad_tensor_list
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import (
     DataLoader,
@@ -19,14 +20,10 @@ from torch.utils.data import (
     WeightedRandomSampler,
     random_split,
 )
-from transformers import BertForMaskedLM
 
-from ..Models.gp_model import (
-    GENE_NAME_FILE,
-    GENEFORMER_MODEL_PATH,
-    gfWrapper,
-)
+from ..Models.gp_model import gfWrapper
 from ..Utils.utils import build_gp_input_matrix, get_gp_tokens
+from .mapped_collection import MappedCollection
 
 random.seed(0)
 
@@ -101,7 +98,7 @@ class tkDataset(Dataset):
         ]
 
         if label_key is not None:
-            self.labels = np.array(self.gdata[label_key])
+            self.labels = np.array(self.gdata[label_key])  # FIX this
         else:
             self.labels = None
 
@@ -325,11 +322,13 @@ class txDataModule(LightningDataModule):
         filter_key=None,
         filter_value=None,
         frac_for_generation=1,
+        fm_encoder_name='gf-6L-30M-i2048',
         # development only:
         frac_for_training=1,
         data_split_to_pass_to_test_step='val',
-        seed=42,
+        seed=0,
         load_exp=False,
+        model_input_size=None,
     ):
         """Create a datamodule from a tokenized Geneformer dataset
 
@@ -349,7 +348,7 @@ class txDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.shuffle = shuffle
-        token_dictionary_file = TOKEN_DICTIONARY_FILE
+
         self.frac_for_training = frac_for_training
         self.data_for_test_step = data_split_to_pass_to_test_step
         self.label_key = label_key
@@ -359,12 +358,17 @@ class txDataModule(LightningDataModule):
         self.frac_for_generation = frac_for_generation
         self.seed = seed
         self.load_exp = load_exp
+        self.model_input_size = model_input_size
+        if model_input_size is None:
+            raise ValueError('Please specify input sequence length')
 
-        with open(token_dictionary_file, 'rb') as f:
-            self.gene_token_dict = pickle.load(f)
+        gene_token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
 
-        self.pad_token_id = self.gene_token_dict.get('<pad>')
-        self.max_len = 2048
+        self.pad_token_id = gene_token_dict.get('<pad>')
+        warnings.warn(
+            f'Setting pad token ID to {self.pad_token_id}.'
+            'Please ensure this matches your tokenization.'
+        )
 
         self.use_weighted_sampler = use_weighted_sampler
 
@@ -426,9 +430,9 @@ class txDataModule(LightningDataModule):
         )  # Remaining for test
 
         # # FOR DEBUGGING
-        # train_size = 1
-        # val_size = 1
-        # test_size = 1
+        # train_size = 128
+        # val_size = 128
+        # test_size = 128
 
         discard = dataset_size - train_size - val_size - test_size
 
@@ -515,12 +519,11 @@ class txDataModule(LightningDataModule):
         # Step 1 : tokenized dataset
         tokenized_batch = [d['tk'] for d in batch]
 
-        model_input_size = 2048
         input_batch_id = [torch.tensor(d['input_ids']) for d in tokenized_batch]
         length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
         input_batch_id = pad_tensor_list(
-            input_batch_id, 2048, self.pad_token_id, model_input_size
+            input_batch_id, 'dynamic', self.pad_token_id, self.model_input_size
         )
 
         output_dict = {
@@ -574,24 +577,26 @@ class iTxDataModule(txDataModule):
         gp,
         gpdb,
         do_ensembl_conversion,
-        geneformer_model=GENEFORMER_MODEL_PATH,
+        geneformer_model,
+        gene_token_path,
+        gene_name_path,
         peft_config_path=None,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
         gf_layer_to_quant=-1,
-        gene_counts_df=None,
-        hvg_list=None,
-        gp_inputs=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
-        # Initialize geneformer model for getting geneformer embeddings
-        self.gf_wrapper = gfWrapper(
-            geneformer_model=geneformer_model,
-            gf_layer_to_quant=gf_layer_to_quant,
-            peft_config_path=peft_config_path,
-        )
+        # Initialize geneformer model for getting gene embeddings
+        if self.fm_encoder_name == 'from_scratch':
+            # extract bert wrapper from GPformer
+            self.gf_wrapper = geneformer_model
+
+        else:
+            self.gf_wrapper = gfWrapper(
+                geneformer_model=geneformer_model,
+                gf_layer_to_quant=gf_layer_to_quant,
+                peft_config_path=peft_config_path,
+            )
 
         # Get vocab size
         with open(gene_token_path, 'rb') as f:
@@ -614,12 +619,11 @@ class iTxDataModule(txDataModule):
         # Step 1 : tokenized dataset
         tokenized_batch = [d['tk'] for d in batch]
 
-        model_input_size = 2048
         input_batch_id = [torch.tensor(d['input_ids']) for d in tokenized_batch]
         length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
         input_batch_id = pad_tensor_list(
-            input_batch_id, 2048, self.pad_token_id, model_input_size
+            input_batch_id, self.max_len, self.pad_token_id, self.max_len
         )
 
         # Get Geneformer embeddings
@@ -702,16 +706,6 @@ class EmbDataModule(LightningDataModule):
         self.condition_variable = condition_variable
         self.frac_for_training = frac_for_training
         self.mode = mode
-
-        self.geneformer = BertForMaskedLM.from_pretrained(GENEFORMER_MODEL_PATH)
-        # Access the embedding layer
-        embedding_layer = self.geneformer.bert.embeddings.word_embeddings
-
-        # get pad token id
-        pad_token_id = torch.tensor([0])
-
-        # Retrieve the embedding for the pad token
-        self.pad_token_embedding = embedding_layer.weight[pad_token_id]
 
     def prepare_data(self):
         folder_path = Path(self.folder_path)
@@ -845,15 +839,6 @@ class EmbDataModule(LightningDataModule):
                             x_tensor = torch.randn(
                                 torch.tensor(d[self.emb_to_keep]).shape
                             )
-                            emb.append(x_tensor)
-                        else:
-                            emb.append(torch.tensor(d[self.emb_to_keep]))
-
-                elif self.mode == 'pad_embedding':
-                    emb = []
-                    for d in batch:
-                        if d[f'{self.emb_to_keep}_num_genes'] == 0:
-                            x_tensor = self.pad_token_embedding.detach().squeeze()
                             emb.append(x_tensor)
                         else:
                             emb.append(torch.tensor(d[self.emb_to_keep]))

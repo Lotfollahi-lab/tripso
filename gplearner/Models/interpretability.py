@@ -1,10 +1,8 @@
 import pickle
 
 import torch.nn as nn
-from geneformer.tokenizer import TOKEN_DICTIONARY_FILE
 
 from ..Modules.modules import PretrainedEmbeddings
-from .gp_model import GENE_NAME_FILE
 
 ####################################
 # For GradCAM
@@ -12,14 +10,7 @@ from .gp_model import GENE_NAME_FILE
 
 
 class iGpWrapper(nn.Module):
-    def __init__(
-        self,
-        gp_transformer,
-        clf_layer,
-        gp_of_interest,
-        gene_token_path=TOKEN_DICTIONARY_FILE,
-        gene_name_path=GENE_NAME_FILE,
-    ):
+    def __init__(self, gp_transformer, clf_layer, gp_of_interest):
         super().__init__()
         # get index of gp of interest
         self.gp_of_interest = gp_of_interest
@@ -35,9 +26,11 @@ class iGpWrapper(nn.Module):
         )
 
         # table for converting between different gene labels
-        with open(gene_name_path, 'rb') as f:
+        with open(self.gp_transformer.model.multi_gp_encoder.gene_name_path, 'rb') as f:
             name_dictionary = pickle.load(f)
-        with open(gene_token_path, 'rb') as f:
+        with open(
+            self.gp_transformer.model.multi_gp_encoder.gene_token_path, 'rb'
+        ) as f:
             token_dictionary = pickle.load(f)
 
         ensembl_to_name = {v: k for k, v in name_dictionary.items()}

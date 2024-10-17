@@ -7,10 +7,9 @@ import pytorch_lightning as pl
 import torch
 from datasets import Dataset
 
+from gplearner.Datamodules.datamodule import txDataModule
+from gplearner.Models.gp_model import gpTransformerBase
 from gplearner.Trainers.trainer import gpBase
-
-from ..Datamodules.datamodule import txDataModule
-from ..Models.gp_model import gpTransformerBase
 
 
 class TestGpBase(unittest.TestCase):
@@ -29,10 +28,10 @@ class TestGpBase(unittest.TestCase):
         dummy_dataset = Dataset.from_dict(
             {
                 'input_ids': [
-                    [15244, 7913, 12504, 1821, 254],
-                    [12504, 5616, 11834, 7067, 4093],
-                    [15244, 7913, 12504, 1821, 254],
-                    [12504, 5616, 11834, 7067, 4093],
+                    [14988, 7913, 5573, 1811, 12365],
+                    [14988, 7913, 5573, 1811, 12365],
+                    [14988, 7913, 5573, 1811, 12365],
+                    [14988, 7913, 5573, 1811, 12365],
                 ],
                 'length': [5, 5, 5, 5],
             }
