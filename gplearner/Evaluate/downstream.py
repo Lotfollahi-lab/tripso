@@ -268,7 +268,7 @@ class gpEval:
         if self.fm_encoder_pkg == 'geneformer':
             self.fm_encoder_name = gp_transformer.model.fm_encoder_name
             self.max_len = (
-                gp_transformer.model.gf_wrapper.model.config.max_position_embeddings
+                gp_transformer.model.gf_wrapper.gf.config.max_position_embeddings
             )
         elif self.fm_encoder_pkg == 'from_scratch':
             self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
@@ -302,16 +302,13 @@ class gpEval:
             num_virtual_tokens=self.num_virtual_tokens,
         )
 
-        print('self.fm_encoder_name', self.fm_encoder_name)
-        print('self.max_len', self.max_len)
-
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
-            max_len=self.max_len,
+            model_input_size=self.max_len,
         )
 
         trainer = pl.Trainer(
@@ -579,7 +576,7 @@ class gpEval:
             frac_for_generation=data_frac,
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
-            max_len=self.max_len,
+            model_input_size=self.max_len,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
@@ -671,7 +668,7 @@ class gpEval:
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
             fm_encoder_name=self.fm_encoder_name,
-            max_len=self.max_len,
+            model_input_size=self.max_len,
         )
 
         gp_transformer = self._init_trainer(
@@ -709,7 +706,7 @@ class gpEval:
             adata_path=adata_path,
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
-            max_len=self.max_len,
+            model_input_size=self.max_len,
         )
 
         gp_transformer = self._init_trainer(
@@ -724,7 +721,7 @@ class gpEval:
             batch_size=self.batch_size,
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
-            max_len=self.max_len,
+            model_input_size=self.max_len,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
@@ -747,7 +744,7 @@ class gpEval:
             data_split_to_pass_to_test_step=split,
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
-            max_len=self.max_len,
+            model_input_size=self.max_len,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
