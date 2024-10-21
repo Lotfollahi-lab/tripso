@@ -23,6 +23,7 @@ from scipy.sparse import issparse
 from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import do_balanced_downsampling_anndata, encode_labels
 from .gp_curation import make_gpdb
+from .tokenizer import GPTokenizer
 
 seed = 0
 np.random.seed(seed)
@@ -56,6 +57,10 @@ def pp_and_tokenize(
     pp_cellxgene: Optional[bool] = False,
     calculate_hvg: Optional[bool] = True,
     do_tokenization: Optional[bool] = True,
+    use_gp_tokenizer: Optional[bool] = False,
+    do_ensembl_conversion: Optional[bool] = True,
+    gp_genes_union: Optional[List[str]] = None,
+    output_data_name: Optional[str] = None,
 ):
     """
     Preprocess and tokenize data for scGPL
@@ -211,13 +216,13 @@ def pp_and_tokenize(
             subset_adata = adata[obs_names, :].copy()
 
             # Create a directory for the subset if it doesn't exist
-            output_directory = 'data/processed/input_h5ad'
+            output_directory = os.path.join(root_dir, 'data/processed/input_h5ad')
             subset_directory = os.path.join(output_directory, f'subset_{i+1}')
             os.makedirs(subset_directory, exist_ok=True)
 
             # Write the subset to disk
             filename = os.path.join(subset_directory, 'adata.h5ad')
-            subset_adata.write(filename)
+            subset_adata.write_h5ad(filename)
 
             n_splits += 1
 
@@ -236,22 +241,22 @@ def pp_and_tokenize(
             vars_to_keep['batch_key'] = 'batch_key'
 
         print('Tokenizing data')
-        if input_size == 2048:
-            tk = TranscriptomeTokenizer(
-                vars_to_keep,
+        if use_gp_tokenizer:
+            tk = GPTokenizer(
+                custom_attr_name_dict=vars_to_keep,
                 nproc=4,
-                model_input_size=2048,
-                special_token=False,
+                model_input_size=input_size,
+                special_token=(input_size == 4096),
+                gp_genes=gp_genes_union,
+                do_ensembl_conversion=do_ensembl_conversion,
             )
-        elif input_size == 4096:
+        else:
             tk = TranscriptomeTokenizer(
                 custom_attr_name_dict=vars_to_keep,
                 model_input_size=input_size,
-                special_token=True,
+                special_token=(input_size == 4096),
                 nproc=4,
             )
-        else:
-            raise ValueError('Invalid input size. Please choose 2048 or 4096')
 
         if n_splits == 0:
             tk.tokenize_data(
@@ -273,7 +278,10 @@ def pp_and_tokenize(
 
         # Step 2 : Prepare for GPformer
         # change directory for outputs
-        folder_path = f'{root_dir}/data/processed/input_dataset'
+        if output_data_name is None:
+            folder_path = f'{root_dir}/data/processed/input_dataset'
+        else:
+            folder_path = f'{root_dir}/data/processed/{output_data_name}'
 
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
@@ -387,13 +395,14 @@ def pp_and_tokenize(
                 )
 
         # Select gp genes
-        gp_genes_union = set(adata.var_names) & gp_genes
-        if not gp_genes_union:
+        data_gp_genes_union = set(adata.var_names) & gp_genes
+
+        if not data_gp_genes_union:
             raise ValueError(
                 'No GP genes found in the dataset'
                 '\nDo GP genes format match adata indices?'
             )
-        adata = adata[:, list(gp_genes_union)]
+        adata = adata[:, list(data_gp_genes_union)]
 
         # Save to disk
         adata.write_h5ad(
