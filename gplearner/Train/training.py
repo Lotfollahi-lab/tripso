@@ -104,7 +104,7 @@ def run_training(
     use_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: Optional[bool] = False,
     vocab_gene_names: Optional[list] = None,
-    precision=32,  # 'bf16-mixed',
+    precision='bf16',  # 'bf16-mixed',
     bert_config: Dict = {},
     use_diffl: Optional[bool] = False,
     use_flex: Optional[bool] = False,

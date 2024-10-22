@@ -290,7 +290,7 @@ class gpEval:
 
         return gp_transformer
 
-    def generate_embeddings(self, split='train', precision=32):
+    def generate_embeddings(self, split='train', precision='bf16'):
         '''
         Save embeddings as Dataset
         '''
@@ -579,7 +579,9 @@ class gpEval:
             model_input_size=self.max_len,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision='bf16'
+        )
         trainer.test(gp_transformer, txdata)
 
     def visualize_gene_embeddings(
@@ -678,7 +680,9 @@ class gpEval:
             split_label=split,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision='bf16'
+        )
 
         trainer.test(gp_transformer, txdata)
 
@@ -712,7 +716,9 @@ class gpEval:
         gp_transformer = self._init_trainer(
             test_random_baseline=True, num_virtual_tokens=self.num_virtual_tokens
         )
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision='bf16'
+        )
         trainer.test(gp_transformer, txdata)
 
     def evaluate_supervised_model(self):
@@ -724,7 +730,9 @@ class gpEval:
             model_input_size=self.max_len,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision='bf16'
+        )
         trainer.test(self.gp_transformer, txdata)
 
     def generate_virtual_tokens(self, split='test'):
@@ -747,7 +755,9 @@ class gpEval:
             model_input_size=self.max_len,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision='bf16'
+        )
 
         trainer.validate(gp_transformer, txdata)
 

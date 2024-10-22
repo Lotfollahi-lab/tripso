@@ -110,7 +110,7 @@ def run_training_from_select_gps(
     num_nodes: int = 1,
     limit_val_batches: float = 1.0,
     val_check_interval: float = 1.0,
-    precision=32,  # 'bf16-mixed',
+    precision='bf16',  # 'bf16-mixed',
     bert_config: Dict = {},
     use_diffl: Optional[bool] = False,
     use_flex: Optional[bool] = False,
