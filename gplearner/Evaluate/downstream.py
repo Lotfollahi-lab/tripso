@@ -410,13 +410,13 @@ class gpEval:
 
         logger = CSVLogger(
             os.path.join(output_dir, 'evaluation_logs'),
-            name=f'{emb_label}_{y_label.replace("_id", "")}{filter_tag}',
+            name=f"{emb_label}_{y_label.replace('_id', '')}{filter_tag}",
         )
 
         checkpoint_callback = pl.callbacks.ModelCheckpoint(
             monitor='val_loss',
             dirpath=ckpt_dir,
-            filename=f'{y_label.replace("_id", "")}_{emb_label}_{task}{filter_tag}',
+            filename=f"{y_label.replace('_id', '')}_{emb_label}_{task}{filter_tag}",
             save_top_k=1,
             mode='min',
         )
@@ -812,7 +812,7 @@ def calculate_gp_emd(
 
             for k, v in filtering_dict.items():
                 if k not in adata.obs.columns:
-                    print(f'Key {k} not found in adata.obs columns. Skipping.')
+                    print(f'Key {k} not found in adata.obs columns. Skipping.')  # noqa
                     continue
                 if isinstance(v, list):
                     adata = adata[adata.obs[k].isin(v)]
@@ -1009,7 +1009,7 @@ def calculate_gp_attribution_scores(
     # Load classification layer
     # or train if not available
     ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
-    clf_ckpt = f'{y_label.replace("_id", "")}_{gp}_{task}'
+    clf_ckpt = f"{y_label.replace('_id', '')}_{gp}_{task}"
 
     if os.path.exists(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')):
         clf_layer = EmbEvaluator.load_from_checkpoint(
@@ -1239,7 +1239,7 @@ def calculate_cell_token_attribution_scores(
     # or train if not available
     if gp_transformer.model.global_loss != 'supervised':
         ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
-        clf_ckpt = f'{y_label.replace("_id", "")}_{emb_label}_{task}'
+        clf_ckpt = f"{y_label.replace('_id', '')}_{emb_label}_{task}"
         if os.path.exists(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')):
             clf_layer = EmbEvaluator.load_from_checkpoint(
                 os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
@@ -1582,7 +1582,7 @@ def eval_with_knn(
     if task == 'classification':
         # Classification task evaluation
         accuracy = accuracy_score(y_test, y_pred)
-        print(f'Accuracy: {accuracy:.2f}')
+        print(f'Accuracy: {accuracy: .2f}')
 
         # Generate classification report and wrangle output
         report = classification_report(y_test, y_pred, output_dict=True)
@@ -1625,9 +1625,9 @@ def eval_with_knn(
         mae = mean_absolute_error(y_test, y_pred)
         r2 = r2_score(y_test, y_pred)
 
-        print(f'Mean Squared Error (MSE): {mse:.2f}')
-        print(f'Mean Absolute Error (MAE): {mae:.2f}')
-        print(f'R-squared (R2): {r2:.2f}')
+        print(f'Mean Squared Error (MSE): {mse: .2f}')
+        print(f'Mean Absolute Error (MAE): {mae: .2f}')
+        print(f'R-squared (R2): {r2: .2f}')
 
         # Save regression evaluation metrics
         metrics = {
@@ -1641,6 +1641,6 @@ def eval_with_knn(
         )
         with open(metrics_path, 'w') as f:
             for key, value in metrics.items():
-                f.write(f'{key},{value}\n')
+                f.write(f'{key}, {value}\n')
 
     return None

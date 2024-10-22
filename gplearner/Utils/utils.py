@@ -1437,7 +1437,7 @@ def make_GO(data_path, pert_list, data_name, num_workers=25, save=True):
         gene2go = pickle.load(f)
 
     gene2go = {i: gene2go[i] for i in pert_list if i in gene2go.keys()}
-    print(f'{len(pert_list) - len(gene2go)} genes not found in gene2go file')
+    print(f'{len(pert_list) - len(gene2go)} genes not found in gene2go file')  # noqa
 
     print('Creating custom GO graph, this can take a few minutes')
     with Pool(num_workers) as p:

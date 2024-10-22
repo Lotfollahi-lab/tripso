@@ -646,7 +646,7 @@ class MappedCollection:
             if not self.parallel:
                 self.close()
             raise ValueError(
-                f'{key} in {path} is a csc matrix,'
+                f'{key} in {path} is a csc matrix, '
                 "`MappedCollection` doesn't support this format yet."
             )
 
