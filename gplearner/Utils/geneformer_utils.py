@@ -183,7 +183,7 @@ class EmbExtractor:
 
     def get_model_input_size(self, model):
         return int(
-            re.split('\(|,', str(model.bert.embeddings.position_embeddings))[1]  # noqa
+            re.split('\\(|,', str(model.bert.embeddings.position_embeddings))[1]  # noqa
         )
 
     def quant_layers(self, model):
