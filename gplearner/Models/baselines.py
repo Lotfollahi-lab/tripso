@@ -159,6 +159,9 @@ class gfBaseline(gpTransformerBase):
             num_prompt_classes=0,
             mean_emb_dict=None,
             use_pos_emb=False,
+            use_diffl=False,
+            use_flex=False,
+            fm_model_input_size=self.fm_model_input_size,
         )
 
     def get_last_self_attn(self, input_dataset, gp):
@@ -206,6 +209,9 @@ class gfGlobal(gpTransformerGlobal):
             learn_new_gp=False,
             num_heads=1,
             use_pos_emb=False,
+            fm_model_input_size=self.fm_model_input_size,
+            use_diffl=False,
+            use_flex=False,
         )
 
         self.cell_token_learner = AverageNonZero(cls_tag='cell_token')

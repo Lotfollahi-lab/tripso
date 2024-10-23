@@ -108,6 +108,7 @@ def run_training(
     bert_config: Dict = {},
     use_diffl: Optional[bool] = False,
     use_flex: Optional[bool] = False,
+    use_gf_embeddings: Optional[bool] = False,
 ):
     """
     Wrapper function for training gpLearner model
@@ -240,7 +241,7 @@ def run_training(
 
     # Instantiate datamodule
     if fm_encoder_pkg == 'from_scratch':
-        max_len = bert_config['max_position_embeddings']
+        model_input_size = bert_config['max_position_embeddings']
     else:
         # Get Geneformer model config
         geneformer_repo_path = get_gf_repo()
@@ -500,6 +501,7 @@ def configure_logger(args):
                 'bert_config': args['bert_config'],
                 'use_diffl': args['use_diffl'],
                 'use_flex': args['use_flex'],
+                'use_gf_embeddings': args['use_gf_embeddings'],
             }
         )
 
@@ -576,6 +578,7 @@ def configure_model(args):
         'bert_config': args['bert_config'],
         'use_diffl': args['use_diffl'],
         'use_flex': args['use_flex'],
+        'use_gf_embeddings': args['use_gf_embeddings'],
     }
 
     global_params = {
@@ -732,7 +735,10 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif (mode == 'finetune') | (mode == 'finetune_global'):
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Global')
+        try:
+            latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Global')
+        except FileNotFoundError:
+            latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
         checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
         checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)

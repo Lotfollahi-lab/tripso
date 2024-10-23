@@ -719,10 +719,6 @@ def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):
             mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
         )
 
-        # # artifically only keep the first 1000 genes
-        # masked_labels_output = masked_labels_output[:, :1000]
-        # result_matrix = result_matrix[:, :1000, :]
-
     # count number of genes per cell
     num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
 
