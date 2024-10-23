@@ -217,6 +217,11 @@ def pp_and_tokenize(
             subset_directory = os.path.join(output_directory, f'subset_{i+1}')
             os.makedirs(subset_directory, exist_ok=True)
 
+            # remove nan ensembl_ids
+            subset_adata = subset_adata[
+                :, subset_adata.var['ensembl_id'].notnull()
+            ].copy()
+
             # Write the subset to disk
             filename = os.path.join(subset_directory, 'adata.h5ad')
             subset_adata.write(filename)
