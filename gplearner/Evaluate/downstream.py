@@ -130,6 +130,8 @@ class gpEval:
         # otherwise loaded from checkpoint
         gene_format: Optional[str] = 'symbol',
         gp_inputs: Optional[list] = None,
+        gpmean_fm_encoder_pkg: Optional[str] = 'geneformer',
+        gpmean_fm_encoder_name: Optional[str] = 'gf-6L-30M-i2048',
     ):
         # set seed for reproducibility
         np.random.seed(seed)
@@ -167,6 +169,8 @@ class gpEval:
         self.dataset_path = dataset_path
         self.batch_size = batch_size
         self.gpdb = gpdb
+        self.gpmean_fm_encoder_pkg = gpmean_fm_encoder_pkg
+        self.gpmean_fm_encoder_name = gpmean_fm_encoder_name
 
         # to avoid error when using geneformer finetuned model
         self.hparam_save = hparam_save
@@ -232,6 +236,8 @@ class gpEval:
             model = gfGlobal(
                 database=self.gpdb,
                 do_ensembl_conversion=self.do_ensembl_conversion,
+                fm_encoder_pkg=self.gpmean_fm_encoder_pkg,
+                fm_encoder_name=self.gpmean_fm_encoder_name,
             )
 
             gp_transformer = gpGlobal(model=model, global_loss='mean')

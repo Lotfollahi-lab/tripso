@@ -100,7 +100,11 @@ class gfWrapper(nn.Module):
 
         # Initialize geneformer model for getting geneformer embeddings
         model = BertForMaskedLM.from_pretrained(
-            geneformer_model, output_attentions=False, output_hidden_states=True
+            geneformer_model,
+            output_attentions=False,
+            output_hidden_states=True,
+            # attn_implementation = 'sdpa',
+            # load_in_8bit=True,
         )
 
         if peft_config_path:
@@ -138,13 +142,24 @@ class BertWrapper(nn.Module):
         config_dict,
         token_dictionary_file,
         fm_layer_to_quant,
+        use_gf_embeddings=False,
     ):
         super().__init__()
 
         config = BertConfig(**config_dict)
 
-        # Initialize geneformer model for getting geneformer embeddings
+        # Initialize BERT model for getting gene embeddings
         self.model = BertForMaskedLM(config)
+
+        # Set word embeddings to Geneformer embeddings
+        if use_gf_embeddings:
+            geneformer = BertForMaskedLM.from_pretrained(
+                '/lustre/scratch126/cellgen/team361/mm58/Geneformer/gf-12L-95M-i4096'
+            )
+
+            self.model.bert.embeddings.word_embeddings = (
+                geneformer.bert.embeddings.word_embeddings
+            )
 
         self.gf_emb_extractor = EmbExtractor(
             emb_layer=fm_layer_to_quant,
@@ -820,6 +835,7 @@ class gpTransformerBase(nn.Module):
         vocab_gene_names=None,
         bert_config=None,
         gp_latent_size=256,  # legacy, for baselines
+        use_gf_embeddings=False,
     ):
         """
         database :
@@ -960,14 +976,25 @@ class gpTransformerBase(nn.Module):
                     'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
                 )
 
+            # overwrite to match geneformer
+            if use_gf_embeddings:
+                gp_latent_size = 512
+
             self.gf_wrapper = BertWrapper(
                 config_dict=bert_config,
                 fm_layer_to_quant=0,
                 token_dictionary_file=self.gene_token_path,
+                use_gf_embeddings=use_gf_embeddings,
             )
 
         else:
             raise ValueError('Only geneformer is supported for now')
+
+        # Track for downstream models
+        self.fm_encoder_pkg = fm_encoder_pkg
+        self.fm_encoder_name = fm_encoder_name
+        self.gp_latent_size = gp_latent_size
+        self.fm_model_input_size = fm_model_input_size
 
         # # Optionally: extract Geneformer cell embeddings
         # only need if MSE with gf cell embedding
