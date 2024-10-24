@@ -97,6 +97,7 @@ def run_training(
     use_baseline_tk: Optional[bool] = False,
     tk_vocab_size: Optional[int] = 0,
     # for large scale pretraining:
+    limit_train_batches: Optional[float] = 1.0,
     limit_val_batches: Optional[float] = 1.0,
     val_check_interval: Optional[float] = 1.0,
     mean_emb_dict: Optional[str] = None,
@@ -350,6 +351,7 @@ def run_training(
         profiler='advanced',
         num_nodes=num_nodes,
         strategy=strategy,
+        limit_train_batches=limit_train_batches,
         limit_val_batches=limit_val_batches,
         val_check_interval=val_check_interval,
     )
