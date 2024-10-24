@@ -228,13 +228,15 @@ def run_training(
 
     args = locals()
 
-    save_id = configure_wandb(args)
+    save_id = configure_save_id(args)
 
     early_stopping_callback, checkpoint_callback, lr_monitor = configure_callbacks(
         save_id, args
     )
 
-    wandb_logger = configure_logger(args)
+    # initialize wandb logging
+    configure_wandb(args, save_id)
+    wandb_logger = configure_logger(args) or None
 
     ############################################################################
     # Dataset Preparation
@@ -361,18 +363,15 @@ def run_training(
 
     # save logs to csv for custom plotting
     # Fetch logged data from wandb
-    api = wandb.Api()
-
-    if torch.cuda.device_count() > 1:
-        run = api.run(f'scGPL/{save_id}_gpu_{str(rank_zero_only.rank)}')
-    else:
+    if rank_zero_only.rank == 0:
+        api = wandb.Api()
         run = api.run(f'scGPL/{save_id}')
 
-    # Get logged data as dataframe
-    df = run.history()
-    df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
+        # Get logged data as dataframe
+        df = run.history()
+        df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
 
-    wandb.finish()
+        wandb.finish()
 
 
 # --------------------------------------------------
@@ -380,43 +379,33 @@ def run_training(
 # --------------------------------------------------
 
 
-def configure_wandb(args):
-    # Get function specific arguments
-    output_dir = args['output_dir']
+def configure_save_id(args) -> str:
     tissue = args['tissue']
+    supervised_tag = args['model_type']
 
     wandb.login()
 
     # get date for today in YYYY-MM-DD format
     today = datetime.datetime.today().strftime('%Y-%m-%d')
 
-    supervised_tag = args['model_type']
-
     # create unique id for wandb run with 3 random characters
     unique_id = str(uuid.uuid4())[:3]
 
     save_id = f'{today}_gp_transformer_{tissue}_{supervised_tag}_{unique_id}'
 
+    return save_id
+
+
+@rank_zero_only
+def configure_wandb(args, save_id) -> None:
+    output_dir = args['output_dir']
     wandb_dir = os.path.join(output_dir, 'wandb_logs')
 
     # Check if directory exists
     if not os.path.exists(wandb_dir):
         os.makedirs(wandb_dir)
 
-    if torch.cuda.device_count() > 1:
-        # multi gpu training with group logging
-        wandb.init(
-            project='scGPL',
-            # group=f'{today}_gp_transformer_{tissue}_{supervised_tag}',
-            # all runs are saved in one group for multi gpu training
-            # =/ this doesnt work?
-            id=save_id + f'_gpu_{str(rank_zero_only.rank)}',
-            dir=wandb_dir,
-        )
-    else:
-        wandb.init(project='scGPL', id=save_id, dir=wandb_dir)
-
-    return save_id
+    wandb.init(project='scGPL', id=save_id, dir=wandb_dir)
 
 
 def configure_callbacks(save_id, args):
@@ -467,92 +456,92 @@ def configure_callbacks(save_id, args):
     return early_stopping_callback, checkpoint_callback, lr_monitor
 
 
+@rank_zero_only
 def configure_logger(args):
     # create a logger to log training progress
     wandb_logger = WandbLogger(log_model=True)
 
-    if rank_zero_only.rank == 0:
+    wandb_logger.experiment.config.update(
+        {
+            'dataset': args['dataset_path'].split('/')[-3],
+            'supervise': args['model_type'],
+            'architecture': 'gp_transformer',
+            'epochs': args['n_epochs'],
+            'mgm': args['mgm'],
+            'n_heads': args['n_heads'],
+            'n_blocks': args['n_blocks'],
+            'lr_scheduler': args['lr_scheduler'],
+            'batch_size': args['batch_size'],
+            'strategy': args['strategy'],
+            'attn_dropout': args['attn_dropout'],
+            'transformer_block': 'preLN',
+            'learning_rate': args['lr'],
+            'frac_for_training': args['frac_for_training'],
+            'use_gp_similarity_loss': args['gp_similarity_file'] is not None,
+            'lambda_gp_similarity': args['lambda_gp_similarity'],
+            'use_flash': args['use_flash'],
+            'weight_decay': args['weight_decay'],
+            'num_virtual_tokens': args['num_virtual_tokens'],
+            # 'condition_on_z_mean': args['mean_emb_dict'] is not None,
+            'use_baseline_tk': args['use_baseline_tk'],
+            'use_onehot_wrapper': args['use_onehot_wrapper'],
+            'use_pos_emb': args['use_pos_emb'],
+            'precision': args['precision'],
+            'fm_encoder_name': args['fm_encoder_name'],
+            'fm_encoder_pkg': args['fm_encoder_pkg'],
+            'bert_config': args['bert_config'],
+            'use_diffl': args['use_diffl'],
+            'use_flex': args['use_flex'],
+            'use_gf_embeddings': args['use_gf_embeddings'],
+        }
+    )
+
+    if args['model_type'] == 'Global':
         wandb_logger.experiment.config.update(
             {
-                'dataset': args['dataset_path'].split('/')[-3],
-                'supervise': args['model_type'],
-                'architecture': 'gp_transformer',
-                'epochs': args['n_epochs'],
-                'mgm': args['mgm'],
-                'n_heads': args['n_heads'],
-                'n_blocks': args['n_blocks'],
-                'lr_scheduler': args['lr_scheduler'],
-                'batch_size': args['batch_size'],
-                'strategy': args['strategy'],
-                'attn_dropout': args['attn_dropout'],
-                'transformer_block': 'preLN',
-                'learning_rate': args['lr'],
-                'frac_for_training': args['frac_for_training'],
-                'use_gp_similarity_loss': args['gp_similarity_file'] is not None,
-                'lambda_gp_similarity': args['lambda_gp_similarity'],
-                'use_flash': args['use_flash'],
-                'weight_decay': args['weight_decay'],
-                'num_virtual_tokens': args['num_virtual_tokens'],
-                # 'condition_on_z_mean': args['mean_emb_dict'] is not None,
-                'use_baseline_tk': args['use_baseline_tk'],
-                'use_onehot_wrapper': args['use_onehot_wrapper'],
-                'use_pos_emb': args['use_pos_emb'],
-                'precision': args['precision'],
-                'fm_encoder_name': args['fm_encoder_name'],
-                'fm_encoder_pkg': args['fm_encoder_pkg'],
-                'bert_config': args['bert_config'],
-                'use_diffl': args['use_diffl'],
-                'use_flex': args['use_flex'],
-                'use_gf_embeddings': args['use_gf_embeddings'],
+                'global_attn_heads': args['global_attn_heads'],
+                'global_loss': args['global_loss'],
+                'global_training': args['global_training'],
+                'global_n_blocks': args['global_n_blocks'],
             }
         )
 
-        if args['model_type'] == 'Global':
+        if args['global_loss'] == 'supervised':
             wandb_logger.experiment.config.update(
                 {
-                    'global_attn_heads': args['global_attn_heads'],
-                    'global_loss': args['global_loss'],
-                    'global_training': args['global_training'],
-                    'global_n_blocks': args['global_n_blocks'],
+                    'classification_labels': args['classification_labels'],
                 }
             )
 
-            if args['global_loss'] == 'supervised':
-                wandb_logger.experiment.config.update(
-                    {
-                        'classification_labels': args['classification_labels'],
-                    }
-                )
+        if args['global_loss'] == 'masking':
+            wandb_logger.experiment.config.update(
+                {
+                    'global_masking_rate': args['global_masking_rate'],
+                }
+            )
 
-            if args['global_loss'] == 'masking':
-                wandb_logger.experiment.config.update(
-                    {
-                        'global_masking_rate': args['global_masking_rate'],
-                    }
-                )
+        if args['global_loss'] == 'reconstruction':
+            wandb_logger.experiment.config.update(
+                {
+                    'reconstruction_loss': args['reconstruction_loss'],
+                }
+            )
 
-            if args['global_loss'] == 'reconstruction':
-                wandb_logger.experiment.config.update(
-                    {
-                        'reconstruction_loss': args['reconstruction_loss'],
-                    }
-                )
+        if 'finetune' in args['global_training']:
+            wandb_logger.experiment.config.update(
+                {
+                    'finetune_lr': args['finetune_lr'],
+                }
+            )
 
-            if 'finetune' in args['global_training']:
-                wandb_logger.experiment.config.update(
-                    {
-                        'finetune_lr': args['finetune_lr'],
-                    }
-                )
-
-            if args['num_prototypes'] > 0:
-                wandb_logger.experiment.config.update(
-                    {
-                        'num_prototypes': args['num_prototypes'],
-                        'prototype_labels_key': args['prototype_labels_key'],
-                        'lambda_prototype_loss': args['lambda_prototype_loss'],
-                    }
-                )
+        if args['num_prototypes'] > 0:
+            wandb_logger.experiment.config.update(
+                {
+                    'num_prototypes': args['num_prototypes'],
+                    'prototype_labels_key': args['prototype_labels_key'],
+                    'lambda_prototype_loss': args['lambda_prototype_loss'],
+                }
+            )
 
     return wandb_logger
 
