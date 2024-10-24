@@ -108,6 +108,7 @@ def run_training_from_select_gps(
     use_onehot_wrapper: bool = False,
     vocab_gene_names: Optional[str] = None,
     num_nodes: int = 1,
+    limit_train_batches: float = 1.0,
     limit_val_batches: float = 1.0,
     val_check_interval: float = 1.0,
     precision=32,  # 'bf16-mixed',
@@ -369,6 +370,7 @@ def run_training_from_select_gps(
         # profiler='advanced',
         num_nodes=num_nodes,
         strategy=strategy,
+        limit_train_batches=limit_train_batches,
         limit_val_batches=limit_val_batches,
         val_check_interval=val_check_interval,
     )
