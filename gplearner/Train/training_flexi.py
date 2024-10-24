@@ -40,6 +40,7 @@ from .training import (
     configure_callbacks,
     configure_logger,
     configure_wandb,
+    configure_save_id,
 )
 
 
@@ -218,13 +219,15 @@ def run_training_from_select_gps(
 
     # wandb.login()
 
-    save_id = configure_wandb(args)
+    save_id = configure_save_id(args)
 
     early_stopping_callback, checkpoint_callback, lr_monitor = configure_callbacks(
         save_id, args
     )
 
-    wandb_logger = configure_logger(args)
+    # initialize wandb logging
+    configure_wandb(args, save_id)
+    wandb_logger = configure_logger(args) or None
 
     ############################################################################
     # Dataset Preparation
@@ -378,17 +381,18 @@ def run_training_from_select_gps(
 
     # save logs to csv for custom plotting
     # Fetch logged data from wandb
-    api = wandb.Api()
-    if torch.cuda.device_count() > 1:
-        run = api.run(f'scGPL/{save_id}_gpu_{str(rank_zero_only.rank)}')
-    else:
-        run = api.run(f'scGPL/{save_id}')
+    if rank_zero_only():
+        api = wandb.Api()
+        if torch.cuda.device_count() > 1:
+            run = api.run(f'scGPL/{save_id}_gpu_{str(rank_zero_only.rank)}')
+        else:
+            run = api.run(f'scGPL/{save_id}')
 
-    # Get logged data as dataframe
-    df = run.history()
-    df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
+        # Get logged data as dataframe
+        df = run.history()
+        df.to_csv(f'{output_dir}/training_metrics.csv', index=False)
 
-    wandb.finish()
+        wandb.finish()
 
 
 # --------------------------------------------------
