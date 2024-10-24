@@ -381,7 +381,7 @@ def run_training_from_select_gps(
 
     # save logs to csv for custom plotting
     # Fetch logged data from wandb
-    if rank_zero_only():
+    if rank_zero_only.rank == 0:
         api = wandb.Api()
         if torch.cuda.device_count() > 1:
             run = api.run(f'scGPL/{save_id}_gpu_{str(rank_zero_only.rank)}')

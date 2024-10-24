@@ -361,7 +361,7 @@ def run_training(
 
     # save logs to csv for custom plotting
     # Fetch logged data from wandb
-    if rank_zero_only():
+    if rank_zero_only.rank == 0:
         api = wandb.Api()
         run = api.run(f'scGPL/{save_id}')
 
