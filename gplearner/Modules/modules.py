@@ -286,7 +286,7 @@ class Attention(nn.Module):
             #     )
             #     # if scale is None, default is 1/sqrt(dim)
 
-            x = attn_out.transpose(1, 2).reshape(B, N, C)
+            x = attn_out.reshape(B, N, C)
 
         elif self.use_flex:
             attn_out = flex_attention(
