@@ -255,14 +255,7 @@ class gpBase(pl.LightningModule):
 
         return out
 
-    def training_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True)
-
-        loss_output = self.compute_gp_loss(batch, output)
-
-        loss_per_gp = loss_output['loss_per_gp']
-        loss = loss_output['total_loss']
-
+    def log_gp_loss(self, loss_per_gp):
         for i, gp in enumerate(self.model.gp_inputs):
             # only log if requires_grad = True
             if (
@@ -280,6 +273,16 @@ class gpBase(pl.LightningModule):
                     prog_bar=True,
                     sync_dist=True,
                 )
+
+    def training_step(self, batch, batch_idx):
+        output = self.forward(batch, masking=True)
+
+        loss_output = self.compute_gp_loss(batch, output)
+
+        loss_per_gp = loss_output['loss_per_gp']
+        loss = loss_output['total_loss']
+
+        self.log_gp_loss(loss_per_gp)
 
         self.log(
             'train/loss',
@@ -642,6 +645,8 @@ class gpGlobal(gpBase):
         output = self.forward(batch, masking=True)
 
         loss_base = self.compute_gp_loss(batch, output)
+
+        self.log_gp_loss(loss_base['loss_per_gp'])
 
         if self.global_loss == 'supervised':
             clf_loss = self.compute_supervised_loss(output, batch, stage='train')

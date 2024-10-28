@@ -462,6 +462,7 @@ class txDataModule(LightningDataModule):
                 num_workers=self.num_workers,
                 sampler=sampler,
                 pin_memory=True,
+                drop_last=True,
             )
 
         else:
@@ -472,6 +473,7 @@ class txDataModule(LightningDataModule):
                 shuffle=True,
                 num_workers=self.num_workers,
                 pin_memory=True,
+                drop_last=True,
             )
 
         return dataloader
