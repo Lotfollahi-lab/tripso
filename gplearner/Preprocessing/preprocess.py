@@ -372,10 +372,13 @@ def pp_and_tokenize(
 
     if save_gp_genes_object:
         # Load GP genes
-        gpdb = pd.read_csv(f'{root_dir}/gpdb_{name_tag}.csv')
-        gp_genes = set()
-        for c in gpdb.columns:
-            gp_genes.update(gpdb[c].dropna().tolist())
+        if gp_genes_union is None:
+            gpdb = pd.read_csv(f'{root_dir}/gpdb_{name_tag}.csv')
+            gp_genes = set()
+            for c in gpdb.columns:
+                gp_genes.update(gpdb[c].dropna().tolist())
+        else:
+            gp_genes = set(gp_genes_union)
 
         # Load anndata object
         # look for existing object in input_h5ad directory
