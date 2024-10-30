@@ -507,6 +507,7 @@ class gpEval:
         genes_to_keep=None,
         output_tag=None,
         do_ensembl_conversion=True,
+        precision=32,
     ):
         """
         Save gene embeddings as Dataset
@@ -549,7 +550,7 @@ class gpEval:
         # converting between different gene labels
         with open(self.gp_transformer.model.gene_name_path, 'rb') as f:
             name_dictionary = pickle.load(f)
-        with open(self.gp_transformer.model, 'rb') as f:
+        with open(self.gp_transformer.model.gene_token_path, 'rb') as f:
             token_dictionary = pickle.load(f)
 
         if do_ensembl_conversion:
@@ -585,7 +586,9 @@ class gpEval:
             model_input_size=self.max_len,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision=precision
+        )
         trainer.test(gp_transformer, txdata)
 
     def visualize_gene_embeddings(
