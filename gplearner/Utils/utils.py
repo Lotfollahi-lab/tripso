@@ -30,7 +30,11 @@ import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
-from datasets import concatenate_datasets, load_from_disk
+from datasets import (
+    DatasetDict,
+    concatenate_datasets,
+    load_from_disk,
+)
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -44,6 +48,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchmetrics import PearsonCorrCoef
+from torchtyping import TensorType  # type: ignore
 from tqdm import tqdm
 
 from ..Metrics.metrics import evaluate_emd, evaluate_mmd
@@ -534,29 +539,32 @@ def convert_gene_names_to_tokens(
 
 
 def get_gp_tokens(
-    gp_genes,
-    do_ensembl_conversion,
-    gp_name,
-    gene_token_path,
-    gene_name_path,
-):
-    """
-    Get genes that belong to input GP program
-    and convert them to relevant geneformer token
+    gp_genes: Union[list[str], pd.Series[str]],
+    do_ensembl_conversion: bool,
+    gp_name: Optional[str],
+    gene_token_path: str,
+    gene_name_path: str,
+) -> set[int]:
+    """Get genes that belong to input GP program and convert them to
+    relevant gene token.
 
-    Inputs are:
-    GP : str
-        Gene program name
-
-    db : pd.DataFrame
-        Gene program database where GP names are columns
-
+    Parameters
+    ----------
+    gp_genes : list or pd.Series
+        List of gene (names) that belong to the current GP.
     do_ensembl_conversion : bool
-        Whether to convert gene names to ensembl IDs before converting to tokens
-
+        Whether to convert gene names to ensembl IDs before converting to tokens.
     gp_name : str
-        Label for the GP of interest (only used for printing)
+        Label for the current GP (only used for printing).
+    gene_token_path : str
+        Path to token dictionary (ensembl_id -> token)
+    gene_name_path: str
+        Path to token name dictionary (gene name -> ensembl_id)
 
+    Returns
+    -------
+    gp_tokens_set : set of ints
+        Set of gene tokens that belong to the current GP.
     """
 
     # Remove missing values (NaN) from the column
@@ -591,14 +599,34 @@ def get_gp_tokens(
     return gp_tokens_set
 
 
-def count_genes_per_cell(dataset, token_dictionary, name_dictionary):
+def count_genes_per_cell(
+    dataset: DatasetDict,
+    token_dictionary: dict[str, int],
+    name_dictionary: dict[str, str],
+) -> pd.DataFrame:
+    """Count how many times each gene appears in a dataset.
+
+    Parameters
+    ----------
+    dataset : DatasetDict
+        HuggingFace dataset containing tokenized sequences for each cell.
+    token_dictionary : dict
+        Dictionary relating ensembl ids with token (integer) IDs.
+    name_dictionary : dict
+        Dictionary relating gene names with ensembl ids.
+
+    Returns
+    -------
+    token_df : DataFrame
+        DataFrame with counts per gene.
+    """
     # Of all these genes, how many are present in at least min_cells cells?
     # Extract the 'input_ids' column as a list of lists
-    input_ids_lists = dataset['input_ids']
+    input_ids_lists = dataset['input_ids']  # (n_cells, seq_len), token IDs
 
     # Flatten the list of lists into a single list
     flat_input_ids = [item for sublist in input_ids_lists for item in sublist]
-    # Count the occurrences of each unique value
+    # Count the occurrences of each unique value/token ID
     value_counts = Counter(flat_input_ids)
 
     # Create a DataFrame from the counts
@@ -621,30 +649,61 @@ def count_genes_per_cell(dataset, token_dictionary, name_dictionary):
     return token_df
 
 
-def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):
+def build_gp_input_matrix(
+    gf: TensorType['n_cells', 'seq_len', 'gene_embed_dim', torch.float32],  # type: ignore # noqa
+    input_ids: TensorType['n_cells', 'seq_len', torch.int32],  # type: ignore # noqa
+    gp_tokens: TensorType['n_gp_tokens', torch.int32],  # type: ignore # noqa
+    crop_to_gp_len: bool = True,
+) -> tuple[  # type: ignore
+    TensorType['n_cells', 'n_gp_tokens', 'gene_embed_dim', torch.float32],  # noqa
+    TensorType['n_cells', 'seq_len', torch.int32],  # noqa
+    TensorType['n_cells', torch.int32],  # noqa
+    TensorType['n_cells', 'seq_len+1', torch.int32],  # noqa
+]:
+    """Build a matrix for input to the GP encoder.
+
+    Output matrix is of shape (n_cells, n_gp_tokens, gene_embed_dim), where
+    n_gp_tokens is the number of genes in the current GP.
+
+    Zero-valued if a gene does not belong to the current GP;
+    i.e., [:, j, :] == 0 for gene j.
+
+    Token selection maintains gene embedding order (i.e., ordered by expression level)
+
+    Parameters
+    ----------
+    gf : Tensor
+        Gene embeddings: shape (n_cells, seq_len, gene_embed_dim) where
+        seq_len is the number of gene tokens included.
+    input_ids : Tensor
+        Tokenization in terms of (gene) token ID: shape (n_cells, seq_len).
+    gp_tokens : Tensor
+        Sequence of gene tokens that belong to the current GP. shape (n_gp_tokens,)
+    crop_to_gp_len : bool
+        Whether to crop the sequence to the max number of non-zero GP genes
+        across cells.
+
+    Returns
+    -------
+    result_matrix : Tensor
+        Gene embeddings that belong to the current GP.
+        shape (n_cells, n_gp_tokens, gene_embed_dim)
+    masked_labels_output : Tensor
+        input_ids, except zeroed where a gene doesn't belong to the current GP.
+        shape (n_cells, seq_len)
+    num_genes_per_cell : Tensor
+        Number of genes in the current GP that are active in each cell.
+        shape (n_cells,).
+    attn_mask : Tensor
+        Binary version of masked_labels_output, with an additional sequence position
+        at the beginning (1-valued) for the cls token. shape (n_cells, seq_len+1).
     """
-    Build a matrix of shape (n_cells, n_gp_tokens, 256)
-    where (i, j, :) = 0 if gene j in cell i does not belong to the current GP
-    maintains geneformer order
+    # model:
+    #     "full_model" : set for input into geneformer
+    #     "extract_genes" : when extracting gene embeddings
+    #                     -> max size is total GP size
+    #     # NEED TO REIMPLEMENT
 
-    Inputs:
-
-    gf :
-        geneformer embeddings (n_cells, 2048, 256)
-
-    input_ids:
-        list of lists with positional information for each token
-
-    gp_tokens_list:
-        list of tokens for each gene program
-
-    model:
-        "full_model" : set for input into geneformer
-        "extract_genes" : when extracting gene embeddings
-                        -> max size is total GP size
-        # NEED TO REIMPLEMENT
-
-    """
     # Get list of gp tokens
     # convert gp_tokens bf16 tensor to integers
     # gp_tokens = gp_tokens.to(torch.int)
@@ -660,12 +719,16 @@ def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):
     # Create a binary mask (h, i, k)
     # In cell h, is the gene at position i in our GP at position k?
     # Using broadcasting to compare tokens_arr with gp_tokens
-    mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0)  # .unsqueeze(0)
+
+    mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(
+        0
+    )  # (num_cells, seq_len, n_gp_tokens)
     mask = mask.to(torch.int)
 
     # Now reshape so that we will zero out non GP genes in each cell
     # Sum along the last dimension to count how many GP tokens each gene matches
-    mask_expanded = mask.sum(dim=-1).unsqueeze(2)
+    mask_expanded = mask.sum(dim=-1).unsqueeze(2)  # (num_cells, seq_len, 1)
+    # how many times does gene i appear in gp_tokens?
 
     if crop_to_gp_len:
         max_num_gp_genes = 0
