@@ -116,6 +116,7 @@ def run_training_from_select_gps(
     bert_config: Dict = {},
     use_diffl: Optional[bool] = False,
     use_flex: Optional[bool] = False,
+    use_gf_embeddings: Optional[bool] = False,
 ):
     """
     Wrapper function for training gpLearner model
@@ -422,7 +423,7 @@ def configure_model_version(args, tag):
         'use_onehot_wrapper': args['use_onehot_wrapper'],
         'vocab_gene_names': args['vocab_gene_names'],
         'do_ensembl_conversion': args['gene_format'] == 'symbol',
-        'berf_config': args['bert_config'],
+        'bert_config': args['bert_config'],
         'use_diffl': args['use_diffl'],
         'use_flex': args['use_flex'],
     }
