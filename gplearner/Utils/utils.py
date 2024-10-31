@@ -698,8 +698,8 @@ def build_gp_input_matrix(
         shape (n_cells,).
     attn_mask : Tensor
         Binary version of masked_labels_output, with an additional sequence position
-        at the beginning (1-valued) for the cls token. Ensures that pad tokens are not
-        attended to. 
+        at the beginning (1-valued) for the cls token. Ensures that pad tokens and
+        non-GP genes are not attended to. 
         shape (n_cells, seq_len+1 or gp_len+1).
     """
     # model:
