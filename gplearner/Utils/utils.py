@@ -687,16 +687,17 @@ def build_gp_input_matrix(
     -------
     result_matrix : Tensor
         Gene embeddings that belong to the current GP.
-        shape (n_cells, n_gp_tokens, gene_embed_dim)
+        shape (n_cells, seq_len or gp_len, gene_embed_dim)
     masked_labels_output : Tensor
         input_ids, except zeroed where a gene doesn't belong to the current GP.
-        shape (n_cells, seq_len)
+        shape (n_cells, seq_len or gp_len)
     num_genes_per_cell : Tensor
         Number of genes in the current GP that are active in each cell.
         shape (n_cells,).
     attn_mask : Tensor
         Binary version of masked_labels_output, with an additional sequence position
-        at the beginning (1-valued) for the cls token. shape (n_cells, seq_len+1).
+        at the beginning (1-valued) for the cls token. 
+        shape (n_cells, seq_len+1 or gp_len+1).
     """
     # model:
     #     "full_model" : set for input into geneformer
@@ -720,9 +721,7 @@ def build_gp_input_matrix(
     # In cell h, is the gene at position i in our GP at position k?
     # Using broadcasting to compare tokens_arr with gp_tokens
 
-    mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(
-        0
-    )  # (num_cells, seq_len, n_gp_tokens)
+    mask = input_ids.unsqueeze(2) == gp_tokens.unsqueeze(0)
     mask = mask.to(torch.int)
 
     # Now reshape so that we will zero out non GP genes in each cell
