@@ -520,11 +520,11 @@ class gpBase(pl.LightningModule):
             grouped_parameters = [
                 {
                     'params': [p for n, p in params if add_custom_lr(n)],
-                    'lr': self.lr,
+                    'lr': self.finetune_lr,
                 },
                 {
                     'params': [p for n, p in params if not add_custom_lr(n)],
-                    'lr': self.finetune_lr,
+                    'lr': self.lr,
                 },
             ]
         else:

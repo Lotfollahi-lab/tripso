@@ -39,8 +39,8 @@ from ..Utils.utils import find_latest_file
 from .training import (
     configure_callbacks,
     configure_logger,
-    configure_wandb,
     configure_save_id,
+    configure_wandb,
 )
 
 
