@@ -673,12 +673,14 @@ def build_gp_input_matrix(
     Parameters
     ----------
     gf : Tensor
-        Gene embeddings: shape (n_cells, seq_len, gene_embed_dim) where
-        seq_len is the number of gene tokens included.
+        Gene embeddings: Input token embedding sequence.
+        shape (n_cells, seq_len, gene_embed_dim)
     input_ids : Tensor
-        Tokenization in terms of (gene) token ID: shape (n_cells, seq_len).
+        Tokenization in terms of (gene) token ID: 
+        shape (n_cells, seq_len).
     gp_tokens : Tensor
-        Sequence of gene tokens that belong to the current GP. shape (n_gp_tokens,)
+        Sequence of gene tokens that belong to the current GP. 
+        shape (n_gp_tokens,)
     crop_to_gp_len : bool
         Whether to crop the sequence to the max number of non-zero GP genes
         across cells.
@@ -689,14 +691,15 @@ def build_gp_input_matrix(
         Gene embeddings that belong to the current GP.
         shape (n_cells, seq_len or gp_len, gene_embed_dim)
     masked_labels_output : Tensor
-        input_ids, except zeroed where a gene doesn't belong to the current GP.
+        Input token IDs for the current GP, padded to either seq_len or gp_len.
         shape (n_cells, seq_len or gp_len)
     num_genes_per_cell : Tensor
         Number of genes in the current GP that are active in each cell.
         shape (n_cells,).
     attn_mask : Tensor
         Binary version of masked_labels_output, with an additional sequence position
-        at the beginning (1-valued) for the cls token. 
+        at the beginning (1-valued) for the cls token. Ensures that pad tokens are not
+        attended to. 
         shape (n_cells, seq_len+1 or gp_len+1).
     """
     # model:
