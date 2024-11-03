@@ -667,28 +667,32 @@ def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):
     # Sum along the last dimension to count how many GP tokens each gene matches
     mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
-    result_matrix = gf * mask_expanded # (n_cells, seq_len, embed_dim) # zero'd for genes that don't belong to GP
+    result_matrix = (
+        gf * mask_expanded
+    )  # (n_cells, seq_len, embed_dim) # zero'd for genes that don't belong to GP
 
     # Now do the same for labels
     # masked_labels_output = mask.sum(axis=-1) * input_ids
     masked_labels_output = torch.where(
         mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
-    ) # (n_cells, seq_len) where zero'd for genes that don't feature in GP
-    
+    )  # (n_cells, seq_len) where zero'd for genes that don't feature in GP
+
     if crop_to_gp_len:
-        masked_labels_non_zero = (masked_labels_output != 0) # (n_cells, seq_len)
+        masked_labels_non_zero = masked_labels_output != 0  # (n_cells, seq_len)
         labels_non_zero = masked_labels_output[masked_labels_non_zero]
         result_matrix_non_zero = result_matrix[masked_labels_non_zero]
-        
-        num_genes = masked_labels_non_zero.int().sum(-1) # (n_cells,)
+
+        num_genes = masked_labels_non_zero.int().sum(-1)  # (n_cells,)
         max_num_genes = num_genes.max()
 
-        idxs = torch.tensor([
-            [gp_i, i]
-            for gp_i, n_gp_genes in enumerate(num_genes)
-            for i in range(n_gp_genes)
-        ]).T.to(labels_non_zero.device)
-            
+        idxs = torch.tensor(
+            [
+                [gp_i, i]
+                for gp_i, n_gp_genes in enumerate(num_genes)
+                for i in range(n_gp_genes)
+            ]
+        ).T.to(labels_non_zero.device)
+
         masked_labels_output = torch.sparse_coo_tensor(
             idxs, labels_non_zero, (len(num_genes), max_num_genes)
         ).to_dense()
