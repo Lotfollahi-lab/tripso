@@ -282,7 +282,8 @@ class gpBase(pl.LightningModule):
         loss_per_gp = loss_output['loss_per_gp']
         loss = loss_output['total_loss']
 
-        self.log_gp_loss(loss_per_gp)
+        if self.calc_gp_loss:
+            self.log_gp_loss(loss_per_gp)
 
         self.log(
             'train/loss',
@@ -523,11 +524,11 @@ class gpBase(pl.LightningModule):
             grouped_parameters = [
                 {
                     'params': [p for n, p in params if add_custom_lr(n)],
-                    'lr': self.lr,
+                    'lr': self.finetune_lr,
                 },
                 {
                     'params': [p for n, p in params if not add_custom_lr(n)],
-                    'lr': self.finetune_lr,
+                    'lr': self.lr,
                 },
             ]
         else:
@@ -646,7 +647,8 @@ class gpGlobal(gpBase):
 
         loss_base = self.compute_gp_loss(batch, output)
 
-        self.log_gp_loss(loss_base['loss_per_gp'])
+        if self.calc_gp_loss:
+            self.log_gp_loss(loss_base['loss_per_gp'])
 
         if self.global_loss == 'supervised':
             clf_loss = self.compute_supervised_loss(output, batch, stage='train')
