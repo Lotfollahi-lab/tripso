@@ -667,57 +667,38 @@ def build_gp_input_matrix(gf, input_ids, gp_tokens, crop_to_gp_len=True):
     # Sum along the last dimension to count how many GP tokens each gene matches
     mask_expanded = mask.sum(dim=-1).unsqueeze(2)
 
+    result_matrix = (
+        gf * mask_expanded
+    )  # (n_cells, seq_len, embed_dim) # zero'd for genes that don't belong to GP
+
+    # Now do the same for labels
+    # masked_labels_output = mask.sum(axis=-1) * input_ids
+    masked_labels_output = torch.where(
+        mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
+    )  # (n_cells, seq_len) where zero'd for genes that don't feature in GP
+
     if crop_to_gp_len:
-        max_num_gp_genes = 0
-        # Apply the mask to the data using broadcasting
-        masked_latent = gf * mask_expanded
+        masked_labels_non_zero = masked_labels_output != 0  # (n_cells, seq_len)
+        labels_non_zero = masked_labels_output[masked_labels_non_zero]
+        result_matrix_non_zero = result_matrix[masked_labels_non_zero]
 
-        # Now wrangle so that the non zero genes are first
-        # but we maintain the order
-        # loop through the cells to deal with different shapes
-        holder = []
+        num_genes = masked_labels_non_zero.int().sum(-1)  # (n_cells,)
+        max_num_genes = num_genes.max()
 
-        for i in range(masked_latent.shape[0]):
-            x = masked_latent[i, :, :]
-            c = masked_latent[i, :, 1]  # find which genes have been 0'd out
-            idx = c != 0
+        idxs = torch.tensor(
+            [
+                [gp_i, i]
+                for gp_i, n_gp_genes in enumerate(num_genes)
+                for i in range(n_gp_genes)
+            ]
+        ).T.to(labels_non_zero.device)
 
-            # track number of gp genes
-            max_num_gp_genes = max(max_num_gp_genes, idx.sum().item())
-
-            idx_zero = c == 0
-            z = torch.concat((x[idx, :], x[idx_zero, :]), dim=0)
-            holder += [z]
-
-        result_matrix = torch.stack(holder)
-
-        masked_labels = torch.where(
-            mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
-        )
-
-        holder = []
-        for i in range(masked_labels.shape[0]):
-            x = masked_labels[i, :]
-            nz = x != 0
-            z = torch.concat((x[nz], x[~nz]), dim=0)
-            holder += [z]
-
-        masked_labels_output = torch.stack(holder)
-
-        # crop
-        n_genes_to_keep = max_num_gp_genes  # gp_tokens.shape[0]
-        result_matrix = result_matrix[:, :n_genes_to_keep, :]
-        masked_labels_output = masked_labels_output[:, :n_genes_to_keep]
-
-    else:
-        # Apply the mask to the data using broadcasting
-        result_matrix = gf * mask_expanded
-
-        # Now do the same for labels
-        # masked_labels_output = mask.sum(axis=-1) * input_ids
-        masked_labels_output = torch.where(
-            mask.sum(axis=-1) == 0, torch.zeros_like(input_ids), input_ids
-        )
+        masked_labels_output = torch.sparse_coo_tensor(
+            idxs, labels_non_zero, (len(num_genes), max_num_genes)
+        ).to_dense()
+        result_matrix = torch.sparse_coo_tensor(
+            idxs, result_matrix_non_zero, (len(num_genes), max_num_genes, e2)
+        ).to_dense()
 
     # count number of genes per cell
     num_genes_per_cell = mask.sum(axis=-1).sum(axis=-1)
