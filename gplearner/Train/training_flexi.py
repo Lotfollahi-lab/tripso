@@ -237,7 +237,7 @@ def run_training_from_select_gps(
 
     # Instantiate datamodule
     if fm_encoder_pkg == 'from_scratch':
-        max_len = bert_config['max_position_embeddings']
+        model_input_size = bert_config['max_position_embeddings']
     else:
         # Get Geneformer model config
         geneformer_repo_path = get_gf_repo()
