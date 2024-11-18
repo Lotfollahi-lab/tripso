@@ -2,7 +2,11 @@ import os
 import pickle
 import random
 import warnings
-from typing import Dict, Optional
+from typing import (
+    Any,
+    Dict,
+    Optional,
+)
 
 import anndata as ad
 import matplotlib
@@ -549,7 +553,7 @@ class gpEval:
         # converting between different gene labels
         with open(self.gp_transformer.model.gene_name_path, 'rb') as f:
             name_dictionary = pickle.load(f)
-        with open(self.gp_transformer.model, 'rb') as f:
+        with open(self.gp_transformer.model.gene_token_path, 'rb') as f:
             token_dictionary = pickle.load(f)
 
         if do_ensembl_conversion:
@@ -876,6 +880,7 @@ def calculate_gp_attribution_scores(
     fm_encoder_pkg='geneformer',
     fm_encoder_name='gf-6L-30M-i2048',
     output_file_name=None,
+    model_input_size: int = 2048,
 ):
     '''
     Calculate attribution scores for each gene program
@@ -920,6 +925,7 @@ def calculate_gp_attribution_scores(
             )
 
     elif fm_encoder_pkg == 'from_scratch':
+        gf_repo_path = get_gf_repo()
         if model_type == 'Base':
             gpformer = gpBase.load_from_checkpoint(
                 model_checkpoint,
@@ -971,16 +977,16 @@ def calculate_gp_attribution_scores(
         batch_size=1,
         return_tuple=True,
         gp=gp,
-        gp_inputs=gp_inputs,
         gpdb=gpdb,
         do_ensembl_conversion=(gene_format != 'ensembl'),
         filter_key=obs_key,
         filter_value=obs_value,
-        gene_counts_df=gene_counts_df,
         geneformer_model=geneformer_model,
         peft_config_path=peft_config_path,
         gene_name_path=gene_name_path,
         gene_token_path=gene_token_path,
+        model_input_size=model_input_size,
+        fm_encoder_pkg=fm_encoder_pkg,
     )
 
     txdata.setup()
@@ -1062,7 +1068,7 @@ def calculate_gp_attribution_scores(
     # set up attribution
     gc = GuidedGradCam(imodel, imodel.gp_block.blocks[block_n].mlp)
 
-    attribution_scores = {}
+    attribution_scores: Dict[Any, Any] = {}
     all_tokens = set()
     counter = 0
 

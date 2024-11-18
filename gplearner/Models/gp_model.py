@@ -215,6 +215,8 @@ class gpWrapper(nn.Module):
         self.gp_inputs = gp_inputs
         self.model_type = model_type
         self.learning_new_gp = learn_new_gp
+        self.gene_name_path = gene_name_path
+        self.gene_token_path = gene_token_path
 
         # Get vocab size
         with open(gene_token_path, 'rb') as f:

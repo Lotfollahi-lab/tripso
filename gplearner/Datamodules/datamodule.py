@@ -348,6 +348,7 @@ class txDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.shuffle = shuffle
+        self.fm_encoder_name = fm_encoder_name
 
         self.frac_for_training = frac_for_training
         self.data_for_test_step = data_split_to_pass_to_test_step
