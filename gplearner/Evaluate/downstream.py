@@ -2,7 +2,11 @@ import os
 import pickle
 import random
 import warnings
-from typing import Dict, Optional
+from typing import (
+    Any,
+    Dict,
+    Optional,
+)
 
 import anndata as ad
 import matplotlib
@@ -13,7 +17,7 @@ import pytorch_lightning as pl
 import scanpy as sc
 import seaborn as sns
 import torch
-from captum.attr import GuidedGradCam
+from captum.attr import GuidedGradCam, ShapleyValueSampling
 from datasets import load_from_disk
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
@@ -549,7 +553,7 @@ class gpEval:
         # converting between different gene labels
         with open(self.gp_transformer.model.gene_name_path, 'rb') as f:
             name_dictionary = pickle.load(f)
-        with open(self.gp_transformer.model, 'rb') as f:
+        with open(self.gp_transformer.model.gene_token_path, 'rb') as f:
             token_dictionary = pickle.load(f)
 
         if do_ensembl_conversion:
@@ -1174,10 +1178,14 @@ def calculate_cell_token_attribution_scores(
     pretrained_emb=None,
     supervised_labels=None,
     block_n=-1,
+    method: str = 'GradCAM',
 ):
     # --------------------------
     # Set seed
     # --------------------------
+
+    if method not in ['GradCAM', 'Shapley']:
+        raise ValueError('"method" must be one of ["GradCAM", "Shapley"].')
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -1299,9 +1307,14 @@ def calculate_cell_token_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[block_n].mlp)
+    if method == 'GradCAM':
+        attr_module = GuidedGradCam(
+            imodel, imodel.global_block.encoder.blocks[block_n].mlp
+        )
+    else:
+        attr_module = ShapleyValueSampling(imodel)
 
-    attribution_scores = {}
+    attribution_scores: Dict[Any, Any] = {}
 
     for g in gp_inputs:
         attribution_scores[g] = []
@@ -1318,7 +1331,7 @@ def calculate_cell_token_attribution_scores(
 
             input_ids = (emb, edict)
 
-            attributions = gc.attribute(
+            attributions = attr_module.attribute(
                 input_ids[0],
                 target=conversion_dict[obs_value],
                 additional_forward_args=input_ids[1],
