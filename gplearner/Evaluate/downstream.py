@@ -880,6 +880,7 @@ def calculate_gp_attribution_scores(
     fm_encoder_pkg='geneformer',
     fm_encoder_name='gf-6L-30M-i2048',
     output_file_name=None,
+    method: str = 'GradCAM',
 ):
     '''
     Calculate attribution scores for each gene program
@@ -888,6 +889,9 @@ def calculate_gp_attribution_scores(
     # --------------------------
     # Set seed
     # --------------------------
+
+    if method not in ['GradCAM', 'Shapley']:
+        raise ValueError('"method" must be one of ["GradCAM", "Shapley"].')
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -924,6 +928,7 @@ def calculate_gp_attribution_scores(
             )
 
     elif fm_encoder_pkg == 'from_scratch':
+        gf_repo_path = get_gf_repo()
         if model_type == 'Base':
             gpformer = gpBase.load_from_checkpoint(
                 model_checkpoint,
@@ -1064,9 +1069,14 @@ def calculate_gp_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[block_n].mlp)
+    if method == 'GradCAM':
+        attr_module = GuidedGradCam(
+            imodel, imodel.global_block.encoder.blocks[block_n].mlp
+        )
+    else:
+        attr_module = ShapleyValueSampling(imodel)
 
-    attribution_scores = {}
+    attribution_scores: Dict[Any, Any] = {}
     all_tokens = set()
     counter = 0
 
@@ -1085,7 +1095,7 @@ def calculate_gp_attribution_scores(
             for labels in token_labels:
                 all_tokens.add(labels)
 
-            attributions = gc.attribute(
+            attributions = attr_module.attribute(
                 input_ids[0],
                 target=edict[f'{obs_key}_id'],
                 additional_forward_args=input_ids[1],
