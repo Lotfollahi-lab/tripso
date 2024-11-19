@@ -624,7 +624,7 @@ class iTxDataModule(txDataModule):
         length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
         input_batch_id = pad_tensor_list(
-            input_batch_id, self.max_len, self.pad_token_id, self.max_len
+            input_batch_id, 'dynamic', self.pad_token_id, self.model_input_size
         )
 
         # Get Geneformer embeddings
