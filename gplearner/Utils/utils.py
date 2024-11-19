@@ -676,10 +676,10 @@ def build_gp_input_matrix(
         Gene embeddings: Input token embedding sequence.
         shape (n_cells, seq_len, gene_embed_dim)
     input_ids : Tensor
-        Tokenization in terms of (gene) token ID: 
+        Tokenization in terms of (gene) token ID:
         shape (n_cells, seq_len).
     gp_tokens : Tensor
-        Sequence of gene tokens that belong to the current GP. 
+        Sequence of gene tokens that belong to the current GP.
         shape (n_gp_tokens,)
     crop_to_gp_len : bool
         Whether to crop the sequence to the max number of non-zero GP genes
@@ -699,7 +699,7 @@ def build_gp_input_matrix(
     attn_mask : Tensor
         Binary version of masked_labels_output, with an additional sequence position
         at the beginning (1-valued) for the cls token. Ensures that pad tokens and
-        non-GP genes are not attended to. 
+        non-GP genes are not attended to.
         shape (n_cells, seq_len+1 or gp_len+1).
     """
     # model:
@@ -750,13 +750,13 @@ def build_gp_input_matrix(
         num_genes = masked_labels_non_zero.int().sum(-1)  # (n_cells,)
         max_num_genes = num_genes.max()
 
-        idxs = torch.tensor(
-            [
-                [gp_i, i]
-                for gp_i, n_gp_genes in enumerate(num_genes)
-                for i in range(n_gp_genes)
-            ]
-        ).T.to(labels_non_zero.device)
+        row_indices = torch.repeat_interleave(
+            torch.arange(len(num_genes), device=labels_non_zero.device), num_genes
+        )
+        col_indices = torch.cat(
+            [torch.arange(n, device=labels_non_zero.device) for n in num_genes]
+        )
+        idxs = torch.stack([row_indices, col_indices], dim=0)
 
         masked_labels_output = torch.sparse_coo_tensor(
             idxs, labels_non_zero, (len(num_genes), max_num_genes)
