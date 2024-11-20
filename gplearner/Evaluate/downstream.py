@@ -890,8 +890,10 @@ def calculate_gp_attribution_scores(
     # Set seed
     # --------------------------
 
-    if method not in ['GradCAM', 'Shapley']:
-        raise ValueError('"method" must be one of ["GradCAM", "Shapley"].')
+    if method not in ['GradCAM', 'Shapley', 'IntegratedGradients']:
+        raise ValueError(
+            '"method" must be one of ["GradCAM", "Shapley", "IntegratedGradients"].'
+        )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -1070,11 +1072,20 @@ def calculate_gp_attribution_scores(
 
     # set up attribution
     if method == 'GradCAM':
-        attr_module = GuidedGradCam(
-            imodel, imodel.global_block.encoder.blocks[block_n].mlp
-        )
+        attr_module = GuidedGradCam(imodel, imodel.gp_block.blocks[block_n].mlp)
+    elif method in ['Shapley', 'IntegratedGradients']:
+
+        def encode_fn(x):
+            return imodel.gp_block(x)['cls']
+
+        def classify_fn(x):
+            return imodel.clf_layer(x)
+
+        attr_module = ShapleyValueSampling(classify_fn)
     else:
-        attr_module = ShapleyValueSampling(imodel)
+        raise ValueError(
+            '"method" must be one of ["GradCAM", "Shapley", "IntegratedGradients"].'
+        )
 
     attribution_scores: Dict[Any, Any] = {}
     all_tokens = set()
@@ -1095,11 +1106,19 @@ def calculate_gp_attribution_scores(
             for labels in token_labels:
                 all_tokens.add(labels)
 
-            attributions = attr_module.attribute(
-                input_ids[0],
-                target=edict[f'{obs_key}_id'],
-                additional_forward_args=input_ids[1],
-            )
+            if method in ['Shapley']:
+                encoded = encode_fn(input_ids[0])
+                attributions = attr_module.attribute(
+                    encoded,
+                    target=edict[f'{obs_key}_id'],
+                    additional_forward_args=input_ids[1],
+                )
+            else:
+                attributions = attr_module.attribute(
+                    input_ids[0],
+                    target=edict[f'{obs_key}_id'],
+                    additional_forward_args=input_ids[1],
+                )
 
             attr_norm = summarize_attributions(attributions).detach().cpu().numpy()
 
@@ -1194,8 +1213,10 @@ def calculate_cell_token_attribution_scores(
     # Set seed
     # --------------------------
 
-    if method not in ['GradCAM', 'Shapley']:
-        raise ValueError('"method" must be one of ["GradCAM", "Shapley"].')
+    if method not in ['GradCAM', 'Shapley', 'IntegratedGradients']:
+        raise ValueError(
+            '"method" must be one of ["GradCAM", "Shapley", "IntegratedGradients"].'
+        )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -1321,8 +1342,19 @@ def calculate_cell_token_attribution_scores(
         attr_module = GuidedGradCam(
             imodel, imodel.global_block.encoder.blocks[block_n].mlp
         )
+    elif method in ['Shapley', 'IntegratedGradients']:
+
+        def encode_fn(x):
+            return imodel.global_block(x)['cell_token']
+
+        def classify_fn(x):
+            return imodel.clf_layer(x)
+
+        attr_module = ShapleyValueSampling(classify_fn)
     else:
-        attr_module = ShapleyValueSampling(imodel)
+        raise ValueError(
+            '"method" must be one of ["GradCAM", "Shapley", "IntegratedGradients"].'
+        )
 
     attribution_scores: Dict[Any, Any] = {}
 
@@ -1341,11 +1373,26 @@ def calculate_cell_token_attribution_scores(
 
             input_ids = (emb, edict)
 
-            attributions = attr_module.attribute(
-                input_ids[0],
-                target=conversion_dict[obs_value],
-                additional_forward_args=input_ids[1],
-            )
+            if method == 'GradCAM':
+                attributions = attr_module.attribute(
+                    input_ids[0],
+                    target=conversion_dict[obs_value],
+                    additional_forward_args=input_ids[1],
+                )
+            elif method in ['Shapley', 'IntegratedGradients']:
+                encoded = encode_fn(input_ids[0])
+                attributions = attr_module.attribute(
+                    encoded,
+                    target=conversion_dict[obs_value],
+                    additional_forward_args=input_ids[1],
+                )
+            else:
+                raise ValueError(
+                    '''
+                    "method" must be one of
+                    ["GradCAM", "Shapley", "IntegratedGradients"].
+                    '''
+                )
 
             attr_norm = summarize_attributions(attributions).detach().cpu().numpy()
 
