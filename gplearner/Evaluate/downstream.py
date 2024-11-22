@@ -21,6 +21,7 @@ from captum.attr import GuidedGradCam
 from datasets import load_from_disk
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
+from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -511,6 +512,7 @@ class gpEval:
         genes_to_keep=None,
         output_tag=None,
         do_ensembl_conversion=True,
+        precision=32,
     ):
         """
         Save gene embeddings as Dataset
@@ -589,7 +591,9 @@ class gpEval:
             model_input_size=self.max_len,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision=precision
+        )
         trainer.test(gp_transformer, txdata)
 
     def visualize_gene_embeddings(
@@ -663,7 +667,7 @@ class gpEval:
                 frameon=False,
             )
 
-    def generate_attention_matrix(self, gp, split='test'):
+    def generate_attention_matrix(self, gp, split='test', precision=32):
         """
         Get attention weights from gpTransformer
         """
@@ -688,7 +692,9 @@ class gpEval:
             split_label=split,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision=precision
+        )
 
         trainer.test(gp_transformer, txdata)
 
@@ -1543,7 +1549,7 @@ def visualize_with_gene_exp(
         return adata
 
 
-def eval_with_knn(
+def calc_eval_metrics(
     train_set,
     test_set,
     gp,
@@ -1552,6 +1558,8 @@ def eval_with_knn(
     k=20,
     data_type='dataset',
     task='classification',
+    normalize=False,
+    model_type='knn',
 ):
     np.random.seed(0)
     random.seed(0)
@@ -1566,37 +1574,44 @@ def eval_with_knn(
         if gp != 'cell_token':
             X_train = train_set[:, train_set.var.index.str.contains(gp, case=False)].X
             X_test = test_set[:, test_set.var.index.str.contains(gp, case=False)].X
-            # Normalize
-            X_train = X_train / X_train.sum(axis=1)[:, None]
-            X_test = X_test / X_test.sum(axis=1)[:, None]
+            if normalize:
+                X_train = X_train / X_train.sum(axis=1)[:, None]
+                X_test = X_test / X_test.sum(axis=1)[:, None]
         else:
             X_train = train_set.X
             X_test = test_set.X
-            # Normalize
-            X_train = X_train / X_train.sum(axis=1)[:, None]
-            X_test = X_test / X_test.sum(axis=1)[:, None]
+            if normalize:
+                X_train = X_train / X_train.sum(axis=1)[:, None]
+                X_test = X_test / X_test.sum(axis=1)[:, None]
         y_train = train_set.obs[label]
         y_test = test_set.obs[label]
 
-    # Initialize KNN based on the task (classification or regression)
-    if task == 'classification':
-        knn = KNeighborsClassifier(n_neighbors=k)
-    elif task == 'regression':
-        knn = KNeighborsRegressor(n_neighbors=k)
+    # Initialize the model based on task and model type
+    if model_type == 'knn':
+        if task == 'classification':
+            model = KNeighborsClassifier(n_neighbors=k)
+        elif task == 'regression':
+            model = KNeighborsRegressor(n_neighbors=k)
+    elif model_type == 'linear':
+        model = LinearRegression()
+    elif model_type == 'logistic':
+        if task != 'classification':
+            raise ValueError(
+                'Logistic regression can only be used for classification tasks.'
+            )
+        model = LogisticRegression(class_weight='balanced')
 
     # Train the model
-    knn.fit(X_train, y_train)
+    model.fit(X_train, y_train)
 
     # Make predictions
-    y_pred = knn.predict(X_test)
+    y_pred = model.predict(X_test)
 
     # Evaluate based on the task
     if task == 'classification':
-        # Classification task evaluation
         accuracy = accuracy_score(y_test, y_pred)
-        print(f'Accuracy: {accuracy: .2f}')
+        print(f'Accuracy: {accuracy:.2f}')
 
-        # Generate classification report and wrangle output
         report = classification_report(y_test, y_pred, output_dict=True)
         output_df = wrangle_classification_report(report)
         output_df = output_df[
@@ -1627,21 +1642,20 @@ def eval_with_knn(
 
         # Save the classification output
         os.makedirs(output_dir, exist_ok=True)
+        print('Saving to', os.path.join(output_dir, f'{label}_from_{gp}.csv'))
         output_df.to_csv(
             os.path.join(output_dir, f'{label}_from_{gp}.csv'), index=False
         )
 
     elif task == 'regression':
-        # Regression task evaluation
         mse = mean_squared_error(y_test, y_pred)
         mae = mean_absolute_error(y_test, y_pred)
         r2 = r2_score(y_test, y_pred)
 
-        print(f'Mean Squared Error (MSE): {mse: .2f}')
-        print(f'Mean Absolute Error (MAE): {mae: .2f}')
-        print(f'R-squared (R2): {r2: .2f}')
+        print(f'Mean Squared Error (MSE): {mse:.2f}')
+        print(f'Mean Absolute Error (MAE): {mae:.2f}')
+        print(f'R-squared (R2): {r2:.2f}')
 
-        # Save regression evaluation metrics
         metrics = {
             'Mean Squared Error': mse,
             'Mean Absolute Error': mae,

@@ -110,6 +110,7 @@ def run_training(
     use_diffl: Optional[bool] = False,
     use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
+    calc_gp_loss: Optional[bool] = True,
 ):
     """
     Wrapper function for training gpLearner model
@@ -627,6 +628,7 @@ def configure_lightning_module(model, gp_similarity, args):
         'optimizer': torch.optim.AdamW,  # DeepSpeedCPUAdam
         # if args['strategy'].startswith('deepspeed')
         # else
+        'calc_gp_loss': args['calc_gp_loss'],
     }
 
     global_params = {
