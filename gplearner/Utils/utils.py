@@ -744,13 +744,13 @@ def build_gp_input_matrix(
         num_genes = masked_labels_non_zero.int().sum(-1)  # (n_cells,)
         max_num_genes = num_genes.max()
 
-        idxs = torch.tensor(
-            [
-                [gp_i, i]
-                for gp_i, n_gp_genes in enumerate(num_genes)
-                for i in range(n_gp_genes)
-            ]
-        ).T.to(labels_non_zero.device)
+        row_indices = torch.repeat_interleave(
+            torch.arange(len(num_genes), device=labels_non_zero.device), num_genes
+        )
+        col_indices = torch.cat(
+            [torch.arange(n, device=labels_non_zero.device) for n in num_genes]
+        )
+        idxs = torch.stack([row_indices, col_indices], dim=0)
 
         masked_labels_output = torch.sparse_coo_tensor(
             idxs, labels_non_zero, (len(num_genes), max_num_genes)
