@@ -1593,7 +1593,7 @@ def calc_eval_metrics(
             raise ValueError(
                 'Logistic regression can only be used for classification tasks.'
             )
-        model = LogisticRegression(max_iter=1000)
+        model = LogisticRegression(class_weight='balanced')
 
     # Train the model
     model.fit(X_train, y_train)
