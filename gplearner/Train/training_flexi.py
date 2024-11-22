@@ -329,9 +329,22 @@ def run_training_from_select_gps(
     latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type_old)
     checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
     checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-    gp_transformer_v0.load_state_dict(checkpoint['state_dict'])
+    state_dict = checkpoint['state_dict']
 
-    # ----- Transfer weights -------
+    if global_loss_old == 'reconstruction' and global_loss == 'supervised':
+        model_state_dict = gp_transformer_v0.state_dict()
+        irrelevant_params = [
+            'theta',
+            'model.count_head.softmax_output.0.weight',
+            'model.count_head.softmax_output.0.bias',
+        ]
+        for param_name in state_dict:
+            if param_name in irrelevant_params:
+                state_dict[param_name] = torch.zeros_like(model_state_dict[param_name])
+
+    gp_transformer_v0.load_state_dict(state_dict)
+
+    # ----- Transfer weights of multi_gp_encoder -------
     for i, gp in enumerate(gp_transformer.model.gp_inputs):
         if gp in gp_transformer_v0.model.gp_inputs:
             # find index in original model
@@ -348,6 +361,14 @@ def run_training_from_select_gps(
                     param.requires_grad = False
         else:
             continue
+
+    # ----- Transfer weights of gf_wrapper -------
+    gp_transformer.model.gf_wrapper = gp_transformer_v0.model.gf_wrapper
+
+    # Freeze weights
+    for name, param in gp_transformer.model.named_parameters():
+        if 'gf_wrapper' in name:
+            param.requires_grad = False
 
     # ----- Optionally transfer cell encoder -------
     if (model_type == 'Global') & (model_type_old == 'Global'):

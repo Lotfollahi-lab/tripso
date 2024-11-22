@@ -26,11 +26,9 @@ class iGpWrapper(nn.Module):
         )
 
         # table for converting between different gene labels
-        with open(self.gp_transformer.model.multi_gp_encoder.gene_name_path, 'rb') as f:
+        with open(gp_transformer.model.multi_gp_encoder.gene_name_path, 'rb') as f:
             name_dictionary = pickle.load(f)
-        with open(
-            self.gp_transformer.model.multi_gp_encoder.gene_token_path, 'rb'
-        ) as f:
+        with open(gp_transformer.model.multi_gp_encoder.gene_token_path, 'rb') as f:
             token_dictionary = pickle.load(f)
 
         ensembl_to_name = {v: k for k, v in name_dictionary.items()}
