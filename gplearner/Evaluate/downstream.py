@@ -17,7 +17,11 @@ import pytorch_lightning as pl
 import scanpy as sc
 import seaborn as sns
 import torch
-from captum.attr import GuidedGradCam, ShapleyValueSampling
+from captum.attr import (
+    GuidedGradCam,
+    IntegratedGradients,
+    ShapleyValueSampling,
+)
 from datasets import load_from_disk
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
@@ -1081,7 +1085,10 @@ def calculate_gp_attribution_scores(
         def classify_fn(x):
             return imodel.clf_layer(x)
 
-        attr_module = ShapleyValueSampling(classify_fn)
+        if method == 'Shapley':
+            attr_module = ShapleyValueSampling(classify_fn)
+        else:
+            attr_module = IntegratedGradients(classify_fn)
     else:
         raise ValueError(
             '"method" must be one of ["GradCAM", "Shapley", "IntegratedGradients"].'
@@ -1350,7 +1357,10 @@ def calculate_cell_token_attribution_scores(
         def classify_fn(x):
             return imodel.clf_layer(x)
 
-        attr_module = ShapleyValueSampling(classify_fn)
+        if method == 'Shapley':
+            attr_module = ShapleyValueSampling(classify_fn)
+        else:
+            attr_module = IntegratedGradients(classify_fn)
     else:
         raise ValueError(
             '"method" must be one of ["GradCAM", "Shapley", "IntegratedGradients"].'
