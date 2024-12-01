@@ -7,6 +7,7 @@ from typing import (
     Dict,
     Literal,
     Optional,
+    Union
 )
 
 import numpy as np
@@ -22,6 +23,12 @@ from pytorch_lightning.callbacks import EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 from transformers import BertConfig
+
+from geneformer import TOKEN_DICTIONARY_FILE, GeneformerPretrainer
+from transformers import BertConfig, BertForMaskedLM, TrainingArguments
+from datasets import load_from_disk
+import pickle
+
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.baselines import gfGlobal
@@ -60,7 +67,7 @@ def run_training(
     strategy: str = 'ddp_find_unused_parameters_true',
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
-    finetune_lr: float = 1e-5,
+    finetune_lr: Union[float, dict] = 1e-5,
     resume_training: Optional[bool] = False,
     gp_inputs: Optional[list] = None,
     frac_for_training: Optional[float] = 1.0,
@@ -111,6 +118,8 @@ def run_training(
     use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
     calc_gp_loss: Optional[bool] = True,
+    train_bert_encoder_epochs: Optional[int] = 0,
+    do_bert_encoder_training: Optional[bool] = False
 ):
     """
     Wrapper function for training gpLearner model
@@ -315,6 +324,15 @@ def run_training(
     ############################################################################
     # Train model
     ############################################################################
+    
+    # --------------------------------------------------------------------------
+    # Optionally train BERT encoder
+    # --------------------------------------------------------------------------
+    
+    if (fm_encoder_pkg == 'from_scratch') & \
+        (train_bert_encoder_epochs > 0) & \
+        (do_bert_encoder_training):
+        run_bert_training(args)
 
     model = configure_model(args)
 
@@ -571,6 +589,8 @@ def configure_model(args):
         'use_diffl': args['use_diffl'],
         'use_flex': args['use_flex'],
         'use_gf_embeddings': args['use_gf_embeddings'],
+        'bert_model_dir' : args['output_dir'] if args['model_type'] == 'Base' else args['path_to_base_model'],
+        'train_bert_encoder_epochs' : args['train_bert_encoder_epochs'],
     }
 
     global_params = {
@@ -767,3 +787,103 @@ def load_from_ckpt(mode, pl_model, args):
                     param.requires_grad = True
 
         return pl_model
+
+
+def run_bert_training(args):
+    '''
+    Geneformer style training from scratch 
+    Adapted from 
+    https://huggingface.co/ctheodoris/Geneformer/blob/main/examples/pretraining_new_model/pretrain_geneformer_w_deepspeed.py
+    
+    accessed 28.11.24
+    
+    '''
+    
+        # create lengths file if doesnt exist 
+    if not os.path.exists(os.path.join(args['output_dir'], 'lengths.pkl')):
+        data = load_from_disk(args['dataset_path']).shuffle(seed = args['seed'])
+        data = data.select(range(int(0.8 * len(data))))
+        
+        length_obj = data['length']
+        
+        # Save as pickle object
+        with open(os.path.join(args['output_dir'], 'lengths.pkl'), 'wb') as f:
+            pickle.dump(length_obj, f)
+            
+    train_data = load_from_disk(args['dataset_path']).shuffle(seed = args['seed'])
+    train_data = train_data.select(range(int(0.8 * len(train_data))))
+    
+
+    # Set up model
+    bert_config = args['bert_config']
+    
+    # load proper token dictionary 
+    if bert_config['max_position_embeddings'] == 4096:
+        token_dictionary=pd.read_pickle(TOKEN_DICTIONARY_FILE)
+    else:
+        geneformer_repo_path = get_gf_repo()
+        
+        token_dictionary = os.path.join(
+            geneformer_repo_path,
+            'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
+            )
+        
+    config = BertConfig(**bert_config)
+    model = BertForMaskedLM(config)
+    model = model.train()
+        
+    # define the training arguments
+    training_args = {
+        "learning_rate": 1e-3,
+        "do_train": True,
+        "do_eval": False,
+        "group_by_length": True,
+        "length_column_name": "length",
+        "disable_tqdm": False,
+        "lr_scheduler_type": 'linear',
+        "warmup_steps": 5_000,
+        "weight_decay": 0.001,
+        "per_device_train_batch_size": 128,
+        "num_train_epochs": args['train_bert_encoder_epochs'],
+        "save_strategy": "steps",
+        "save_steps": np.floor(
+            len(train_data) / 128 / 2
+            ),  
+        "logging_steps": np.floor(
+            len(train_data) / 128
+            ),  
+        "output_dir": os.path.join(args['output_dir'], 'bert_model'),
+        "logging_dir": os.path.join(args['output_dir'], 'bert_model_logs'),
+    }
+    
+    training_args = TrainingArguments(**training_args)
+    
+    # define the trainer
+    trainer = GeneformerPretrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_data,
+        example_lengths_file=os.path.join(args['output_dir'], 'lengths.pkl'),
+        token_dictionary=token_dictionary,
+    )
+
+    # train
+    
+    print('')
+    print('')
+    print('===== Training cell encoder =====')
+    print('')
+    print('')
+    
+    trainer.train()
+
+    # save model
+    trainer.save_model(os.path.join(args['output_dir'], 'bert_model'))
+    
+    # clean up intermediate checkpoints ?
+    
+
+
+
+
+
