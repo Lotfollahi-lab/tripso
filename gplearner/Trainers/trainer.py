@@ -528,7 +528,7 @@ class gpBase(pl.LightningModule):
                 # Default to self.lr if no key matches
                 return self.lr
             else:
-                raise ValueError("finetune_lr must be either a float or a dict.")
+                raise ValueError('finetune_lr must be either a float or a dict.')
 
         # Group parameters with their respective learning rates
         lr_to_params = {}
@@ -540,8 +540,9 @@ class gpBase(pl.LightningModule):
                 lr_to_params[lr] = []
             lr_to_params[lr].append(param)
 
-        grouped_parameters = [{'params': param_list, 'lr': lr} for lr, param_list in lr_to_params.items()]
-
+        grouped_parameters = [
+            {'params': param_list, 'lr': lr} for lr, param_list in lr_to_params.items()
+        ]
 
         optimizer = self.optimizer_class(
             grouped_parameters, lr=self.lr, weight_decay=self.weight_decay
