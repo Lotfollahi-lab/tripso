@@ -143,19 +143,13 @@ class BertWrapper(nn.Module):
         token_dictionary_file,
         fm_layer_to_quant,
         use_gf_embeddings=False,
-        bert_model_path=None,
     ):
         super().__init__()
 
-        if bert_model_path:
-            self.model = BertForMaskedLM.from_pretrained(
-                bert_model_path, output_attentions=False, output_hidden_states=True
-            )
+        config = BertConfig(**config_dict)
 
-        else:
-            # Initialize BERT model for getting gene embeddings
-            config = BertConfig(**config_dict)
-            self.model = BertForMaskedLM(config)
+        # Initialize BERT model for getting gene embeddings
+        self.model = BertForMaskedLM(config)
 
         # Set word embeddings to Geneformer embeddings
         if use_gf_embeddings:
@@ -844,8 +838,6 @@ class gpTransformerBase(nn.Module):
         bert_config=None,
         gp_latent_size=256,  # legacy, for baselines
         use_gf_embeddings=False,
-        train_bert_encoder_epochs=0,
-        bert_model_dir='path/for/model/saving',
     ):
         """
         database :
@@ -995,9 +987,6 @@ class gpTransformerBase(nn.Module):
                 fm_layer_to_quant=0,
                 token_dictionary_file=self.gene_token_path,
                 use_gf_embeddings=use_gf_embeddings,
-                bert_model_path=os.path.join(bert_model_dir, 'bert_model')
-                if train_bert_encoder_epochs > 0
-                else None,
             )
 
         else:
