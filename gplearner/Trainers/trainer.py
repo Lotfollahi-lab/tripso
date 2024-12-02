@@ -120,7 +120,7 @@ class gpBase(pl.LightningModule):
         gene_dir_tag: Optional[str] = None,
         return_attention: bool = False,
         gp: Optional[str] = None,
-        finetune_lr: float = 1e-5,
+        finetune_lr: Union[float, dict] = 1e-5,
         use_finetune_lr: bool = False,
         save_emb: bool = False,
         split_label: str = 'train',
@@ -510,32 +510,39 @@ class gpBase(pl.LightningModule):
         return holder
 
     def configure_optimizers(self):
-        # return DeepSpeedCPUAdam(self.parameters())
-        # Define optimizer and may be consider weight decay
-        # to improve generalization L2 regularization
-
-        # add custom learning rate for cell_token_learner if exists:
         params = list(self.model.named_parameters())
 
-        def add_custom_lr(n):
-            return 'multi_gp_encoder' in n
+        def get_lr_for_param(name):
+            """Determine the learning rate for a parameter based on its name."""
+            if isinstance(self.finetune_lr, float):
+                # Use finetune_lr for specific parameter names
+                if 'multi_gp_encoder' in name or 'gf_wrapper' in name:
+                    return self.finetune_lr
+                else:
+                    return self.lr
+            elif isinstance(self.finetune_lr, dict):
+                # Use the learning rate from the dict if a key matches part of the name
+                for key, lr in self.finetune_lr.items():
+                    if key in name:
+                        return lr
+                # Default to self.lr if no key matches
+                return self.lr
+            else:
+                raise ValueError('finetune_lr must be either a float or a dict.')
 
-        if self.use_finetune_lr:
-            grouped_parameters = [
-                {
-                    'params': [p for n, p in params if add_custom_lr(n)],
-                    'lr': self.finetune_lr,
-                },
-                {
-                    'params': [p for n, p in params if not add_custom_lr(n)],
-                    'lr': self.lr,
-                },
-            ]
-        else:
-            grouped_parameters = [{'params': [p for n, p in params], 'lr': self.lr}]
+        # Group parameters with their respective learning rates
+        lr_to_params = {}
+        for name, param in params:
+            if not param.requires_grad:
+                continue
+            lr = get_lr_for_param(name)
+            if lr not in lr_to_params:
+                lr_to_params[lr] = []
+            lr_to_params[lr].append(param)
 
-        def add_custom_lr(n, idx):
-            return f'multi_gp_encoder.{idx}' in n
+        grouped_parameters = [
+            {'params': param_list, 'lr': lr} for lr, param_list in lr_to_params.items()
+        ]
 
         optimizer = self.optimizer_class(
             grouped_parameters, lr=self.lr, weight_decay=self.weight_decay

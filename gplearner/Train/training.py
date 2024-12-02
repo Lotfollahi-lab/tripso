@@ -7,6 +7,7 @@ from typing import (
     Dict,
     Literal,
     Optional,
+    Union,
 )
 
 import numpy as np
@@ -60,7 +61,7 @@ def run_training(
     strategy: str = 'ddp_find_unused_parameters_true',
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
-    finetune_lr: float = 1e-5,
+    finetune_lr: Union[float, dict] = 1e-5,
     resume_training: Optional[bool] = False,
     gp_inputs: Optional[list] = None,
     frac_for_training: Optional[float] = 1.0,
