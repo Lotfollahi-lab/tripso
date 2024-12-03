@@ -1066,8 +1066,8 @@ def calculate_gp_attribution_scores(
                 batch_size=128,
                 num_workers=1,
                 data_type='dataset',
+                n_epochs=3,
                 continuous_cov=[],
-                sample_by=obs_key,
             )
 
             clf_layer = EmbEvaluator.load_from_checkpoint(
