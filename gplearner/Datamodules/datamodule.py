@@ -348,6 +348,7 @@ class txDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.shuffle = shuffle
+        self.fm_encoder_name = fm_encoder_name
 
         self.frac_for_training = frac_for_training
         self.data_for_test_step = data_split_to_pass_to_test_step
@@ -462,6 +463,7 @@ class txDataModule(LightningDataModule):
                 num_workers=self.num_workers,
                 sampler=sampler,
                 pin_memory=True,
+                drop_last=True,
             )
 
         else:
@@ -472,6 +474,7 @@ class txDataModule(LightningDataModule):
                 shuffle=True,
                 num_workers=self.num_workers,
                 pin_memory=True,
+                drop_last=True,
             )
 
         return dataloader
@@ -623,7 +626,7 @@ class iTxDataModule(txDataModule):
         length = torch.stack([torch.tensor(d['length']) for d in tokenized_batch])
 
         input_batch_id = pad_tensor_list(
-            input_batch_id, self.max_len, self.pad_token_id, self.max_len
+            input_batch_id, 'dynamic', self.pad_token_id, self.model_input_size
         )
 
         # Get Geneformer embeddings

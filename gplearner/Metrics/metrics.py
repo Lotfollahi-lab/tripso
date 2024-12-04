@@ -207,7 +207,7 @@ def evaluate_emd(true_data, pred_data, condition_key=None, de_genes_dict=None):
 
 
 def evaluate_emd_ref_vs_query(
-    ref_data, query_data, ref_condition_key, query_condition_key
+    ref_data, query_data, ref_condition_key, query_condition_key, method=None
 ):
     emd_list = []
 
@@ -227,7 +227,7 @@ def evaluate_emd_ref_vs_query(
             ref = torch.tensor(ref_adata_.X)
             query = torch.tensor(query_adata_.X)
 
-            metrics_dict = compute_distribution_distances(query, ref)
+            metrics_dict = compute_distribution_distances(query, ref, method=method)
 
             out_dict = {'ref_condition': ref_cond, 'query_condition': query_cond}
 
@@ -301,7 +301,11 @@ def wasserstein(
     M = torch.cdist(x0, x1)
     if power == 2:
         M = M**2
-    ret = ot_fn(a, b, M.detach().cpu().numpy(), numItermax=1e7)
+
+    if method == 'sinkhorn':
+        ret = ot_fn(a, b, M.detach().cpu().numpy(), numItermax=int(1e7))
+    else:
+        ret = ot_fn(a, b, M.detach().cpu().numpy(), numItermax=1e7)
     if power == 2:
         ret = math.sqrt(ret)
     return ret
@@ -347,7 +351,7 @@ def poly_mmd2(f_of_X, f_of_Y, d=2, alpha=1.0, c=2.0):
     return K_XX_mean + K_YY_mean - K_XY_mean - K_YX_mean
 
 
-def compute_distribution_distances(pred: torch.Tensor, true: torch.Tensor):
+def compute_distribution_distances(pred: torch.Tensor, true: torch.Tensor, method=None):
     """
     Computes distances between predicted and true distributions.
 
@@ -370,8 +374,8 @@ def compute_distribution_distances(pred: torch.Tensor, true: torch.Tensor):
     names = ['1-Wasserstein', '2-Wasserstein', 'Linear_MMD', 'Poly_MMD']
     dists = []
     to_return = []
-    w1 = wasserstein(pred, true, power=1)
-    w2 = wasserstein(pred, true, power=2)
+    w1 = wasserstein(pred, true, method=method, power=1)
+    w2 = wasserstein(pred, true, method=method, power=2)
     pred_4_mmd = pred[:min_size]
     true_4_mmd = true[:min_size]
     mmd_linear = linear_mmd2(pred_4_mmd, true_4_mmd).item()

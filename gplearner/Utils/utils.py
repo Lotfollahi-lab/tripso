@@ -48,7 +48,6 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchmetrics import PearsonCorrCoef
-from torchtyping import TensorType  # type: ignore
 from tqdm import tqdm
 
 from ..Metrics.metrics import evaluate_emd, evaluate_mmd
@@ -539,7 +538,7 @@ def convert_gene_names_to_tokens(
 
 
 def get_gp_tokens(
-    gp_genes: Union[list[str], pd.Series[str]],
+    gp_genes: Union[List[str], pd.Series],
     do_ensembl_conversion: bool,
     gp_name: Optional[str],
     gene_token_path: str,
@@ -650,16 +649,11 @@ def count_genes_per_cell(
 
 
 def build_gp_input_matrix(
-    gf: TensorType['n_cells', 'seq_len', 'gene_embed_dim', torch.float32],  # type: ignore # noqa
-    input_ids: TensorType['n_cells', 'seq_len', torch.int32],  # type: ignore # noqa
-    gp_tokens: TensorType['n_gp_tokens', torch.int32],  # type: ignore # noqa
+    gf: torch.Tensor,
+    input_ids: torch.Tensor,
+    gp_tokens: torch.Tensor,
     crop_to_gp_len: bool = True,
-) -> tuple[  # type: ignore
-    TensorType['n_cells', 'n_gp_tokens', 'gene_embed_dim', torch.float32],  # noqa
-    TensorType['n_cells', 'seq_len', torch.int32],  # noqa
-    TensorType['n_cells', torch.int32],  # noqa
-    TensorType['n_cells', 'seq_len+1', torch.int32],  # noqa
-]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build a matrix for input to the GP encoder.
 
     Output matrix is of shape (n_cells, n_gp_tokens, gene_embed_dim), where
@@ -750,13 +744,13 @@ def build_gp_input_matrix(
         num_genes = masked_labels_non_zero.int().sum(-1)  # (n_cells,)
         max_num_genes = num_genes.max()
 
-        idxs = torch.tensor(
-            [
-                [gp_i, i]
-                for gp_i, n_gp_genes in enumerate(num_genes)
-                for i in range(n_gp_genes)
-            ]
-        ).T.to(labels_non_zero.device)
+        row_indices = torch.repeat_interleave(
+            torch.arange(len(num_genes), device=labels_non_zero.device), num_genes
+        )
+        col_indices = torch.cat(
+            [torch.arange(n, device=labels_non_zero.device) for n in num_genes]
+        )
+        idxs = torch.stack([row_indices, col_indices], dim=0)
 
         masked_labels_output = torch.sparse_coo_tensor(
             idxs, labels_non_zero, (len(num_genes), max_num_genes)
