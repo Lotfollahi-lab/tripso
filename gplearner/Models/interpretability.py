@@ -3,6 +3,7 @@ import pickle
 import torch.nn as nn
 
 from ..Modules.modules import PretrainedEmbeddings
+from ..Trainers.trainer import gpBase
 
 ####################################
 # For GradCAM
@@ -10,7 +11,7 @@ from ..Modules.modules import PretrainedEmbeddings
 
 
 class iGpWrapper(nn.Module):
-    def __init__(self, gp_transformer, clf_layer, gp_of_interest):
+    def __init__(self, gp_transformer: gpBase, clf_layer: nn.Module, gp_of_interest: str):
         super().__init__()
         # get index of gp of interest
         self.gp_of_interest = gp_of_interest
