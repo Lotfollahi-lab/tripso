@@ -117,6 +117,7 @@ def run_training_from_select_gps(
     use_diffl: Optional[bool] = False,
     use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
+    load_cell_token_learner: bool = False,
 ):
     """
     Wrapper function for training gpLearner model
@@ -198,7 +199,8 @@ def run_training_from_select_gps(
         number of transformer blocks for final transformer block
     use_flash:
         whether to use flash attention in transformer block
-
+    load_cell_token_learner:
+        whether to load the cell token learner from previous global training
     """
     ##########################################
     # Setup
@@ -371,13 +373,16 @@ def run_training_from_select_gps(
             param.requires_grad = False
 
     # ----- Optionally transfer cell encoder -------
-    if (model_type == 'Global') & (model_type_old == 'Global'):
-        gp_transformer.model.cell_encoder = gp_transformer_v0.model.cell_encoder
+    if load_cell_token_learner:
+        if (model_type == 'Global') & (model_type_old == 'Global'):
+            gp_transformer.model.cell_token_learner = (
+                gp_transformer_v0.model.cell_token_learner
+            )
 
-        # # freeze cell encoder
-        # for name, param in gp_transformer.model.named_parameters():
-        #     if 'cell_encoder' in name:
-        #         param.requires_grad = False
+            # # freeze cell encoder
+            # for name, param in gp_transformer.model.named_parameters():
+            #     if 'cell_encoder' in name:
+            #         param.requires_grad = False
 
     # Lightning trainer
     trainer = pl.Trainer(

@@ -943,9 +943,9 @@ def calculate_gp_attribution_scores(
                 model_checkpoint, strict=False, map_location='cpu'
             )
 
-        geneformer_model = gpformer.model.gf_wrapper.model
+        geneformer_model = gpformer.model.gf_wrapper
 
-        if geneformer_model.config.max_position_embeddings == 4096:
+        if geneformer_model.model.config.max_position_embeddings == 4096:
             gene_token_path = TOKEN_DICTIONARY_FILE
             gene_name_path = ENSEMBL_DICTIONARY_FILE
         else:

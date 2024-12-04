@@ -21,7 +21,7 @@ from sklearn.metrics import classification_report, roc_auc_score
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 
-from ..Models.gp_model import EmbEvaluatorHead
+from ..Models.gp_model import EmbEvaluatorHead, gpTransformerBase
 from ..Utils.losses import compute_count_loss, compute_gp_similarity_loss
 from ..Utils.utils import (
     CosineLRwithWarmUp,
@@ -92,7 +92,7 @@ class gpBase(pl.LightningModule):
 
     def __init__(
         self,
-        model: nn.Module = None,
+        model: gpTransformerBase,
         output_dir: str = '/path/to/output',
         # GP similarity -> force cosine similarity of <GP> towards
         # similarity (defined by GP overlap)
