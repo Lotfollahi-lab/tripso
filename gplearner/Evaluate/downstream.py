@@ -5,11 +5,7 @@ import warnings
 from typing import (
     Any,
     Dict,
-    Optional,
-)
-from typing import (
-    Any,
-    Dict,
+    Literal,
     Optional,
 )
 
@@ -50,7 +46,12 @@ from ..Datamodules.datamodule import (
 )
 from ..Metrics.metrics import evaluate_emd_ref_vs_query
 from ..Models.baselines import gfGlobal
-from ..Models.interpretability import iGlobalWrapper, iGpWrapper
+from ..Models.interpretability import (
+    iGlobalClassifier,
+    iGlobalWrapper,
+    iGpClassifier,
+    iGpWrapper,
+)
 from ..Trainers.trainer import (
     EmbEvaluator,
     gpBase,
@@ -894,7 +895,9 @@ def calculate_gp_attribution_scores(
     peft_config_path=None,
     fm_encoder_pkg='geneformer',
     fm_encoder_name='gf-6L-30M-i2048',
-    output_file_name=None,
+    model_input_size: int = 4096,
+    output_file_name: Optional[str] = None,
+    method: Literal['GradCAM', 'Shapley', 'IntegratedGradients'] = 'GradCAM',
 ):
     '''
     Calculate attribution scores for each gene program
@@ -1085,9 +1088,22 @@ def calculate_gp_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[block_n].mlp)
+    # set up attribution
+    if method == 'GradCAM':
+        attr_module = GuidedGradCam(imodel, imodel.gp_block.blocks[block_n].mlp)
+    elif method in ['Shapley', 'IntegratedGradients']:
+        classifier_module = iGpClassifier(imodel, block_n)
 
-    attribution_scores = {}
+        if method == 'Shapley':
+            attr_module = ShapleyValueSampling(classifier_module)
+        else:
+            attr_module = IntegratedGradients(classifier_module)
+    else:
+        raise ValueError(
+            '"method" must be one of ["GradCAM", "Shapley", "IntegratedGradients"].'
+        )
+
+    attribution_scores: Dict[Any, Any] = {}
     all_tokens = set()
     counter = 0
 
@@ -1106,18 +1122,25 @@ def calculate_gp_attribution_scores(
             for labels in token_labels:
                 all_tokens.add(labels)
 
-            if method in ['Shapley']:
-                encoded = encode_fn(input_ids[0])
+            if method == 'GradCAM':
+                attributions = attr_module.attribute(
+                    input_ids[0],
+                    target=edict[f'{obs_key}_id'],
+                    additional_forward_args=input_ids[1],
+                )
+            elif method in ['Shapley', 'IntegratedGradients']:
+                encoded = classifier_module.encode(input_ids[0], input_ids[1])
                 attributions = attr_module.attribute(
                     encoded,
                     target=edict[f'{obs_key}_id'],
                     additional_forward_args=input_ids[1],
                 )
             else:
-                attributions = attr_module.attribute(
-                    input_ids[0],
-                    target=edict[f'{obs_key}_id'],
-                    additional_forward_args=input_ids[1],
+                raise ValueError(
+                    '''
+                    "method" must be one of
+                    ["GradCAM", "Shapley", "IntegratedGradients"].
+                    '''
                 )
 
             attr_norm = summarize_attributions(attributions).detach().cpu().numpy()
@@ -1207,16 +1230,11 @@ def calculate_cell_token_attribution_scores(
     pretrained_emb=None,
     supervised_labels=None,
     block_n=-1,
-    method: str = 'GradCAM',
+    method: Literal['GradCAM', 'Shapley', 'IntegratedGradients'] = 'GradCAM',
 ):
     # --------------------------
     # Set seed
     # --------------------------
-
-    if method not in ['GradCAM', 'Shapley', 'IntegratedGradients']:
-        raise ValueError(
-            '"method" must be one of ["GradCAM", "Shapley", "IntegratedGradients"].'
-        )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -1343,17 +1361,12 @@ def calculate_cell_token_attribution_scores(
             imodel, imodel.global_block.encoder.blocks[block_n].mlp
         )
     elif method in ['Shapley', 'IntegratedGradients']:
-
-        def encode_fn(x):
-            return imodel.global_block(x)['cell_token']
-
-        def classify_fn(x):
-            return imodel.clf_layer(x)
+        classifier_module = iGlobalClassifier(imodel, block_n)
 
         if method == 'Shapley':
-            attr_module = ShapleyValueSampling(classify_fn)
+            attr_module = ShapleyValueSampling(classifier_module)
         else:
-            attr_module = IntegratedGradients(classify_fn)
+            attr_module = IntegratedGradients(classifier_module)
     else:
         raise ValueError(
             '"method" must be one of ["GradCAM", "Shapley", "IntegratedGradients"].'
@@ -1383,7 +1396,7 @@ def calculate_cell_token_attribution_scores(
                     additional_forward_args=input_ids[1],
                 )
             elif method in ['Shapley', 'IntegratedGradients']:
-                encoded = encode_fn(input_ids[0])
+                encoded = classifier_module.encode(input_ids[0], input_ids[1])
                 attributions = attr_module.attribute(
                     encoded,
                     target=conversion_dict[obs_value],

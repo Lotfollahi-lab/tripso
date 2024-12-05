@@ -1,9 +1,11 @@
 import pickle
 
 import torch.nn as nn
+from torch import Tensor
 
-from ..Modules.modules import PretrainedEmbeddings
-from ..Trainers.trainer import gpBase
+from ..Models.gp_model import gpTransformerEncoder
+from ..Modules.modules import Block, PretrainedEmbeddings
+from ..Trainers.trainer import gpBase, gpGlobal
 
 ####################################
 # For GradCAM
@@ -11,14 +13,18 @@ from ..Trainers.trainer import gpBase
 
 
 class iGpWrapper(nn.Module):
-    def __init__(self, gp_transformer: gpBase, clf_layer: nn.Module, gp_of_interest: str):
+    def __init__(
+        self, gp_transformer: gpBase, clf_layer: nn.Module, gp_of_interest: str
+    ):
         super().__init__()
         # get index of gp of interest
         self.gp_of_interest = gp_of_interest
         self.gp_idx = gp_transformer.model.gp_inputs.index(gp_of_interest)
 
         # select relevant gp block
-        self.gp_block = gp_transformer.model.multi_gp_encoder.encoder[self.gp_idx]
+        self.gp_block: gpTransformerEncoder = (
+            gp_transformer.model.multi_gp_encoder.encoder[self.gp_idx]
+        )
         self.clf_layer = clf_layer
 
         # store relevant gp tokens as nn.Embedding
@@ -64,7 +70,7 @@ class iGpWrapper(nn.Module):
 class iGlobalWrapper(nn.Module):
     def __init__(
         self,
-        gp_transformer,
+        gp_transformer: gpGlobal,
         clf_layer=None,
         global_loss='reconstruction',
         task_index=None,
@@ -117,3 +123,137 @@ class iGlobalWrapper(nn.Module):
 
         # return logits.max(1).values
         return logits
+
+
+class iGpClassifier(nn.Module):
+    def __init__(
+        self,
+        imodel: iGpWrapper,
+        block_n: int = -1,
+    ):
+        super().__init__()
+        self.imodel = imodel
+
+        if block_n < 0:
+            block_n += len(self.imodel.gp_block.blocks)
+
+        self.block_n = block_n
+
+    def forward(self, x: Tensor, additional_input_dict) -> Tensor:
+        """Attribution stage."""
+        x = x + self.imodel.gp_block.blocks[self.block_n].mlp(x)
+
+        for blk_n in range(self.block_n + 1, len(self.imodel.gp_block.blocks)):
+            x, attn = self.imodel.gp_block.blocks[blk_n](
+                x,
+                attn_mask=additional_input_dict['attn_mask'],
+                return_attention=False,
+                block_mask=None,
+            )
+
+        x = self.imodel.gp_block.norm(x)
+        token = x[:, 0]  # equivalent to output['cls']
+        logits = self.imodel.clf_layer(token)
+
+        return logits
+
+    def encode(self, emb: Tensor, additional_input_dict) -> Tensor:
+        """Pre-attribution stage."""
+        x, gene_labels = self.imodel.gp_block.prepare_tokens(
+            emb, additional_input_dict['token_labels']
+        )
+
+        for blk_n in range(self.block_n):
+            x, attn = self.imodel.gp_block.blocks[blk_n](
+                x,
+                attn_mask=additional_input_dict['attn_mask'],
+                return_attention=False,
+                block_mask=None,
+            )
+
+        blk: Block = self.imodel.gp_block.blocks[self.block_n]
+
+        y, attn = blk.attn(
+            blk.norm1(x),
+            attn_mask=additional_input_dict['attn_mask'],
+            return_attention=False,
+            block_mask=None,
+        )
+        x = x + y
+        x = blk.norm2(x)
+
+        return x
+
+
+class iGlobalClassifier(nn.Module):
+    def __init__(
+        self,
+        imodel: iGlobalWrapper,
+        block_n: int = -1,
+    ):
+        super().__init__()
+        self.imodel = imodel
+
+        if block_n < 0:
+            block_n += len(self.imodel.global_block.encoder.blocks)
+
+        self.block_n = block_n
+
+    def forward(self, x: Tensor, additional_input_dict) -> Tensor:
+        """Attribution stage."""
+        x = x + self.imodel.global_block.encoder.blocks[self.block_n].mlp(x)
+
+        for blk_n in range(
+            self.block_n + 1, len(self.imodel.global_block.encoder.blocks)
+        ):
+            x, attn = self.imodel.global_block.encoder.blocks[blk_n](
+                x,
+                attn_mask=additional_input_dict['attn_mask'],
+                return_attention=False,
+                block_mask=None,
+            )
+
+        x = self.imodel.global_block.encoder.norm(x)
+        token = x[:, 0]  # equivalent to output['cell_token']
+        logits = self.imodel.clf_layer(token)
+
+        return logits
+
+    def encode(
+        self,
+        emb: Tensor,
+        additional_input_dict,
+    ) -> Tensor:
+        """Pre-attribution stage."""
+
+        input_dataset = {
+            'z': emb,
+            'num_genes_per_cell_list': additional_input_dict['num_genes_per_cell_list'],
+        }
+
+        x, gp_labels, attn_mask = self.imodel.global_block.build_input_matrix(
+            z=input_dataset['z'],
+            num_genes_per_cell_list=input_dataset['num_genes_per_cell_list'],
+        )
+        x, gp_labels = self.imodel.global_block.encoder.prepare_tokens(x, gp_labels)
+
+        for blk_n in range(self.block_n):
+            x, attn = self.imodel.global_block.encoder.blocks[blk_n](
+                x,
+                attn_mask=attn_mask,
+                return_attention=False,
+                block_mask=None,
+            )
+
+        blk: Block = self.imodel.global_block.encoder.blocks[self.block_n]
+
+        y, attn = blk.attn(
+            blk.norm1(x),
+            attn_mask=attn_mask,
+            return_attention=False,
+            block_mask=None,
+        )
+        x = x + y
+        x = blk.norm2(x)
+
+        return x

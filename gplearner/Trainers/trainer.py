@@ -21,7 +21,11 @@ from sklearn.metrics import classification_report, roc_auc_score
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 
-from ..Models.gp_model import EmbEvaluatorHead, gpTransformerBase
+from ..Models.gp_model import (
+    EmbEvaluatorHead,
+    gpTransformerBase,
+    gpTransformerGlobal,
+)
 from ..Utils.losses import compute_count_loss, compute_gp_similarity_loss
 from ..Utils.utils import (
     CosineLRwithWarmUp,
@@ -598,6 +602,7 @@ class gpGlobal(gpBase):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.model: gpTransformerGlobal = self.model
         self.model_type = 'Global'
         self.global_loss = global_loss
         self.return_classification_report = return_classification_report
