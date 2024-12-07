@@ -15,6 +15,7 @@ from peft import PeftConfig, get_peft_model
 from transformers import BertConfig, BertForMaskedLM
 
 from ..Modules.modules import (
+    L0RegularizedLinear,
     Mlp,
     PromptEncoder,
     gpTransformerEncoder,
@@ -1125,6 +1126,7 @@ class gpTransformerGlobal(gpTransformerBase):
         global_n_blocks=1,
         use_flash=False,
         n_bins=10,
+        l0_regularization: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -1158,12 +1160,22 @@ class gpTransformerGlobal(gpTransformerBase):
                 t: i for i, t in enumerate(supervised_labels.keys())
             }
 
-            self.clf_head = nn.ModuleList(
-                [
-                    nn.Linear(self.gp_latent_size, getattr(self, f'{k}_n_class'))
-                    for k in supervised_labels.keys()
-                ]
-            )
+            if l0_regularization:
+                self.clf_head = nn.ModuleList(
+                    [
+                        L0RegularizedLinear(
+                            self.gp_latent_size, getattr(self, f'{k}_n_class')
+                        )
+                        for k in supervised_labels.keys()
+                    ]
+                )
+            else:
+                self.clf_head = nn.ModuleList(
+                    [
+                        nn.Linear(self.gp_latent_size, getattr(self, f'{k}_n_class'))
+                        for k in supervised_labels.keys()
+                    ]
+                )
 
         if self.global_loss == 'reconstruction':
             self.reconstruction_loss = reconstruction_loss

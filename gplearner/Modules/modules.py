@@ -23,6 +23,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange, repeat
 from flash_attn import flash_attn_func
 from torch import Tensor
@@ -1047,3 +1048,31 @@ if __name__ == '__main__':
         print(k, v.shape)
 
     print(out['gene_labels'])
+
+
+class L0RegularizedLinear(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int, l0_lambda: float = 1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(input_dim, output_dim))
+        self.l0_lambda = l0_lambda
+
+        # hard concrete distribution
+        self.log_alpha = nn.Parameter(torch.randn(input_dim, output_dim))
+        self.temperature = 2 / 3  # temperature
+        self.bias = nn.Parameter(torch.zeros(output_dim))
+
+    def hard_concrete_sample(self):
+        u = torch.rand_like(self.log_alpha)
+        s = torch.sigmoid(
+            (torch.log(u) - torch.log(1 - u) + self.log_alpha) / self.temperature
+        )
+        return s
+
+    def l0_loss(self):
+        s = torch.sigmoid(self.log_alpha)
+        return self.l0_lambda * torch.sum(s)
+
+    def forward(self, x):
+        mask = self.hard_concrete_sample()
+        masked_weights = self.weight * mask
+        return F.linear(x, masked_weights, self.bias)

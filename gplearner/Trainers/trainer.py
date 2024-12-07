@@ -3,6 +3,7 @@ import warnings
 from typing import (
     Dict,
     List,
+    Literal,
     Optional,
     Union,
 )
@@ -595,6 +596,8 @@ class gpGlobal(gpBase):
         total_n_genes: int = 20_000,
         n_condition_combined: int = 1,  # number of batches for zinb and nb
         test_random_baseline: bool = False,
+        l_regularization: Optional[Literal['L0', 'L1', 'L2']] = None,
+        lambda_clf_lreg: float = 0.05,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -604,10 +607,14 @@ class gpGlobal(gpBase):
         self.total_n_genes = total_n_genes
         self.n_condition_combined = n_condition_combined
         self.test_random_baseline = test_random_baseline
+        self.l_regularization = l_regularization
+        self.lambda_clf_lreg = lambda_clf_lreg
 
         if self.global_loss == 'supervised':
             if isinstance(lambda_clf_loss, int) or isinstance(lambda_clf_loss, float):
-                self.lambda_clf_loss = {t: 1 for t in self.model.supervised_tasks}
+                self.lambda_clf_loss = {
+                    t: lambda_clf_loss for t in self.model.supervised_tasks
+                }
             elif isinstance(lambda_clf_loss, dict):
                 self.lambda_clf_loss = lambda_clf_loss
             else:
@@ -617,6 +624,22 @@ class gpGlobal(gpBase):
                     'e.g. {task1: 1, task2: 0.5}'
                     'or a single float value for all tasks'
                 )
+
+            if l_regularization is not None:
+                self.l_reg_params = [
+                    param
+                    for name, param in self.model.named_parameters()
+                    if 'clf_head' in name
+                ]
+
+                if l_regularization == 'L0':
+                    self.compute_lreg_loss = self.compute_l0_loss
+                if l_regularization == 'L1':
+                    self.compute_lreg_loss = self.compute_l1_loss
+                if l_regularization == 'L2':
+                    self.compute_lreg_loss = self.compute_l2_loss
+            else:
+                self.compute_lreg_loss = lambda: 0.0
 
         if self.global_loss == 'reconstruction':
             self.reconstruction_loss = self.model.reconstruction_loss
@@ -659,13 +682,25 @@ class gpGlobal(gpBase):
 
         if self.global_loss == 'supervised':
             clf_loss = self.compute_supervised_loss(output, batch, stage='train')
-            loss = loss_base['total_loss'] + clf_loss['total_loss']
+            reg_loss = self.lambda_clf_lreg * self.compute_lreg_loss()
+            loss = loss_base['total_loss'] + clf_loss['total_loss'] + reg_loss
 
             # Log losses
             for t in self.model.supervised_tasks:
                 self.log(
                     f'train/{t}_loss',
                     clf_loss[t],
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+
+            if self.l_regularization is not None:
+                self.log(
+                    f'train/{self.l_regularization}_loss',
+                    reg_loss,
                     on_step=True,
                     on_epoch=True,
                     prog_bar=True,
@@ -778,7 +813,8 @@ class gpGlobal(gpBase):
 
         if self.global_loss == 'supervised':
             clf_loss = self.compute_supervised_loss(output, batch, stage='val')
-            loss = loss_base['total_loss'] + clf_loss['total_loss']
+            reg_loss = self.lambda_clf_lreg * self.compute_lreg_loss()
+            loss = loss_base['total_loss'] + clf_loss['total_loss'] + reg_loss
 
         elif self.global_loss == 'masking':
             cell_masking_loss = F.cross_entropy(
@@ -1027,6 +1063,24 @@ class gpGlobal(gpBase):
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         return reconstruction_loss
+
+    def compute_l0_loss(
+        self,
+    ):
+        l0_norm = sum([layer.l0_loss() for layer in self.model.clf_head])
+        return l0_norm
+
+    def compute_l1_loss(
+        self,
+    ):
+        l1_norm = sum(p.abs().sum() for p in self.l_reg_params if p.requires_grad)
+        return l1_norm
+
+    def compute_l2_loss(
+        self,
+    ):
+        l2_norm = sum((p**2).sum() for p in self.l_reg_params if p.requires_grad)
+        return l2_norm
 
 
 # ------------------------------------------------------
