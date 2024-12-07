@@ -141,7 +141,6 @@ class iGpClassifier(nn.Module):
 
     def forward(self, x: Tensor, additional_input_dict) -> Tensor:
         """Attribution stage."""
-        x = x + self.imodel.gp_block.blocks[self.block_n].mlp(x)
 
         for blk_n in range(self.block_n + 1, len(self.imodel.gp_block.blocks)):
             x, attn = self.imodel.gp_block.blocks[blk_n](
@@ -163,24 +162,13 @@ class iGpClassifier(nn.Module):
             emb, additional_input_dict['token_labels']
         )
 
-        for blk_n in range(self.block_n):
+        for blk_n in range(self.block_n + 1):
             x, attn = self.imodel.gp_block.blocks[blk_n](
                 x,
                 attn_mask=additional_input_dict['attn_mask'],
                 return_attention=False,
                 block_mask=None,
             )
-
-        blk: Block = self.imodel.gp_block.blocks[self.block_n]
-
-        y, attn = blk.attn(
-            blk.norm1(x),
-            attn_mask=additional_input_dict['attn_mask'],
-            return_attention=False,
-            block_mask=None,
-        )
-        x = x + y
-        x = blk.norm2(x)
 
         return x
 
@@ -201,7 +189,6 @@ class iGlobalClassifier(nn.Module):
 
     def forward(self, x: Tensor, additional_input_dict) -> Tensor:
         """Attribution stage."""
-        x = x + self.imodel.global_block.encoder.blocks[self.block_n].mlp(x)
 
         for blk_n in range(
             self.block_n + 1, len(self.imodel.global_block.encoder.blocks)
@@ -237,23 +224,12 @@ class iGlobalClassifier(nn.Module):
         )
         x, gp_labels = self.imodel.global_block.encoder.prepare_tokens(x, gp_labels)
 
-        for blk_n in range(self.block_n):
+        for blk_n in range(self.block_n + 1):
             x, attn = self.imodel.global_block.encoder.blocks[blk_n](
                 x,
                 attn_mask=attn_mask,
                 return_attention=False,
                 block_mask=None,
             )
-
-        blk: Block = self.imodel.global_block.encoder.blocks[self.block_n]
-
-        y, attn = blk.attn(
-            blk.norm1(x),
-            attn_mask=attn_mask,
-            return_attention=False,
-            block_mask=None,
-        )
-        x = x + y
-        x = blk.norm2(x)
 
         return x
