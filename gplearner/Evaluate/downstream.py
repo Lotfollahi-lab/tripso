@@ -218,6 +218,7 @@ class gpEval:
         hparam_save='ignore_model',  # fine for test time?
         num_virtual_tokens=0,
         return_virtual_tokens=False,
+        token_to_gene_to_keep_dict=None,
     ):
         if self.model_type == 'Base':
             gp_transformer = gpBase.load_from_checkpoint(
@@ -251,6 +252,10 @@ class gpEval:
         gp_transformer.return_gene_embeddings = return_gene_embeddings
         gp_transformer.tokens_to_keep = tokens_to_keep
         gp_transformer.genes_to_keep = genes_to_keep
+        print('')
+        print('Evaluate downstream line 254', gp_transformer.genes_to_keep)
+        print('')
+        gp_transformer.token_to_gene_to_keep_dict = token_to_gene_to_keep_dict
         gp_transformer.gene_dir_tag = gene_dir_tag
         gp_transformer.return_attention = return_attention
         gp_transformer.gp = gp
@@ -558,25 +563,50 @@ class gpEval:
         with open(self.gp_transformer.model.gene_token_path, 'rb') as f:
             token_dictionary = pickle.load(f)
 
+        # Convert the dictionaries into DataFrames for easy merging
+        name_df = pd.DataFrame(
+            list(name_dictionary.items()), columns=['gene_name', 'ensembl_id']
+        )
+        token_df = pd.DataFrame(
+            list(token_dictionary.items()), columns=['ensembl_id', 'token']
+        )
+
+        # Merge on ensembl_id
+        mapping_df = name_df.join(
+            token_df.set_index('ensembl_id'), on='ensembl_id', how='inner'
+        )
+
+        # Only keep genes of interest
         if do_ensembl_conversion:
-            ensembl_ids = [
-                name_dictionary[t] for t in genes_to_keep if t in name_dictionary
-            ]
+            genes_to_keep_df = mapping_df[mapping_df['gene_name'].isin(genes_to_keep)]
         else:
-            ensembl_ids = genes_to_keep
-        tokens_to_keep = [
-            token_dictionary[e] for e in ensembl_ids if e in token_dictionary
-        ]
+            genes_to_keep_df = mapping_df[mapping_df['ensembl_id'].isin(genes_to_keep)]
+
+        # Merge ensembl_ids with the token DataFrame to get tokens
+        tokens_to_keep = genes_to_keep_df['token'].tolist()
+
+        # Display the number of genes to keep
         print(f'Number of genes to keep: {len(tokens_to_keep)}')
+
+        # Create dictionary for conversion
+        if do_ensembl_conversion:
+            token_to_gene_to_keep_dict = dict(
+                zip(genes_to_keep_df['token'], genes_to_keep_df['gene_name'])
+            )
+        else:
+            token_to_gene_to_keep_dict = dict(
+                zip(genes_to_keep_df['token'], genes_to_keep_df['ensembl_id'])
+            )
 
         gp_transformer = self._init_trainer(
             return_gene_embeddings=True,
             gene_dir_tag=gene_dir_tag,
             tokens_to_keep=tokens_to_keep,
-            genes_to_keep=genes_to_keep,
+            genes_to_keep=tokens_to_keep,
             gp=pathway,
             split_label=split,
             num_virtual_tokens=self.num_virtual_tokens,
+            token_to_gene_to_keep_dict=token_to_gene_to_keep_dict,
         )
 
         txdata = txDataModule(

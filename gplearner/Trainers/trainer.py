@@ -117,6 +117,7 @@ class gpBase(pl.LightningModule):
         return_gene_embeddings: bool = False,
         tokens_to_keep: Optional[List] = None,
         genes_to_keep: Optional[List] = None,
+        token_to_gene_to_keep_dict: Optional[Dict] = None,
         gene_dir_tag: Optional[str] = None,
         return_attention: bool = False,
         gp: Optional[str] = None,
@@ -231,6 +232,7 @@ class gpBase(pl.LightningModule):
         # for test step
         self.return_gene_embeddings = return_gene_embeddings
         self.tokens_to_keep = tokens_to_keep
+        self.token_to_gene_to_keep_dict = token_to_gene_to_keep_dict
         self.genes_to_keep = genes_to_keep
 
         self.gene_dir_tag = gene_dir_tag
@@ -372,8 +374,7 @@ class gpBase(pl.LightningModule):
 
             # Get embeddings of the relevant genes
             for i, gene in enumerate(self.tokens_to_keep):
-                gene_name = self.genes_to_keep[i]
-
+                gene_name = self.token_to_gene_to_keep_dict[gene]
                 emb_dict[gene_name] = output[gene].detach().cpu()
                 emb_dict[f'{gene_name}_rank'] = output[f'{gene}_rank'].detach().cpu()
 

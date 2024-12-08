@@ -302,7 +302,7 @@ class gpWrapper(nn.Module):
 
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
-            if (gp_of_interest is None) or (self.gp_inputs[i] in gp_of_interest):
+            if (gp_of_interest is None) or (self.gp_inputs[i] == gp_of_interest):
                 (
                     emb_pad,
                     tokens_pad,
@@ -321,7 +321,6 @@ class gpWrapper(nn.Module):
                 )
                 num_genes_per_cell_list += [num_genes_per_cell]
 
-                # Encode tokens for MLM
                 tokens_pad_unencoded = tokens_pad
                 tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
 

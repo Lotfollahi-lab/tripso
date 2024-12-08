@@ -400,6 +400,22 @@ def label_encoder(adata, encoder, condition_key=None):
     return labels
 
 
+def sample_cells(adata, column, n_cells):
+    # numpy set seed
+    np.random.seed(0)
+
+    sampled_indices = []
+
+    # Group by the column in obs and sample n_cells per group
+    for value in adata.obs[column].unique():
+        group_indices = adata.obs[adata.obs[column] == value].index
+        n_cells = min(n_cells, len(group_indices))
+        sampled_indices.extend(np.random.choice(group_indices, n_cells, replace=False))
+
+    # Return the sampled AnnData object
+    return adata[sampled_indices, :]
+
+
 ###################################
 # Gene expression transformation
 ###################################
