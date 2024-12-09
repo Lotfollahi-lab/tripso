@@ -400,7 +400,7 @@ class gpBase(pl.LightningModule):
                 token_names = list(output.keys())
 
                 gene_names = [
-                    self.token_to_gene_to_keep_dict[t.item()] if t != 'cls' else 'cls'
+                    self.token_to_gene_to_keep_dict[t] if t != 'cls' else 'cls'
                     for t in token_names
                 ]
 

@@ -557,7 +557,7 @@ class gpWrapper(nn.Module):
                     if non_zero_mask[row_idx].sum() > 1:
                         raise ValueError('Multiple non-zero scores for the same gene')
 
-            output[gene] = result.cpu().detach().numpy().sum(axis=-1)
+            output[gene.item()] = result.cpu().detach().numpy().sum(axis=-1)
 
         return output
 

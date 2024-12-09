@@ -581,16 +581,18 @@ def build_token_to_gene_name_dict(
         list(token_dictionary.items()), columns=['ensembl_id', 'token']
     )
 
-    # Merge on ensembl_id
-    mapping_df = name_df.join(
-        token_df.set_index('ensembl_id'), on='ensembl_id', how='inner'
-    )
-
     # Only keep genes of interest
     if do_ensembl_conversion:
+        # Merge on ensembl_id
+        mapping_df = name_df.join(
+            token_df.set_index('ensembl_id'), on='ensembl_id', how='inner'
+        )
+
         genes_to_keep_df = mapping_df[mapping_df['gene_name'].isin(genes_to_keep)]
+
     else:
-        genes_to_keep_df = mapping_df[mapping_df['ensembl_id'].isin(genes_to_keep)]
+        # debugging
+        genes_to_keep_df = token_df[token_df['ensembl_id'].isin(genes_to_keep)]
 
     # Merge ensembl_ids with the token DataFrame to get tokens
     tokens_to_keep = genes_to_keep_df['token'].tolist()
