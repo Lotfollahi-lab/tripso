@@ -416,6 +416,44 @@ def sample_cells(adata, column, n_cells):
     return adata[sampled_indices, :]
 
 
+def align_indices(idx_cell, idx_genes, gp_arr, gene_arrays):
+    '''
+    Align indices of cells and genes
+
+    Parameters
+    ----------
+    idx_cell : list
+        List of cell indices.
+    idx_genes : list
+        List of cell indices for the gene data
+    gp_arr : np.ndarray
+        GP cls (cell-level)
+    gene_arrays : dict
+        Dictionary where keys are gene names and values are gene embedings.
+    '''
+    # Convert indices to Pandas Index for fast alignment
+    idx_cell = pd.Index(idx_cell)
+    idx_genes = pd.Index(idx_genes)
+
+    # Identify shared indices using Pandas intersection (faster than sets)
+    shared_indices = idx_cell.intersection(idx_genes)
+    print('Cells not in genes:', len(idx_cell.difference(idx_genes)))
+    print('Genes not in cells:', len(idx_genes.difference(idx_cell)))
+    print('Both:', len(shared_indices))
+
+    # Get the position of the shared indices in the original arrays
+    cell_indexer = idx_cell.get_indexer(shared_indices)
+    gene_indexer = idx_genes.get_indexer(shared_indices)
+
+    # Use NumPy advanced indexing to reorder gp_arr and gene arrays
+    gp_arr = gp_arr[cell_indexer]
+    gene_arrays = {
+        gene: gene_arr[gene_indexer] for gene, gene_arr in gene_arrays.items()
+    }
+
+    return shared_indices, gp_arr, gene_arrays
+
+
 ###################################
 # Gene expression transformation
 ###################################
