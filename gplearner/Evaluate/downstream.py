@@ -665,7 +665,12 @@ class gpEval:
             )
 
     def generate_attention_matrix(
-        self, gp, genes_to_keep, do_ensembl_conversion=True, split='test', precision=32
+        self,
+        gp,
+        genes_to_keep=None,
+        do_ensembl_conversion=True,
+        split='test',
+        precision=32,
     ):
         """
         Get attention weights from gpTransformer
@@ -683,9 +688,7 @@ class gpEval:
                 do_ensembl_conversion,
             )
         else:
-            token_to_gene_to_keep_dict = (
-                None  # TO DO : CHECK GP CONVERSION HAPPENS OKAY?
-            )
+            token_to_gene_to_keep_dict = None
 
         # Initialize trainer
         txdata = txDataModule(

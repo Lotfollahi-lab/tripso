@@ -396,9 +396,18 @@ class gpBase(pl.LightningModule):
             # returns a dictionary where each gene is a key
             if self.gp != 'cell_token':
                 output = self.model.get_cls_attn(batch, self.gp)
+
+                token_names = list(output.keys())
+
+                gene_names = [
+                    self.token_to_gene_to_keep_dict[t.item()] if t != 'cls' else 'cls'
+                    for t in token_names
+                ]
+
             else:
                 # for cell token (only implemented for global model)
                 output = self.model.get_cell_token_attention(batch)
+                gene_names = list(output.keys())
 
             # add metadata
             meta_dict = {}
@@ -408,12 +417,6 @@ class gpBase(pl.LightningModule):
                         meta_dict[k] = v.cpu().numpy()
                     else:
                         meta_dict[k] = v
-
-            token_names = list(output.keys())
-            gene_names = [
-                self.token_to_gene_to_keep_dict[t.item()] if t != 'cls' else 'cls'
-                for t in token_names
-            ]
 
             adata = sc.AnnData(
                 csr_matrix(pd.DataFrame(output).values),
