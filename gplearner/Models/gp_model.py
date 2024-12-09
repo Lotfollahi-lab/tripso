@@ -489,7 +489,7 @@ class gpWrapper(nn.Module):
 
         return output
 
-    def get_cls_attn(self, gf_emb, input_dataset, gp_idx, gene_names):
+    def get_cls_attn(self, gf_emb, input_dataset, gp_idx):
         '''
         If multilpe blocks, get attn matrix from last transformer block
         '''
@@ -557,7 +557,7 @@ class gpWrapper(nn.Module):
                     if non_zero_mask[row_idx].sum() > 1:
                         raise ValueError('Multiple non-zero scores for the same gene')
 
-            output[gene_names[i]] = result.cpu().detach().numpy().sum(axis=-1)
+            output[gene] = result.cpu().detach().numpy().sum(axis=-1)
 
         return output
 
@@ -1096,13 +1096,12 @@ class gpTransformerBase(nn.Module):
     def get_cls_attn(self, input_dataset, gp):
         # Get gp index
         gp_idx = self.gp_inputs.index(gp)
-        gene_names = self.gpdb.iloc[:, gp_idx].tolist()
 
         # Get Geneformer embeddings
         gf_emb = self.gf_wrapper(input_dataset)
 
         output = self.multi_gp_encoder.get_cls_attn(
-            gf_emb, input_dataset, gp_idx=gp_idx, gene_names=gene_names
+            gf_emb, input_dataset, gp_idx=gp_idx
         )
 
         return output

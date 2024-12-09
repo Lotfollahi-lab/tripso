@@ -409,18 +409,19 @@ class gpBase(pl.LightningModule):
                     else:
                         meta_dict[k] = v
 
+            token_names = list(output.keys())
+            gene_names = [
+                self.token_to_gene_to_keep_dict[t.item()] if t != 'cls' else 'cls'
+                for t in token_names
+            ]
+
             adata = sc.AnnData(
                 csr_matrix(pd.DataFrame(output).values),
                 obs=pd.DataFrame(meta_dict),
-                var=pd.DataFrame(index=list(output.keys())),
+                var=pd.DataFrame(index=gene_names),
             )
 
             self.attn_adata_holder.append(adata)
-
-            # if self.attn_adata_holder is None:
-            #     self.attn_adata_holder = adata
-            # else:
-            #     self.attn_adata_holder = ad.concat([self.attn_adata_holder, adata])
 
             return None
 

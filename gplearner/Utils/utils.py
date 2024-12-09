@@ -564,6 +564,53 @@ def pad_array(arr, desired_length=2048, padding_value=-100):
 ###################################
 
 
+def build_token_to_gene_name_dict(
+    name_dictionary_path, token_dictionary_path, genes_to_keep, do_ensembl_conversion
+):
+    # converting between different gene labels
+    with open(name_dictionary_path, 'rb') as f:
+        name_dictionary = pickle.load(f)
+    with open(token_dictionary_path, 'rb') as f:
+        token_dictionary = pickle.load(f)
+
+    # Convert the dictionaries into DataFrames for easy merging
+    name_df = pd.DataFrame(
+        list(name_dictionary.items()), columns=['gene_name', 'ensembl_id']
+    )
+    token_df = pd.DataFrame(
+        list(token_dictionary.items()), columns=['ensembl_id', 'token']
+    )
+
+    # Merge on ensembl_id
+    mapping_df = name_df.join(
+        token_df.set_index('ensembl_id'), on='ensembl_id', how='inner'
+    )
+
+    # Only keep genes of interest
+    if do_ensembl_conversion:
+        genes_to_keep_df = mapping_df[mapping_df['gene_name'].isin(genes_to_keep)]
+    else:
+        genes_to_keep_df = mapping_df[mapping_df['ensembl_id'].isin(genes_to_keep)]
+
+    # Merge ensembl_ids with the token DataFrame to get tokens
+    tokens_to_keep = genes_to_keep_df['token'].tolist()
+
+    # Display the number of genes to keep
+    print(f'Number of genes to keep: {len(tokens_to_keep)}')
+
+    # Create dictionary for conversion
+    if do_ensembl_conversion:
+        token_to_gene_to_keep_dict = dict(
+            zip(genes_to_keep_df['token'], genes_to_keep_df['gene_name'])
+        )
+    else:
+        token_to_gene_to_keep_dict = dict(
+            zip(genes_to_keep_df['token'], genes_to_keep_df['ensembl_id'])
+        )
+
+    return tokens_to_keep, token_to_gene_to_keep_dict
+
+
 def convert_gene_names_to_tokens(
     genes,
     name_dictionary,

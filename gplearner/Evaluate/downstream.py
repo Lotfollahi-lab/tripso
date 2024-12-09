@@ -1,5 +1,4 @@
 import os
-import pickle
 import random
 import warnings
 from typing import (
@@ -55,6 +54,7 @@ from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import (
     MidpointNormalize,
     align_indices,
+    build_token_to_gene_name_dict,
     find_latest_file,
     remove_single_data_points,
     summarize_attributions,
@@ -256,9 +256,6 @@ class gpEval:
         gp_transformer.return_gene_embeddings = return_gene_embeddings
         gp_transformer.tokens_to_keep = tokens_to_keep
         gp_transformer.genes_to_keep = genes_to_keep
-        print('')
-        print('Evaluate downstream line 254', gp_transformer.genes_to_keep)
-        print('')
         gp_transformer.token_to_gene_to_keep_dict = token_to_gene_to_keep_dict
         gp_transformer.gene_dir_tag = gene_dir_tag
         gp_transformer.return_attention = return_attention
@@ -561,46 +558,12 @@ class gpEval:
         if output_tag is not None:
             gene_dir_tag += f'_{output_tag}'
 
-        # converting between different gene labels
-        with open(self.gp_transformer.model.gene_name_path, 'rb') as f:
-            name_dictionary = pickle.load(f)
-        with open(self.gp_transformer.model.gene_token_path, 'rb') as f:
-            token_dictionary = pickle.load(f)
-
-        # Convert the dictionaries into DataFrames for easy merging
-        name_df = pd.DataFrame(
-            list(name_dictionary.items()), columns=['gene_name', 'ensembl_id']
+        tokens_to_keep, token_to_gene_to_keep_dict = build_token_to_gene_name_dict(
+            self.gp_transformer.model.gene_name_path,
+            self.gp_transformer.model.gene_token_path,
+            genes_to_keep,
+            do_ensembl_conversion,
         )
-        token_df = pd.DataFrame(
-            list(token_dictionary.items()), columns=['ensembl_id', 'token']
-        )
-
-        # Merge on ensembl_id
-        mapping_df = name_df.join(
-            token_df.set_index('ensembl_id'), on='ensembl_id', how='inner'
-        )
-
-        # Only keep genes of interest
-        if do_ensembl_conversion:
-            genes_to_keep_df = mapping_df[mapping_df['gene_name'].isin(genes_to_keep)]
-        else:
-            genes_to_keep_df = mapping_df[mapping_df['ensembl_id'].isin(genes_to_keep)]
-
-        # Merge ensembl_ids with the token DataFrame to get tokens
-        tokens_to_keep = genes_to_keep_df['token'].tolist()
-
-        # Display the number of genes to keep
-        print(f'Number of genes to keep: {len(tokens_to_keep)}')
-
-        # Create dictionary for conversion
-        if do_ensembl_conversion:
-            token_to_gene_to_keep_dict = dict(
-                zip(genes_to_keep_df['token'], genes_to_keep_df['gene_name'])
-            )
-        else:
-            token_to_gene_to_keep_dict = dict(
-                zip(genes_to_keep_df['token'], genes_to_keep_df['ensembl_id'])
-            )
 
         gp_transformer = self._init_trainer(
             return_gene_embeddings=True,
@@ -701,7 +664,9 @@ class gpEval:
                 frameon=False,
             )
 
-    def generate_attention_matrix(self, gp, split='test', precision=32):
+    def generate_attention_matrix(
+        self, gp, genes_to_keep, do_ensembl_conversion=True, split='test', precision=32
+    ):
         """
         Get attention weights from gpTransformer
         """
@@ -709,6 +674,18 @@ class gpEval:
 
         if (gp != 'cell_token') and (gp not in self.gp_inputs):
             raise ValueError(f'{gp} must be one of "cell_token" or {self.gp_inputs}')
+
+        if gp != 'cell_token':
+            _, token_to_gene_to_keep_dict = build_token_to_gene_name_dict(
+                self.gp_transformer.model.gene_name_path,
+                self.gp_transformer.model.gene_token_path,
+                genes_to_keep,
+                do_ensembl_conversion,
+            )
+        else:
+            token_to_gene_to_keep_dict = (
+                None  # TO DO : CHECK GP CONVERSION HAPPENS OKAY?
+            )
 
         # Initialize trainer
         txdata = txDataModule(
@@ -724,6 +701,7 @@ class gpEval:
             gp=gp,
             num_virtual_tokens=self.num_virtual_tokens,
             split_label=split,
+            token_to_gene_to_keep_dict=token_to_gene_to_keep_dict,
         )
 
         trainer = pl.Trainer(
