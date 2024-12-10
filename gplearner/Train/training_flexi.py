@@ -521,6 +521,7 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
         # if args['strategy'].startswith('deepspeed')
         # else
         'gp': args['gp_of_interest'],
+        'calc_gp_loss': args['calc_gp_loss'],
     }
 
     global_params = {
