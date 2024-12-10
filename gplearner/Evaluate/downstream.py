@@ -1,5 +1,4 @@
 import os
-import pickle
 import random
 import warnings
 from typing import (
@@ -21,6 +20,8 @@ from captum.attr import GuidedGradCam
 from datasets import load_from_disk
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
+from scipy.spatial.distance import cosine
+from scipy.stats import ttest_ind
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -31,6 +32,7 @@ from sklearn.metrics import (
 )
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.preprocessing import MinMaxScaler
+from statsmodels.stats.multitest import multipletests
 from tqdm import tqdm
 
 from ..Datamodules.datamodule import (
@@ -51,6 +53,8 @@ from ..Trainers.trainer import (
 from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import (
     MidpointNormalize,
+    align_indices,
+    build_token_to_gene_name_dict,
     find_latest_file,
     remove_single_data_points,
     summarize_attributions,
@@ -218,6 +222,7 @@ class gpEval:
         hparam_save='ignore_model',  # fine for test time?
         num_virtual_tokens=0,
         return_virtual_tokens=False,
+        token_to_gene_to_keep_dict=None,
     ):
         if self.model_type == 'Base':
             gp_transformer = gpBase.load_from_checkpoint(
@@ -251,6 +256,7 @@ class gpEval:
         gp_transformer.return_gene_embeddings = return_gene_embeddings
         gp_transformer.tokens_to_keep = tokens_to_keep
         gp_transformer.genes_to_keep = genes_to_keep
+        gp_transformer.token_to_gene_to_keep_dict = token_to_gene_to_keep_dict
         gp_transformer.gene_dir_tag = gene_dir_tag
         gp_transformer.return_attention = return_attention
         gp_transformer.gp = gp
@@ -552,31 +558,22 @@ class gpEval:
         if output_tag is not None:
             gene_dir_tag += f'_{output_tag}'
 
-        # converting between different gene labels
-        with open(self.gp_transformer.model.gene_name_path, 'rb') as f:
-            name_dictionary = pickle.load(f)
-        with open(self.gp_transformer.model.gene_token_path, 'rb') as f:
-            token_dictionary = pickle.load(f)
-
-        if do_ensembl_conversion:
-            ensembl_ids = [
-                name_dictionary[t] for t in genes_to_keep if t in name_dictionary
-            ]
-        else:
-            ensembl_ids = genes_to_keep
-        tokens_to_keep = [
-            token_dictionary[e] for e in ensembl_ids if e in token_dictionary
-        ]
-        print(f'Number of genes to keep: {len(tokens_to_keep)}')
+        tokens_to_keep, token_to_gene_to_keep_dict = build_token_to_gene_name_dict(
+            self.gp_transformer.model.gene_name_path,
+            self.gp_transformer.model.gene_token_path,
+            genes_to_keep,
+            do_ensembl_conversion,
+        )
 
         gp_transformer = self._init_trainer(
             return_gene_embeddings=True,
             gene_dir_tag=gene_dir_tag,
             tokens_to_keep=tokens_to_keep,
-            genes_to_keep=genes_to_keep,
+            genes_to_keep=tokens_to_keep,
             gp=pathway,
             split_label=split,
             num_virtual_tokens=self.num_virtual_tokens,
+            token_to_gene_to_keep_dict=token_to_gene_to_keep_dict,
         )
 
         txdata = txDataModule(
@@ -667,7 +664,14 @@ class gpEval:
                 frameon=False,
             )
 
-    def generate_attention_matrix(self, gp, split='test', precision=32):
+    def generate_attention_matrix(
+        self,
+        gp,
+        genes_to_keep=None,
+        do_ensembl_conversion=True,
+        split='test',
+        precision=32,
+    ):
         """
         Get attention weights from gpTransformer
         """
@@ -675,6 +679,16 @@ class gpEval:
 
         if (gp != 'cell_token') and (gp not in self.gp_inputs):
             raise ValueError(f'{gp} must be one of "cell_token" or {self.gp_inputs}')
+
+        if gp != 'cell_token':
+            _, token_to_gene_to_keep_dict = build_token_to_gene_name_dict(
+                self.gp_transformer.model.gene_name_path,
+                self.gp_transformer.model.gene_token_path,
+                genes_to_keep,
+                do_ensembl_conversion,
+            )
+        else:
+            token_to_gene_to_keep_dict = None
 
         # Initialize trainer
         txdata = txDataModule(
@@ -690,6 +704,7 @@ class gpEval:
             gp=gp,
             num_virtual_tokens=self.num_virtual_tokens,
             split_label=split,
+            token_to_gene_to_keep_dict=token_to_gene_to_keep_dict,
         )
 
         trainer = pl.Trainer(
@@ -1670,3 +1685,328 @@ def calc_eval_metrics(
                 f.write(f'{key}, {value}\n')
 
     return None
+
+
+# --------------------------
+# Gene embeddings analysis
+# --------------------------
+
+
+def calculate_gene_to_gp_cosine_similarity(
+    gene_data,
+    cell_data,
+    gp,
+    genes,
+):
+    # 1. Extract cell embeddings
+    print('Exctracting cell data')
+    cell_idx = cell_data['idx']
+    cell = np.asarray(cell_data[gp])
+
+    # 2. Extract gene embeddings
+    print(
+        'Extracting gene data'
+        ' (depending on the size of your data, this can take a few minutes)'
+    )
+    gene_idx = gene_data['idx']
+    gene_arrays = {
+        gene: np.asarray(gene_data[gene])
+        for gene in genes
+        if gene in gene_data.column_names
+    }
+
+    # 3. Align indices
+    print('Aligning indices')
+    shared_indices, cell, gene_arrays = align_indices(
+        cell_idx, gene_idx, cell, gene_arrays
+    )
+
+    # 4. Calculate cosine similarity
+    print('Calculating cosine similarity')
+    cosim_df = pd.DataFrame(index=shared_indices, columns=gene_arrays.keys())
+
+    for gene, gene_arr in gene_arrays.items():
+        cosim_df[gene] = [1 - cosine(gp, g) for gp, g in zip(cell, gene_arr)]
+
+    return cosim_df
+
+
+def pivot_cosine_similarity_data_longer(
+    cosim_df,
+    cell_data,
+    meta_cols,
+    missing_gene_threshold=None,
+    fillna=False,
+):
+    # Remove genes with too many missing values
+    if missing_gene_threshold:
+        col_to_drop = []
+
+        for g in cosim_df.columns:
+            if (
+                len(cosim_df[cosim_df[g].isna()])
+                > missing_gene_threshold * cosim_df.shape[0]
+            ):
+                col_to_drop.append(g)
+
+        print('Number of columns to drop', len(col_to_drop))
+
+        cosim_df = cosim_df.drop(columns=col_to_drop)
+
+    if 'idx' not in meta_cols:
+        meta_cols = ['idx'] + meta_cols
+
+    obs_df = cell_data.select_columns(meta_cols).to_pandas()
+
+    merged_df = cosim_df.join(obs_df.set_index('idx'))
+    merged_df['idx'] = merged_df.index.values
+
+    # Wrangling dataframe into long format
+    df_long = merged_df.melt(
+        id_vars=meta_cols, var_name='gene', value_name='cosine_sim'
+    )
+
+    return df_long
+
+
+def calculate_gene_significance(ref_data, query_data):
+    """Calculate p-values and significance levels for all genes."""
+    all_genes = ref_data['gene'].unique()
+    results = []
+    for gene in all_genes:
+        ref_samples = ref_data[ref_data['gene'] == gene]['cosine_sim']
+        query_samples = query_data[query_data['gene'] == gene]['cosine_sim']
+        if len(ref_samples) > 1 and len(query_samples) > 1:
+            t_stat, p_value = ttest_ind(ref_samples, query_samples, equal_var=True)
+            mean_ref = ref_samples.mean()
+            mean_query = query_samples.mean()
+            effect_size = mean_ref - mean_query
+            results.append(
+                {
+                    'gene': gene,
+                    'p_value': p_value,
+                    'mean_ref': mean_ref,
+                    'mean_query': mean_query,
+                    'effect_size': effect_size,
+                }
+            )
+
+            # Create DataFrame for all genes
+    results_df = pd.DataFrame(results)
+
+    # Apply Benjamini-Hochberg correction
+    results_df['p_adjusted'] = multipletests(
+        results_df['p_value'], alpha=0.05, method='fdr_bh'
+    )[1]
+
+    # Add significance stars
+    results_df['significance'] = ''
+    for i, p_value in enumerate(results_df['p_adjusted']):
+        if not np.isnan(p_value):
+            if p_value < 0.001:
+                results_df.loc[i, 'significance'] = '***'
+            elif p_value < 0.01:
+                results_df.loc[i, 'significance'] = '**'
+            elif p_value < 0.05:
+                results_df.loc[i, 'significance'] = '*'
+
+    return results_df
+
+
+def assign_bar_colors(genes, gp_to_color, gpdb):
+    colors = []  # List to store colors for each gene
+    for gene in genes:
+        color_assigned = 'gray'  # Default color if gene is not found
+        for gp, color in gp_to_color.items():
+            if gene in gpdb[gp].values:
+                color_assigned = color
+                break
+        colors.append(color_assigned)
+    return colors
+
+
+def visualize_cosine_similarity(
+    df_long,
+    obs_col,
+    obs_value_1,
+    obs_value_2,
+    fillna=False,
+    topn=10,
+    save_to=None,
+    gp_to_color=None,  # {GP : color}
+    gpdb=None,  # for gene membership
+):
+    # Optionally fill in missing values
+    if fillna:
+        df_long = df_long.fillna(0)
+
+    # Filter data for ref and query lineages
+    ref = df_long[df_long[obs_col] == obs_value_1]
+    query = df_long[df_long[obs_col] == obs_value_2]
+
+    # Calculate significance for all genes
+    all_gene_stats = calculate_gene_significance(ref, query)
+
+    # Select top 10 genes with highest average cosine similarity in ref and query
+    ref_top10 = all_gene_stats.nlargest(topn, 'mean_ref')
+    query_top10 = all_gene_stats.nlargest(topn, 'mean_query')
+
+    # Select top 10 genes with strongest effect size differences
+    top10_diff_ref = all_gene_stats.nlargest(topn, 'effect_size')  # ref > query
+    top10_diff_query = all_gene_stats.nsmallest(topn, 'effect_size')  # query > ref
+
+    # Plotting
+    fig, axs = plt.subplots(2, 2, figsize=(18, 14))
+    fig.set_facecolor('white')
+
+    # 1. Top 10 genes with highest average cosine similarity in ref
+    if gp_to_color:
+        palette = dict(
+            zip(
+                ref_top10['gene'],
+                assign_bar_colors(ref_top10['gene'], gp_to_color, gpdb),
+            )
+        )
+        sns.barplot(
+            data=ref_top10,
+            x='mean_ref',
+            y='gene',
+            ax=axs[0, 0],
+            errorbar=None,
+            palette=palette,
+        )
+    else:
+        sns.barplot(data=ref_top10, x='mean_ref', y='gene', ax=axs[0, 0], errorbar=None)
+
+    axs[0, 0].set_title(
+        f'Top 10 Genes with Highest Average Cosine Similarity ({obs_value_1})'
+    )
+    axs[0, 0].set_xlabel('Cosine Similarity')
+    axs[0, 0].set_ylabel('Gene')
+
+    # 2. Top 10 genes with highest average cosine similarity in query
+    if gp_to_color:
+        palette = dict(
+            zip(
+                query_top10['gene'],
+                assign_bar_colors(query_top10['gene'], gp_to_color, gpdb),
+            )
+        )
+        sns.barplot(
+            data=query_top10,
+            x='mean_query',
+            y='gene',
+            ax=axs[0, 1],
+            errorbar=None,
+            palette=palette,
+        )
+    else:
+        sns.barplot(
+            data=query_top10, x='mean_query', y='gene', ax=axs[0, 1], errorbar=None
+        )
+
+    axs[0, 1].set_title(
+        f'Top 10 Genes with Highest Average Cosine Similarity ({obs_value_2})'
+    )
+    axs[0, 1].set_xlabel('Cosine Similarity')
+    axs[0, 1].set_ylabel('Gene')
+
+    # 3. Top 10 genes with strongest difference (ref > query)
+    if gp_to_color:
+        palette = dict(
+            zip(
+                top10_diff_ref['gene'],
+                assign_bar_colors(top10_diff_ref['gene'], gp_to_color, gpdb),
+            )
+        )
+        sns.barplot(
+            data=top10_diff_ref,
+            x='effect_size',
+            y='gene',
+            ax=axs[1, 0],
+            errorbar=None,
+            palette=palette,
+        )
+    else:
+        sns.barplot(
+            data=top10_diff_ref, x='effect_size', y='gene', ax=axs[1, 0], color='salmon'
+        )
+
+    for i, (effect, gene, significance) in enumerate(
+        zip(
+            top10_diff_ref['effect_size'],
+            top10_diff_ref['gene'],
+            top10_diff_ref['significance'],
+        )
+    ):
+        if significance:
+            axs[1, 0].text(
+                effect + 0.0002,
+                i,
+                significance,
+                ha='left',
+                va='center',
+                fontsize=12,
+                color='darkred',
+            )
+    axs[1, 0].set_title(
+        f'Top 10 Genes with Strongest Difference ({obs_value_1} > {obs_value_2})'
+    )
+    axs[1, 0].set_xlabel('Difference in Cosine Similarity')
+    axs[1, 0].set_ylabel('Gene')
+
+    # 4. Top 10 genes with strongest difference (query > ref)
+    if gp_to_color:
+        palette = dict(
+            zip(
+                top10_diff_query['gene'],
+                assign_bar_colors(top10_diff_query['gene'], gp_to_color, gpdb),
+            )
+        )
+        sns.barplot(
+            data=top10_diff_query,
+            x='effect_size',
+            y='gene',
+            ax=axs[1, 1],
+            errorbar=None,
+            palette=palette,
+        )
+    else:
+        sns.barplot(
+            data=top10_diff_query,
+            x='effect_size',
+            y='gene',
+            ax=axs[1, 1],
+            color='skyblue',
+        )
+
+    for i, (effect, gene, significance) in enumerate(
+        zip(
+            top10_diff_query['effect_size'],
+            top10_diff_query['gene'],
+            top10_diff_query['significance'],
+        )
+    ):
+        if significance:
+            axs[1, 1].text(
+                effect - 0.0002,
+                i,
+                significance,
+                ha='right',
+                va='center',
+                fontsize=12,
+                color='navy',
+            )
+    axs[1, 1].set_title(
+        f'Top 10 Genes with Strongest Difference ({obs_value_2} > {obs_value_1})'
+    )
+    axs[1, 1].set_xlabel('Difference in Cosine Similarity')
+    axs[1, 1].set_ylabel('Gene')
+
+    # Adjust layout to avoid squishing
+    plt.subplots_adjust(hspace=0.4, wspace=0.3)
+
+    if save_to:
+        plt.savefig(save_to)
+
+    plt.show()

@@ -117,6 +117,7 @@ class gpBase(pl.LightningModule):
         return_gene_embeddings: bool = False,
         tokens_to_keep: Optional[List] = None,
         genes_to_keep: Optional[List] = None,
+        token_to_gene_to_keep_dict: Optional[Dict] = None,
         gene_dir_tag: Optional[str] = None,
         return_attention: bool = False,
         gp: Optional[str] = None,
@@ -231,6 +232,7 @@ class gpBase(pl.LightningModule):
         # for test step
         self.return_gene_embeddings = return_gene_embeddings
         self.tokens_to_keep = tokens_to_keep
+        self.token_to_gene_to_keep_dict = token_to_gene_to_keep_dict
         self.genes_to_keep = genes_to_keep
 
         self.gene_dir_tag = gene_dir_tag
@@ -372,8 +374,7 @@ class gpBase(pl.LightningModule):
 
             # Get embeddings of the relevant genes
             for i, gene in enumerate(self.tokens_to_keep):
-                gene_name = self.genes_to_keep[i]
-
+                gene_name = self.token_to_gene_to_keep_dict[gene]
                 emb_dict[gene_name] = output[gene].detach().cpu()
                 emb_dict[f'{gene_name}_rank'] = output[f'{gene}_rank'].detach().cpu()
 
@@ -395,9 +396,18 @@ class gpBase(pl.LightningModule):
             # returns a dictionary where each gene is a key
             if self.gp != 'cell_token':
                 output = self.model.get_cls_attn(batch, self.gp)
+
+                token_names = list(output.keys())
+
+                gene_names = [
+                    self.token_to_gene_to_keep_dict[t] if t != 'cls' else 'cls'
+                    for t in token_names
+                ]
+
             else:
                 # for cell token (only implemented for global model)
                 output = self.model.get_cell_token_attention(batch)
+                gene_names = list(output.keys())
 
             # add metadata
             meta_dict = {}
@@ -411,15 +421,10 @@ class gpBase(pl.LightningModule):
             adata = sc.AnnData(
                 csr_matrix(pd.DataFrame(output).values),
                 obs=pd.DataFrame(meta_dict),
-                var=pd.DataFrame(index=list(output.keys())),
+                var=pd.DataFrame(index=gene_names),
             )
 
             self.attn_adata_holder.append(adata)
-
-            # if self.attn_adata_holder is None:
-            #     self.attn_adata_holder = adata
-            # else:
-            #     self.attn_adata_holder = ad.concat([self.attn_adata_holder, adata])
 
             return None
 
