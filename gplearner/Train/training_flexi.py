@@ -118,6 +118,7 @@ def run_training_from_select_gps(
     use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
     load_cell_token_learner: bool = False,
+    gp_of_interest: Optional[str] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -201,6 +202,8 @@ def run_training_from_select_gps(
         whether to use flash attention in transformer block
     load_cell_token_learner:
         whether to load the cell token learner from previous global training
+    gp_of_interest
+        Sole GP to use in forward pass
     """
     ##########################################
     # Setup
@@ -517,6 +520,7 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
         # DeepSpeedCPUAdam
         # if args['strategy'].startswith('deepspeed')
         # else
+        'gp': args['gp_of_interest'],
     }
 
     global_params = {

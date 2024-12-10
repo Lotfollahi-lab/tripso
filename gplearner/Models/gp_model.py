@@ -346,7 +346,10 @@ class gpWrapper(nn.Module):
                 continue
 
         # Concatenate tensors
-        z = torch.stack(gp_token_list, dim=1)
+        if len(gp_token_list) > 1:
+            z = torch.stack(gp_token_list, dim=1)
+        else:
+            z = gp_token_list[0].unsqueeze(dim=1)
 
         # store for output
         output = {
@@ -1203,7 +1206,13 @@ class gpTransformerGlobal(gpTransformerBase):
 
         if return_gene_embeddings:
             return base_output
-        cell_output = self.cell_token_learner(base_output, masking=masking_global)
+
+        if (self.global_loss == 'supervised') and (gp_of_interest is not None):
+            cell_output = {
+                'cell_token': base_output['z'][:, 0, ...]
+            }  # <CLS> of gp_of_interest
+        else:
+            cell_output = self.cell_token_learner(base_output, masking=masking_global)
 
         base_output['cell_token'] = cell_output['cell_token']
 
