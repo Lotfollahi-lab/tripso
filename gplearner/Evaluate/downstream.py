@@ -4,6 +4,7 @@ import warnings
 from typing import (
     Any,
     Dict,
+    Literal,
     Optional,
 )
 
@@ -456,6 +457,7 @@ class gpEval:
         data_to_plot='test',
         gp_to_plot=None,
         subsample=None,
+        method: Literal['umap', 'pca'] = 'umap',
     ):
         """
         UMAP of GP embeddings
@@ -486,16 +488,31 @@ class gpEval:
             for c in label_to_plot:
                 adata = remove_single_data_points(adata, c)
 
-            sc.pp.neighbors(adata, use_rep='X', n_neighbors=15)
-            sc.tl.umap(adata)
+            if method == 'umap':
+                sc.pp.neighbors(adata, use_rep='X', n_neighbors=15)
+                sc.tl.umap(adata)
 
-            for c in label_to_plot:
-                sc.pl.umap(
-                    adata,
-                    color=c,
-                    save=f'_{self.tissue}_{gp}_by_{c}.pdf',
-                    frameon=False,
-                )
+                for c in label_to_plot:
+                    sc.pl.umap(
+                        adata,
+                        color=c,
+                        save=f'_{self.tissue}_{gp}_by_{c}_umap.pdf',
+                        frameon=False,
+                    )
+
+            elif method == 'pca':
+                sc.pp.pca(adata)
+
+                for c in label_to_plot:
+                    sc.pl.pca(
+                        adata,
+                        color=c,
+                        save=f'_{self.tissue}_{gp}_by_{c}_pca.pdf',
+                        frameon=False,
+                    )
+
+            else:
+                raise ValueError('method must be one of ["umap", "pca"].')
 
     @staticmethod
     def _load_and_save_latent(self, adata, new, model_name):
