@@ -496,7 +496,7 @@ class gpEval:
                     sc.pl.umap(
                         adata,
                         color=c,
-                        save=f'_{self.tissue}_{gp}_by_{c}_umap.pdf',
+                        save=f'_{self.tissue}_{gp}_by_{c}.pdf',
                         frameon=False,
                     )
 
@@ -507,7 +507,7 @@ class gpEval:
                     sc.pl.pca(
                         adata,
                         color=c,
-                        save=f'_{self.tissue}_{gp}_by_{c}_pca.pdf',
+                        save=f'_{self.tissue}_{gp}_by_{c}.pdf',
                         frameon=False,
                     )
 
