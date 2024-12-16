@@ -670,10 +670,12 @@ class gpGlobal(gpBase):
         loss = loss_base['total_loss']
 
         if self.l_regularization is not None:
+            attn = output['attention_list'][0] # first GP
+            
             if self.l_regularization == 'L1':
-                l_reg_loss = self.compute_l1_loss(output['attention'])
+                l_reg_loss = self.compute_l1_loss(attn)
             elif self.l_regularization == 'L2':
-                l_reg_loss = self.compute_l2_loss(output['attention'])
+                l_reg_loss = self.compute_l2_loss(attn)
             else:
                 raise ValueError('l_regularization must be one of [None, "L1", "L2"].')
 
