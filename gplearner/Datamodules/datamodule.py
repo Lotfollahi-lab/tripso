@@ -584,20 +584,21 @@ class iTxDataModule(txDataModule):
         gene_token_path,
         gene_name_path,
         peft_config_path=None,
-        gf_layer_to_quant=-1,
+        fm_layer_to_quant=-1,
+        fm_encoder_pkg: str = 'geneformer',
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         # Initialize geneformer model for getting gene embeddings
-        if self.fm_encoder_name == 'from_scratch':
+        if fm_encoder_pkg == 'from_scratch':
             # extract bert wrapper from GPformer
             self.gf_wrapper = geneformer_model
 
         else:
             self.gf_wrapper = gfWrapper(
                 geneformer_model=geneformer_model,
-                gf_layer_to_quant=gf_layer_to_quant,
+                fm_layer_to_quant=fm_layer_to_quant,
                 peft_config_path=peft_config_path,
             )
 
