@@ -17,7 +17,7 @@ import pytorch_lightning as pl
 import scanpy as sc
 import seaborn as sns
 import torch
-from captum.attr import GuidedGradCam
+from captum.attr import GuidedGradCam, LayerIntegratedGradients
 from datasets import load_from_disk
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from pytorch_lightning.loggers import CSVLogger
@@ -919,6 +919,7 @@ def calculate_gp_attribution_scores(
     fm_encoder_name='gf-6L-30M-i2048',
     output_file_name=None,
     model_input_size: int = 2048,
+    method: Literal['GradCAM', 'IntegratedGradients'] = 'GradCAM',
 ):
     '''
     Calculate attribution scores for each gene program
@@ -1104,7 +1105,12 @@ def calculate_gp_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[block_n].mlp)
+    if method == 'GradCAM':
+        attr = GuidedGradCam(imodel, imodel.gp_block.blocks[block_n].mlp)
+    elif method == 'IntegratedGradients':
+        attr = LayerIntegratedGradients(imodel, imodel.gp_block.blocks[block_n].mlp)
+    else:
+        raise ValueError('method must be one of ["GradCAM", "IntegratedGradients].')
 
     attribution_scores: Dict[Any, Any] = {}
     all_tokens = set()
@@ -1125,7 +1131,7 @@ def calculate_gp_attribution_scores(
             for labels in token_labels:
                 all_tokens.add(labels)
 
-            attributions = gc.attribute(
+            attributions = attr.attribute(
                 input_ids[0],
                 target=edict[f'{obs_key}_id'],
                 additional_forward_args=input_ids[1],
@@ -1218,6 +1224,7 @@ def calculate_cell_token_attribution_scores(
     pretrained_emb=None,
     supervised_labels=None,
     block_n=-1,
+    method: Literal['GradCAM', 'IntegratedGradients'] = 'GradCAM',
 ):
     # --------------------------
     # Set seed
@@ -1343,9 +1350,16 @@ def calculate_cell_token_attribution_scores(
     # --------------------------
 
     # set up attribution
-    gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[block_n].mlp)
+    if method == 'GradCAM':
+        attr = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[block_n].mlp)
+    elif method == 'IntegratedGradients':
+        attr = LayerIntegratedGradients(
+            imodel, imodel.global_block.encoder.blocks[block_n].mlp
+        )
+    else:
+        raise ValueError('method must be one of ["GradCAM", "IntegratedGradients].')
 
-    attribution_scores = {}
+    attribution_scores: Dict[Any, Any] = {}
 
     for g in gp_inputs:
         attribution_scores[g] = []
@@ -1362,7 +1376,7 @@ def calculate_cell_token_attribution_scores(
 
             input_ids = (emb, edict)
 
-            attributions = gc.attribute(
+            attributions = attr.attribute(
                 input_ids[0],
                 target=conversion_dict[obs_value],
                 additional_forward_args=input_ids[1],
