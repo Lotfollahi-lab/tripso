@@ -255,7 +255,29 @@ class Attention(nn.Module):
         self.use_flash = use_flash
         self.use_flex = use_flex
 
-    def forward(self, x, attn_mask, return_attention, block_mask):
+    def forward(self, x: Tensor, attn_mask: Tensor, return_attention: bool, block_mask):
+        """Runs the attention mechanism.
+
+        Parameters
+        ----------
+        x : Tensor
+            Input sequence.
+            shape (batch_size, seq_len, embed_dim)
+        attn_mask : Tensor
+            Attention mask.
+            shape (batch_size, seq_len)
+        return_attention : bool
+            Whether to return attention. If False, returns attn=None.
+
+        Returns
+        -------
+        x : Tensor
+            Output sequence.
+            shape (batch_size, seq_len, embed_dim)
+        attn : Tensor or None
+            Attention mask.
+            shape (batch_size, num_heads, seq_len, seq_len)
+        """
         if self.use_flash:
             return_attention = False
             # do masking here
@@ -269,7 +291,7 @@ class Attention(nn.Module):
             .reshape(B, N, 3, self.num_heads, C // self.num_heads)
             .permute(2, 0, 3, 1, 4)
         )
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        q, k, v = qkv[0], qkv[1], qkv[2]  #
 
         if self.use_flash:
             attn_out = flash_attn_func(q, k, v)  # (batch_size, seqlen, nheads, headdim)
@@ -316,7 +338,7 @@ class Attention(nn.Module):
             # Calculate the weighted sum of values
             x = (attn @ v).transpose(1, 2).reshape(B, N, C)
 
-        x = self.proj(x)
+        x = self.proj(x)  # (B, N, C)
         x = self.proj_drop(x)
 
         if return_attention is False:

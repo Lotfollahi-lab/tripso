@@ -299,6 +299,7 @@ class gpWrapper(nn.Module):
         gene_original_labels_list = []
         num_genes_per_cell_list = []
         gene_emb_list = []
+        attention_list = []
 
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
@@ -342,6 +343,8 @@ class gpWrapper(nn.Module):
                 if return_gene_embeddings:
                     gene_emb_list = encoder_output['gene_embeddings']
                     gene_original_labels_list = tokens_pad_unencoded
+                if return_attention:
+                    attention_list.append(encoder_output['attention'])
             else:
                 continue
 
@@ -356,6 +359,7 @@ class gpWrapper(nn.Module):
             'gene_emb_list': gene_emb_list,
             'gene_original_labels_list': gene_original_labels_list,
             'num_genes_per_cell_list': num_genes_per_cell_list,
+            'attention_list': attention_list,
         }
 
         if return_gene_embeddings:

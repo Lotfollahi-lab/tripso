@@ -118,6 +118,8 @@ def run_training_from_select_gps(
     use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
     load_cell_token_learner: bool = False,
+    l_regularization: Literal[None, 'L0', 'L1', 'L2'] = None,
+    lambda_l_regularization: float = 0.05,
 ):
     """
     Wrapper function for training gpLearner model
@@ -522,6 +524,8 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
     global_params = {
         'n_condition_combined': args['n_condition_combined'],
         'total_n_genes': args['total_n_genes'],
+        'l_regularization': args['l_regularization'],
+        'lambda_l_regularization': args['lambda_l_regularization'],
     }
 
     if tag == 'old':

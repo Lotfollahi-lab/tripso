@@ -3,6 +3,7 @@ import warnings
 from typing import (
     Dict,
     List,
+    Literal,
     Optional,
     Union,
 )
@@ -18,7 +19,7 @@ import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
 from scipy.sparse import csr_matrix
 from sklearn.metrics import classification_report, roc_auc_score
-from torch import optim
+from torch import Tensor, optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 
 from ..Models.gp_model import EmbEvaluatorHead, gpTransformerBase
@@ -600,6 +601,8 @@ class gpGlobal(gpBase):
         total_n_genes: int = 20_000,
         n_condition_combined: int = 1,  # number of batches for zinb and nb
         test_random_baseline: bool = False,
+        l_regularization: Literal[None, 'L1', 'L2'] = None,
+        lambda_l_regularization: float = 0.05,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -609,6 +612,12 @@ class gpGlobal(gpBase):
         self.total_n_genes = total_n_genes
         self.n_condition_combined = n_condition_combined
         self.test_random_baseline = test_random_baseline
+
+        self.l_regularization = l_regularization
+        self.lambda_l_regularization = lambda_l_regularization
+
+        if self.l_regularization is not None:
+            self.return_attention = True
 
         if self.global_loss == 'supervised':
             if isinstance(lambda_clf_loss, int) or isinstance(lambda_clf_loss, float):
@@ -658,13 +667,35 @@ class gpGlobal(gpBase):
         output = self.forward(batch, masking=True)
 
         loss_base = self.compute_gp_loss(batch, output)
+        loss = loss_base['total_loss']
+
+        if self.l_regularization is not None:
+            if self.l_regularization == 'L1':
+                l_reg_loss = self.compute_l1_loss(output['attention'])
+            elif self.l_regularization == 'L2':
+                l_reg_loss = self.compute_l2_loss(output['attention'])
+            else:
+                raise ValueError('l_regularization must be one of [None, "L1", "L2"].')
+
+            loss += l_reg_loss * self.lambda_l_regularization
+
+            # log loss
+            self.log(
+                f'train/{self.l_regularization}_loss',
+                l_reg_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
 
         if self.calc_gp_loss:
             self.log_gp_loss(loss_base['loss_per_gp'])
 
         if self.global_loss == 'supervised':
             clf_loss = self.compute_supervised_loss(output, batch, stage='train')
-            loss = loss_base['total_loss'] + clf_loss['total_loss']
+            loss += clf_loss['total_loss']
 
             # Log losses
             for t in self.model.supervised_tasks:
@@ -684,13 +715,13 @@ class gpGlobal(gpBase):
                 output['gp_labels'].reshape(-1),
             )
 
-            loss = loss_base['total_loss'] + cell_masking_loss
+            loss += cell_masking_loss
 
         elif self.global_loss == 'reconstruction':
             reconstruction_loss = self.compute_reconstruction_loss(
                 batch, output, stage='train'
             )
-            loss = loss_base['total_loss'] + reconstruction_loss
+            loss += reconstruction_loss
 
             # log loss
             self.log(
@@ -1032,6 +1063,30 @@ class gpGlobal(gpBase):
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         return reconstruction_loss
+
+    def compute_l1_loss(self, attn: Tensor) -> Tensor:
+        """Penalize attention from the CLS token at the final block.
+
+        attn.shape = (batch_size, num_heads, seq_len, seq_len)
+        """
+        cls_attn = attn[:, :, 0, :]  # attention from CLS token; (B, num_heads, N)
+        cls_attn = cls_attn.abs()  # abs for L1 regularization
+        l1_loss = (
+            cls_attn.sum(-1).mean(0).mean(0)
+        )  # sum over seq; average over batch, heads
+        return l1_loss
+
+    def compute_l2_loss(self, attn: Tensor) -> Tensor:
+        """Penalize attention from the CLS token at the final block.
+
+        attn.shape = (batch_size, num_heads, seq_len, seq_len)
+        """
+        cls_attn = attn[:, :, 0, :]  # attention from CLS token; (B, num_heads, N)
+        cls_attn = cls_attn**2  # square for L2 regularization
+        l2_loss = (
+            cls_attn.sum(-1).mean(0).mean(0)
+        )  # sum over seq; average over batch, heads
+        return l2_loss
 
 
 # ------------------------------------------------------
