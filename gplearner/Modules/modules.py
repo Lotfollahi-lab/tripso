@@ -317,7 +317,7 @@ class Attention(nn.Module):
                 v,
                 # score_mod = score_mod,
                 block_mask=block_mask,
-            )
+            ) # TODO maybe use this? / there was a masking issue
 
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -332,8 +332,8 @@ class Attention(nn.Module):
             attn.masked_fill_(mask == 0, max_neg_value)
 
             # Apply softmax to get attention weights
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
+            attn = attn.softmax(dim=-1) # TODO change temperature? First priority
+            attn = self.attn_drop(attn) # TODO Try dropout. Second priority
 
             # Calculate the weighted sum of values
             x = (attn @ v).transpose(1, 2).reshape(B, N, C)
