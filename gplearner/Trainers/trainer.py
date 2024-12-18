@@ -657,14 +657,16 @@ class gpGlobal(gpBase):
     def training_step(self, batch, batch_idx):
         output = self.forward(batch, masking=True)
 
-        loss_base = self.compute_gp_loss(batch, output)
-
         if self.calc_gp_loss:
+            loss_base = self.compute_gp_loss(batch, output)
             self.log_gp_loss(loss_base['loss_per_gp'])
+            loss = loss_base['total_loss']
+        else:
+            loss = 0.0
 
         if self.global_loss == 'supervised':
             clf_loss = self.compute_supervised_loss(output, batch, stage='train')
-            loss = loss_base['total_loss'] + clf_loss['total_loss']
+            loss += clf_loss['total_loss']
 
             # Log losses
             for t in self.model.supervised_tasks:
@@ -684,13 +686,13 @@ class gpGlobal(gpBase):
                 output['gp_labels'].reshape(-1),
             )
 
-            loss = loss_base['total_loss'] + cell_masking_loss
+            loss += cell_masking_loss
 
         elif self.global_loss == 'reconstruction':
             reconstruction_loss = self.compute_reconstruction_loss(
                 batch, output, stage='train'
             )
-            loss = loss_base['total_loss'] + reconstruction_loss
+            loss += reconstruction_loss
 
             # log loss
             self.log(
