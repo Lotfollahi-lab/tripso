@@ -541,9 +541,17 @@ class txDataModule(LightningDataModule):
         # Keep track of metadata
         for m in self.metadata:
             if m.endswith('_id'):
-                output_dict[m] = torch.tensor(
-                    [d[m] for d in tokenized_batch], dtype=torch.long
-                )
+                try:
+                    output_dict[m] = torch.tensor(
+                        [d[m] for d in tokenized_batch], dtype=torch.long
+                    )
+                except ValueError:
+                    raise ValueError(
+                        f"Failed to convert to tensor for key '{m}'"
+                        'due to non-integer type values in the batch.'
+                        'GPformer expects all variables ending in _id'
+                        'to be integer encodings of categorical variables.'
+                    )
             elif m == 'norm_exp':
                 continue
             else:
