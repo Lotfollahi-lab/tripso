@@ -2025,7 +2025,9 @@ def compute_phate(adata, n_components=2):
     return data_phate
 
 
-def plot_phate(data_phate, adata, label, label_order, output_file, color_map='Paired'):
+def plot_phate(
+    data_phate, adata, label, label_order, output_file, color_map='Spectral'
+):
     # Desired fixed order of categories
     fixed_order = [c for c in label_order if c in adata.obs[label].unique()]
 
@@ -2054,6 +2056,8 @@ def plot_phate(data_phate, adata, label, label_order, output_file, color_map='Pa
     # Apply the colors in the scatter plot
     # Convert 'ct_broad' to color labels based on the category_color_map
     color_labels = np.array([category_color_map[category] for category in cell_label])
+
+    plt.rcdefaults()
 
     scprep.plot.scatter2d(
         data_phate,
