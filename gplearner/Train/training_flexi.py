@@ -76,6 +76,7 @@ def run_training_from_select_gps(
     global_attn_heads: Optional[int] = 8,
     supervised_labels: Optional[dict] = None,
     supervised_labels_old: Optional[dict] = None,
+    adversarial_labels: Optional[dict] = None,
     global_masking_rate: Optional[float] = 0.15,
     global_training: str = 'simultaneous',
     path_to_base_model: str = 'path/to/pretrained/model',
@@ -182,6 +183,8 @@ def run_training_from_select_gps(
     supervised_labels : list
         Dict {label : num_classes} for supervised classification
         TO DO: provide either classification or supervised labels / check compatibility
+    adversarial_labels: dict
+        List of labels for adversarial classification with entropy maximization
     global_attn_heads : int
         number of heads for learning cell token
     global_training : str
@@ -467,9 +470,11 @@ def configure_model_version(args, tag):
         global_params['global_loss'] = args[f'global_loss_{tag}']
         model_type = args['model_type_old']
     else:
+        global_params['adversarial_labels'] = args['adversarial_labels']
         global_params['supervised_labels'] = args['supervised_labels']
         global_params['global_loss'] = args['global_loss']
         model_type = args['model_type']
+    
 
     if args['num_virtual_tokens'] > 0:
         if args[f'model_type_{tag}'] == 'Base':

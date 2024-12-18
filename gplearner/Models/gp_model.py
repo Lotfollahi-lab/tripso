@@ -1119,6 +1119,7 @@ class gpTransformerGlobal(gpTransformerBase):
         total_n_genes=25426,
         reconstruction_loss='nb',
         supervised_labels: Optional[Dict] = None,
+        adversarial_labels: Optional[Dict] = None,
         global_masking_rate=0,
         global_n_blocks=1,
         use_flash=False,
@@ -1162,6 +1163,9 @@ class gpTransformerGlobal(gpTransformerBase):
                     for k in supervised_labels.keys()
                 ]
             )
+            
+            self.adversarial_labels = adversarial_labels
+            
 
         if self.global_loss == 'reconstruction':
             self.reconstruction_loss = reconstruction_loss
