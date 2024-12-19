@@ -522,21 +522,6 @@ class gpBase(pl.LightningModule):
     def configure_optimizers(self):
         params = list(self.model.named_parameters())
 
-        if (
-            isinstance(self.model, gpTransformerGlobal)
-            and self.model.adversarial_labels is not None
-        ):
-            clf_heads_to_exclude = [
-                self.model.supervised_tasks[label]
-                for label in self.model.adversarial_labels
-            ]
-            for clf_head_i in clf_heads_to_exclude:
-                params = [
-                    (name, param)
-                    for name, param in params
-                    if f'clf_head.{clf_head_i}' not in name
-                ]
-
         def get_lr_for_param(name):
             """Determine the learning rate for a parameter based on its name."""
             if isinstance(self.finetune_lr, float):
@@ -1056,7 +1041,11 @@ class gpGlobal(gpBase):
 
 
 class gpGlobalAdversarial(gpGlobal):
-    """Train with adversarial supervised labels."""
+    """Train with adversarial supervised labels.
+    
+    Assumes that the schedulers update once very train epoch.
+    Assumes no GP loss contribution to total loss.
+    """
 
     def __init__(
         self,
@@ -1085,13 +1074,10 @@ class gpGlobalAdversarial(gpGlobal):
         self.supervised_adv_tasks = self.model.adversarial_labels
 
     def training_step(self, batch, batch_idx):
-        # Note: Does not calculate gp loss
-        # Note: Assumes that the scheduler updates at every train step
 
         output = self.forward(batch, masking=True)
 
         opt_main, opt_adv = self.optimizers()
-        sched_main, sched_adv = self.lr_schedulers()
 
         # main step: optimize encoder and main clf_head(s)
         if batch_idx % (1 + self.freq_adv) == 0:
@@ -1103,7 +1089,6 @@ class gpGlobalAdversarial(gpGlobal):
             loss = clf_loss['total_loss'] + adversarial_loss
             opt_main.zero_grad()
             loss.backward()
-            sched_main.step()
 
             # Log losses
             for t in self.supervised_main_tasks:
@@ -1126,6 +1111,16 @@ class gpGlobalAdversarial(gpGlobal):
                 logger=True,
                 sync_dist=True,
             )
+            
+            self.log(
+                'train/loss_main',
+                loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
 
         # adv step: optimize adversarial clf_head(s)
         else:
@@ -1135,7 +1130,6 @@ class gpGlobalAdversarial(gpGlobal):
             loss = clf_loss_adv['total_loss']
             opt_adv.zero_grad()
             loss.backward()
-            sched_adv.step()
 
             # Log losses
             for t in self.supervised_adv_tasks:
@@ -1148,6 +1142,66 @@ class gpGlobalAdversarial(gpGlobal):
                     logger=True,
                     sync_dist=True,
                 )
+                
+            self.log(
+                'train/loss_adv',
+                loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+                
+    def on_train_epoch_end(self):
+        
+        sched_main, sched_adv = self.lr_schedulers()
+        
+        # update main scheduler
+        train_loss_main = self.trainer.callback_metrics.get('train/loss_main')
+        sched_main.step(train_loss_main)
+        
+        # update adv scheduler
+        train_loss_adv = self.trainer.callback_metrics.get('train/loss_adv')
+        sched_adv.step(train_loss_adv)
+        
+        return super().on_train_epoch_end()
+    
+    def validation_step(self, batch, batch_idx):
+        
+        # compute main loss
+        output = self.forward(batch, masking=True)
+        clf_loss = self.compute_supervised_loss(
+            output, batch, stage='train', tasks=self.supervised_main_tasks
+        )
+        adversarial_loss = self.compute_adversarial_loss(output)
+        loss_main = clf_loss['total_loss'] + adversarial_loss
+        
+        self.log(
+            'val/loss_main',
+            loss_main,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+        
+        # compute adv loss
+        clf_loss_adv = self.compute_supervised_loss(
+            output, batch, stage='train', tasks=self.supervised_adv_tasks
+        )
+        loss_adv = clf_loss_adv['total_loss']
+        
+        self.log(
+            'val/loss_adv',
+            loss_adv,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
 
     def compute_supervised_loss(self, output, batch, stage, tasks):
         clf_loss_dict = {}
@@ -1168,12 +1222,10 @@ class gpGlobalAdversarial(gpGlobal):
 
         return clf_loss_dict
 
-    def compute_adversarial_loss(self, output):
+    def compute_adversarial_loss(self, output, eps: float = 1e-8):
         """Maximizes entropy of the logits."""
         adv_loss_dict = {}
         loss = 0
-
-        eps = 1e-8
 
         for t in self.model.supervised_tasks:
             if t in self.model.adversarial_labels:
@@ -1184,12 +1236,86 @@ class gpGlobalAdversarial(gpGlobal):
                 loss += self.lambda_adv_loss * adv_loss
 
         return loss
+    
+    def get_lr_for_param(self, name):
+        """Determine the learning rate for a parameter based on its name."""
+        if isinstance(self.finetune_lr, float):
+            # Use finetune_lr for specific parameter names
+            if 'multi_gp_encoder' in name or 'gf_wrapper' in name:
+                return self.finetune_lr
+            else:
+                return self.lr
+        elif isinstance(self.finetune_lr, dict):
+            # Use the learning rate from the dict if a key matches part of the name
+            for key, lr in self.finetune_lr.items():
+                if key in name:
+                    return lr
+            # Default to self.lr if no key matches
+            return self.lr
+        else:
+            raise ValueError('finetune_lr must be either a float or a dict.')
+        
+    def get_lr_scheduler(self, optimizer: optim.optimizer):
+        if self.lr_scheduler == 'ReduceLROnPlateau':
+            print('Using ReduceLROnPlateau scheduler')
+            lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                patience=2,  # default 10
+                factor=0.1,  # default
+                verbose=False,
+                min_lr=1e-6,  # from dino,
+                threshold=0.01,  # default 1e-4
+            )
+
+        elif self.lr_scheduler == 'CosineLRwithWarmUp':
+            print('Using CosineAnnealingLR scheduler')
+            lr_scheduler = CosineLRwithWarmUp(
+                optimizer,
+                warmup_epochs=5,  # 10 warmup epochs in dino
+                total_epochs=self.total_epochs,  # 100 epochs in dino
+                eta_min=1e-6,  # from dino
+            )
+        else:
+            raise NotImplementedError(
+                'lr_scheduler must be either ReduceLROnPlateau or CosineLRwithWarmUp'
+            )
+            
+        return lr_scheduler
 
     def configure_optimizers(self):
+        
         clf_heads_adversarial = [
             self.model.supervised_tasks[t] for t in self.supervised_adv_tasks
         ]
         params = list(self.model.named_parameters())
+        
+        # main optimizer
+        params_main = params.copy()
+        for clf_head_i in clf_heads_adversarial:
+            params_main = [
+                (name, param)
+                for name, param in params_main
+                if f'clf_head.{clf_head_i}' not in name
+            ]
+            
+        lr_to_params = {}
+        for name, param in params_main:
+            if not param.requires_grad:
+                continue
+            lr = self.get_lr_for_param(name)
+            if lr not in lr_to_params:
+                lr_to_params[lr] = []
+            lr_to_params[lr].append(param)
+        
+        grouped_parameters = [
+            {'params': param_list, 'lr': lr} for lr, param_list in lr_to_params.items()
+        ]
+        optimizer_main = self.optimizer_class(
+            grouped_parameters, lr=self.lr, weight_decay=self.weight_decay
+        )
+        lr_scheduler_main = self.get_lr_scheduler(optimizer_main)
+        
+        # adversarial optimizer
         params_adv = []
 
         for clf_head_i in clf_heads_adversarial:
@@ -1201,20 +1327,19 @@ class gpGlobalAdversarial(gpGlobal):
         optimizer_adv = self.optimizer_class(
             params_adv, lr=lr_adv, weight_decay=self.weight_decay
         )
-        optimizer_dict_base = super().configure_optimizers()
-        scheduler_adv = dict(optimizer_dict_base['lr_scheduler']).copy()
-
+        lr_scheduler_adv = self.get_lr_scheduler(optimizer_adv)   
+        
+        # return optimizers and schedulers
         return [
             {
-                'optimizer': optimizer_dict_base['optimizer'],
-                'lr_scheduler': optimizer_dict_base['lr_scheduler'],
+                'optimizer': optimizer_main,
+                'lr_scheduler': lr_scheduler_main,
             },
             {
                 'optimizer': optimizer_adv,
-                'lr_scheduler': scheduler_adv,
+                'lr_scheduler': lr_scheduler_adv,
             },
         ]
-
 
 # ------------------------------------------------------
 # Extra trainers
