@@ -119,7 +119,7 @@ def run_training_from_select_gps(
     use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
     load_cell_token_learner: bool = False,
-    adversarial_labels: Optional[dict] = None,
+    adversarial_labels: Optional[list[str]] = None,
     lambda_adv_loss: float = 0.1,
     lr_adv: float = 1e-3,
     freq_adv: int = 1,
@@ -187,8 +187,6 @@ def run_training_from_select_gps(
     supervised_labels : list
         Dict {label : num_classes} for supervised classification
         TO DO: provide either classification or supervised labels / check compatibility
-    adversarial_labels: dict
-        List of labels for adversarial classification with entropy maximization
     global_attn_heads : int
         number of heads for learning cell token
     global_training : str
@@ -208,6 +206,12 @@ def run_training_from_select_gps(
         whether to use flash attention in transformer block
     load_cell_token_learner:
         whether to load the cell token learner from previous global training
+    adversarial_labels: dict
+        list of labels for adversarial classification with entropy maximization
+    lr_adv: float
+        learning rate for adversarial clf heads
+    freq_adv: int
+        number of adversarial training steps for every main training step
     """
     ##########################################
     # Setup
