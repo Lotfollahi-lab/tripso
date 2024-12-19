@@ -94,7 +94,7 @@ class gfWrapper(nn.Module):
         geneformer_model,
         fm_layer_to_quant,
         peft_config_path,
-        token_dictionary_file,
+        token_dictionary_file=TOKEN_DICTIONARY_FILE,
     ):
         super().__init__()
 
