@@ -1163,9 +1163,8 @@ class gpTransformerGlobal(gpTransformerBase):
                     for k in supervised_labels.keys()
                 ]
             )
-            
+
             self.adversarial_labels = adversarial_labels
-            
 
         if self.global_loss == 'reconstruction':
             self.reconstruction_loss = reconstruction_loss

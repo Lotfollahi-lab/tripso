@@ -1,11 +1,11 @@
 import os
 import warnings
 from typing import (
-    cast,
     Dict,
     List,
     Optional,
     Union,
+    cast,
 )
 
 import anndata as ad
@@ -22,7 +22,11 @@ from sklearn.metrics import classification_report, roc_auc_score
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 
-from ..Models.gp_model import EmbEvaluatorHead, gpTransformerBase, gpTransformerGlobal
+from ..Models.gp_model import (
+    EmbEvaluatorHead,
+    gpTransformerBase,
+    gpTransformerGlobal,
+)
 from ..Utils.losses import compute_count_loss, compute_gp_similarity_loss
 from ..Utils.utils import (
     CosineLRwithWarmUp,
@@ -517,11 +521,21 @@ class gpBase(pl.LightningModule):
 
     def configure_optimizers(self):
         params = list(self.model.named_parameters())
-        
-        if isinstance(self.model, gpTransformerGlobal) and self.model.adversarial_labels is not None:
-            clf_heads_to_exclude = [self.model.supervised_tasks[label] for label in self.model.adversarial_labels]
-            for clf_head_i in clf_heads_to_exclude: 
-                params = [(name, param) for name, param in params if f'clf_head.{clf_head_i}' not in name]
+
+        if (
+            isinstance(self.model, gpTransformerGlobal)
+            and self.model.adversarial_labels is not None
+        ):
+            clf_heads_to_exclude = [
+                self.model.supervised_tasks[label]
+                for label in self.model.adversarial_labels
+            ]
+            for clf_head_i in clf_heads_to_exclude:
+                params = [
+                    (name, param)
+                    for name, param in params
+                    if f'clf_head.{clf_head_i}' not in name
+                ]
 
         def get_lr_for_param(name):
             """Determine the learning rate for a parameter based on its name."""
@@ -606,8 +620,6 @@ class gpGlobal(gpBase):
         total_n_genes: int = 20_000,
         n_condition_combined: int = 1,  # number of batches for zinb and nb
         test_random_baseline: bool = False,
-        lr_adv: Optional[float] = None,
-        freq_adv: int = 1, # number of adversarial steps per main step
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -618,8 +630,6 @@ class gpGlobal(gpBase):
         self.total_n_genes = total_n_genes
         self.n_condition_combined = n_condition_combined
         self.test_random_baseline = test_random_baseline
-        self.lr_adv = lr_adv
-        self.freq_adv = freq_adv
 
         if self.global_loss == 'supervised':
             if isinstance(lambda_clf_loss, int) or isinstance(lambda_clf_loss, float):
@@ -664,67 +674,24 @@ class gpGlobal(gpBase):
             if self.global_loss == 'reconstruction':
                 setattr(self, f'{stage}_true_counts_list', [])
                 setattr(self, f'{stage}_pred_counts_list', [])
-                
-        if self.model.adversarial_labels is not None:
-            self.automatic_optimization = False
-            self.adversarial_training = True
-            
-            if not self.global_loss == 'supervised':
-                raise ValueError('Must be doing supervised training for adversarial labels.')
-            
-        else:
-            self.adversarial_training = False
 
     def training_step(self, batch, batch_idx):
-        
-        if self.adversarial_training:
-            
-            output = self.forward(batch, masking=True)
-            
-        
-        else:
-            
-            output = self.forward(batch, masking=True)
+        output = self.forward(batch, masking=True)
 
-            loss_base = self.compute_gp_loss(batch, output)
+        loss_base = self.compute_gp_loss(batch, output)
 
-            if self.calc_gp_loss:
-                self.log_gp_loss(loss_base['loss_per_gp'])
+        if self.calc_gp_loss:
+            self.log_gp_loss(loss_base['loss_per_gp'])
 
-            if self.global_loss == 'supervised':
-                clf_loss = self.compute_supervised_loss(output, batch, stage='train')
-                loss = loss_base['total_loss'] + clf_loss['total_loss']
+        if self.global_loss == 'supervised':
+            clf_loss = self.compute_supervised_loss(output, batch, stage='train')
+            loss = loss_base['total_loss'] + clf_loss['total_loss']
 
-                # Log losses
-                for t in self.model.supervised_tasks:
-                    self.log(
-                        f'train/{t}_loss',
-                        clf_loss[t],
-                        on_step=True,
-                        on_epoch=True,
-                        prog_bar=True,
-                        logger=True,
-                        sync_dist=True,
-                    )
-
-            elif self.global_loss == 'masking':
-                cell_masking_loss = F.cross_entropy(
-                    output['gp_logits_lm'].reshape(-1, output['gp_logits_lm'].shape[-1]),
-                    output['gp_labels'].reshape(-1),
-                )
-
-                loss = loss_base['total_loss'] + cell_masking_loss
-
-            elif self.global_loss == 'reconstruction':
-                reconstruction_loss = self.compute_reconstruction_loss(
-                    batch, output, stage='train'
-                )
-                loss = loss_base['total_loss'] + reconstruction_loss
-
-                # log loss
+            # Log losses
+            for t in self.model.supervised_tasks:
                 self.log(
-                    f'train/{self.model.reconstruction_loss}_loss',
-                    reconstruction_loss,
+                    f'train/{t}_loss',
+                    clf_loss[t],
                     on_step=True,
                     on_epoch=True,
                     prog_bar=True,
@@ -732,15 +699,42 @@ class gpGlobal(gpBase):
                     sync_dist=True,
                 )
 
+        elif self.global_loss == 'masking':
+            cell_masking_loss = F.cross_entropy(
+                output['gp_logits_lm'].reshape(-1, output['gp_logits_lm'].shape[-1]),
+                output['gp_labels'].reshape(-1),
+            )
+
+            loss = loss_base['total_loss'] + cell_masking_loss
+
+        elif self.global_loss == 'reconstruction':
+            reconstruction_loss = self.compute_reconstruction_loss(
+                batch, output, stage='train'
+            )
+            loss = loss_base['total_loss'] + reconstruction_loss
+
+            # log loss
             self.log(
-                'train/loss',
-                loss,
+                f'train/{self.model.reconstruction_loss}_loss',
+                reconstruction_loss,
                 on_step=True,
                 on_epoch=True,
                 prog_bar=True,
                 logger=True,
                 sync_dist=True,
             )
+
+        self.log(
+            'train/loss',
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+
+        return loss
 
     def on_train_epoch_end(self):
         # reset step_output
@@ -1059,38 +1053,167 @@ class gpGlobal(gpBase):
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         return reconstruction_loss
-    
-    def configure_optimizers(self,):
-        
-        if self.adversarial_training:
-        
-            clf_heads_adversarial = [self.model.supervised_tasks[label] for label in self.model.adversarial_labels]
-            params = list(self.model.named_parameters())
-            params_adv = []
-            
-            params = [(name, param) for name, param in params if f'clf_head.{clf_head_i}' in name]
-            
-            for clf_head_i in clf_heads_adversarial: 
-                params_adv += [param for name, param in params if f'clf_head.{clf_head_i}' in name]
-                
-            lr_adv = self.lr_adv or self.lr
-            optimizer_adv = self.optimizer_class(
-                params_adv, lr=lr_adv, weight_decay=self.weight_decay
+
+
+class gpGlobalAdversarial(gpGlobal):
+    """Train with adversarial supervised labels."""
+
+    def __init__(
+        self,
+        lambda_adv_loss: float = 0.1,
+        lr_adv: Optional[float] = None,
+        freq_adv: int = 1,  # number of adversarial steps per main step
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        if not self.global_loss == 'supervised':
+            raise ValueError(
+                'Must be doing supervised training for adversarial labels.'
             )
-            optimizer_dict_base = super().configure_optimizers()
-            scheduler_adv = dict(optimizer_dict_base['lr_scheduler']).copy()
-            
-            return [
-                optimizer_dict_base,
-                {
-                    'optimizer': optimizer_adv,
-                    'lr_scheduler': scheduler_adv,
-                }
-            ]
-            
+
+        self.lr_adv = lr_adv
+        self.freq_adv = freq_adv
+        self.lambda_adv_loss = lambda_adv_loss
+        self.automatic_optimization = False
+        self.adversarial_training = True
+        self.supervised_main_tasks = [
+            t
+            for t in self.model.supervised_tasks
+            if t not in self.model.adversarial_labels
+        ]
+        self.supervised_adv_tasks = self.model.adversarial_labels
+
+    def training_step(self, batch, batch_idx):
+        # Note: Does not calculate gp loss
+        # Note: Assumes that the scheduler updates at every train step
+
+        output = self.forward(batch, masking=True)
+
+        opt_main, opt_adv = self.optimizers()
+        sched_main, sched_adv = self.lr_schedulers()
+
+        # main step: optimize encoder and main clf_head(s)
+        if batch_idx % (1 + self.freq_adv) == 0:
+            clf_loss = self.compute_supervised_loss(
+                output, batch, stage='train', tasks=self.supervised_main_tasks
+            )
+            adversarial_loss = self.compute_adversarial_loss(output)
+
+            loss = clf_loss['total_loss'] + adversarial_loss
+            opt_main.zero_grad()
+            loss.backward()
+            sched_main.step()
+
+            # Log losses
+            for t in self.supervised_main_tasks:
+                self.log(
+                    f'train/{t}_loss',
+                    clf_loss[t],
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+
+            self.log(
+                'train/adversarial_loss',
+                adversarial_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+
+        # adv step: optimize adversarial clf_head(s)
         else:
-            
-            return super().configure_optimizers()
+            clf_loss_adv = self.compute_supervised_loss(
+                output, batch, stage='train', tasks=self.supervised_adv_tasks
+            )
+            loss = clf_loss_adv['total_loss']
+            opt_adv.zero_grad()
+            loss.backward()
+            sched_adv.step()
+
+            # Log losses
+            for t in self.supervised_adv_tasks:
+                self.log(
+                    f'train/{t}_loss',
+                    clf_loss[t],
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
+
+    def compute_supervised_loss(self, output, batch, stage, tasks):
+        clf_loss_dict = {}
+        loss = 0
+
+        for t in tasks:
+            clf_loss = F.cross_entropy(output[f'logits_{t}'], batch[t])
+            clf_loss_dict[t] = clf_loss
+            loss += self.lambda_clf_loss[t] * clf_loss
+
+            # track for calculating accuracy
+            getattr(self, f'{stage}_clf_pred')[t].append(
+                torch.argmax(output[f'logits_{t}'], dim=1)
+            )
+            getattr(self, f'{stage}_clf_true')[t].append(batch[t])
+
+        clf_loss_dict['total_loss'] = loss
+
+        return clf_loss_dict
+
+    def compute_adversarial_loss(self, output):
+        """Maximizes entropy of the logits."""
+        adv_loss_dict = {}
+        loss = 0
+
+        eps = 1e-8
+
+        for t in self.model.supervised_tasks:
+            if t in self.model.adversarial_labels:
+                logits = cast(torch.Tensor, output[f'logits_{t}'])
+                logits = logits.softmax(dim=-1)
+                adv_loss = (logits * (logits + eps).log()).sum(-1).mean(0)
+                adv_loss_dict[t] = adv_loss
+                loss += self.lambda_adv_loss * adv_loss
+
+        return loss
+
+    def configure_optimizers(self):
+        clf_heads_adversarial = [
+            self.model.supervised_tasks[t] for t in self.supervised_adv_tasks
+        ]
+        params = list(self.model.named_parameters())
+        params_adv = []
+
+        for clf_head_i in clf_heads_adversarial:
+            params_adv += [
+                param for name, param in params if f'clf_head.{clf_head_i}' in name
+            ]
+
+        lr_adv = self.lr_adv or self.lr
+        optimizer_adv = self.optimizer_class(
+            params_adv, lr=lr_adv, weight_decay=self.weight_decay
+        )
+        optimizer_dict_base = super().configure_optimizers()
+        scheduler_adv = dict(optimizer_dict_base['lr_scheduler']).copy()
+
+        return [
+            {
+                'optimizer': optimizer_dict_base['optimizer'],
+                'lr_scheduler': optimizer_dict_base['lr_scheduler'],
+            },
+            {
+                'optimizer': optimizer_adv,
+                'lr_scheduler': scheduler_adv,
+            },
+        ]
 
 
 # ------------------------------------------------------
