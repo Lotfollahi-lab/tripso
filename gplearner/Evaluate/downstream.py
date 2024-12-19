@@ -13,8 +13,10 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import phate
 import pytorch_lightning as pl
 import scanpy as sc
+import scprep
 import seaborn as sns
 import torch
 from captum.attr import GuidedGradCam
@@ -2026,4 +2028,69 @@ def visualize_cosine_similarity(
     if save_to:
         plt.savefig(save_to)
 
+    plt.show()
+
+
+# -------------------------------------------
+# Phate
+# -------------------------------------------
+
+
+def compute_phate(adata, n_components=2):
+    phate_operator = phate.PHATE(n_components=n_components)
+    data_phate = phate_operator.fit_transform(adata.X)
+    return data_phate
+
+
+def plot_phate(
+    data_phate, adata, label, label_order, output_file, color_map='Spectral'
+):
+    # Desired fixed order of categories
+    fixed_order = [c for c in label_order if c in adata.obs[label].unique()]
+
+    # Ensure 'ct_broad' is a simple Series (not MultiIndex)
+    cell_label = adata.obs[label].values  # Extract as a 1D array
+
+    # Convert 'ct_broad' to a pandas Categorical with the fixed order
+    cell_label = pd.Categorical(cell_label, categories=fixed_order, ordered=True)
+
+    # Get unique categories based on the fixed order
+    unique_categories = fixed_order
+
+    # Generate a colormap and normalize it based on the number of unique categories
+    if color_map is None:
+        cmap = plt.get_cmap()  # Use default colormap
+    else:
+        cmap = plt.get_cmap(color_map)
+    norm = plt.Normalize(vmin=0, vmax=len(unique_categories) - 1)
+
+    # Map each category to a color
+    colors = [cmap(norm(i)) for i in range(len(unique_categories))]
+
+    # Create a dictionary mapping categories to colors
+    category_color_map = dict(zip(unique_categories, colors))
+
+    # Apply the colors in the scatter plot
+    # Convert 'ct_broad' to color labels based on the category_color_map
+    color_labels = np.array([category_color_map[category] for category in cell_label])
+
+    plt.rcdefaults()
+
+    scprep.plot.scatter2d(
+        data_phate,
+        c=color_labels,  # Use the mapped colors directly
+        ticks=False,
+        legend=False,
+    )  # Disable automatic legend
+
+    # Manually create the legend with the correct colors and fixed order
+    for category, color in category_color_map.items():
+        plt.scatter([], [], label=category, color=color)
+
+    plt.legend(loc='upper left', bbox_to_anchor=(1, 1))
+
+    # Save the plot as a PDF
+    plt.savefig(output_file, format='pdf', bbox_inches='tight')  # Save plot to PDF
+
+    # Show plot
     plt.show()

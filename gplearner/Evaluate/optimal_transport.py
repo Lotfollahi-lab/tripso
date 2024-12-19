@@ -1,15 +1,17 @@
+import anndata as ad
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import scanpy as sc
 import seaborn as sns
 from matplotlib.colors import ListedColormap
 from ott.geometry import pointcloud
 from ott.problems.linear import linear_problem
 from ott.solvers.linear import sinkhorn
+from scipy.optimize import linear_sum_assignment
 from scipy.sparse import issparse
 from scipy.spatial.distance import cdist
-from scipy.stats import chi2_contingency
 from sklearn.cluster import KMeans
 
 
@@ -91,92 +93,21 @@ def wrangle_mapping(
     return mapping
 
 
-def make_contigency_table(mapping, axis='row', fig_size=(10, 6)):
-    """
-    Analyze a mapping DataFrame by assigning labels from source A to source B
-    (row-wise or column-wise), creating a crosstabulation, and performing a
-    chi-square test, while visualizing the crosstab as a heatmap.
-
-    Parameters:
-        mapping (pd.DataFrame): The DataFrame where indices represent source A
-        and columns represent source B.
-        axis (str): Analysis direction, either 'row' or 'column'. Default is 'row'.
-
-    Returns:
-        None
-    """
-    if axis not in ['row', 'column']:
-        raise ValueError("Axis must be either 'row' or 'column'")
-
-    # Determine the axis to work on
-    if axis == 'row':
-        max_labels = mapping.idxmax(
-            axis=1
-        )  # Get the label of source B with max value for each row
-        crosstab = pd.crosstab(index=mapping.index, columns=max_labels)
-    else:
-        max_labels = mapping.idxmax(
-            axis=0
-        )  # Get the label of source A with max value for each column
-        crosstab = pd.crosstab(index=max_labels, columns=mapping.columns)
-
-    # Plot the crosstabulation table as a heatmap
-    plt.figure(figsize=fig_size)
-    sns.heatmap(crosstab, annot=True, fmt='d', cmap='Blues')
-    plt.title('Crosstab Heatmap')
-    plt.xlabel('Target')
-    plt.ylabel('Source')
-    plt.show()
-
-    # Perform chi-square test
-    chi2, p_value, dof, expected = chi2_contingency(crosstab)
-
-    print('\nChi-square test results:')
-    print(f'Chi-square statistic: {chi2}')
-    print(f'Degrees of freedom: {dof}')
-    print(f'P-value: {p_value}')
-
-
-def view_mapping(mapping, normalize_by=None, fig_size=(6, 4)):
-    '''
-    Visualize the mapping DataFrame as a heatmap.
-    '''
-
-    # Reshape and aggregate using pivot_table
-    summary_df = mapping.stack().reset_index()  # Reshape to long format
-    summary_df.columns = ['index', 'column', 'value']
-    summary_df = summary_df.groupby(['index', 'column']).sum()
-    summary_df = summary_df.unstack(fill_value=0)  # Aggregate and reshape back
-    summary_df.columns = summary_df.columns.droplevel(
-        0
-    )  # Drop the multi-level column index
-
-    # Optionally normalize
-    if normalize_by == 'row':
-        summary_df = summary_df.div(summary_df.sum(axis=1), axis=0)
-        title = 'Aggregated transport plan \nNormalized by row'
-    if normalize_by == 'column':
-        summary_df = summary_df.div(summary_df.sum(axis=0), axis=1)
-        title = 'Aggregated transport plan \nNormalized by column'
-
-    # Create a heatmap
-    plt.figure(figsize=fig_size)
-    sns.heatmap(summary_df, annot=True, fmt='.1f', cmap='viridis', cbar=True)
-
-    # Add labels and title
-    plt.title(title)
-    plt.xlabel('Target labels')
-    plt.ylabel('Source labels')
-    plt.show()
-
-
 def compute_point_cloud_mapping(
     x: jnp.ndarray,
     y: jnp.ndarray,
     matrix: jnp.ndarray,
+    adata: ad.AnnData,
+    label_col: str,
     threshold=1e-7,
 ):
-    """Compute the lines representing the mapping between the 2 point clouds."""
+    """
+    Compute the lines representing the mapping between the 2 point clouds.
+    From
+    https://github.com/ott-jax/ott/blob/main/src/ott/tools/plot.py#L136
+
+    Modified to extract cell labels from AnnData object
+    """
     # Only plot the lines with a cost above the threshold.
     u, v = jnp.where(matrix > threshold)
     c = matrix[jnp.where(matrix > threshold)]
@@ -191,6 +122,7 @@ def compute_point_cloud_mapping(
         scale_alpha_by_coupling = max_matrix != min_matrix
 
     result = []
+    mapping_output = []
 
     for i in range(xy.shape[0]):
         strength = jnp.max(jnp.array(matrix.shape)) * c[i]
@@ -206,51 +138,175 @@ def compute_point_cloud_mapping(
         start, end = xy[i, [0, 2]], xy[i, [1, 3]]
         result.append((start, end, strength, alpha))
 
-    return result
+        # Use adata UMAP coordinates to get labels
+        start_i = np.asarray(start)
+        end_i = np.asarray(end)
+        start_adata = adata[
+            (adata.obsm['X_umap'][:, 0] == start_i[0])
+            & (adata.obsm['X_umap'][:, 1] == end_i[0])
+        ]
+        end_adata = adata[
+            (adata.obsm['X_umap'][:, 0] == start_i[1])
+            & (adata.obsm['X_umap'][:, 1] == end_i[1])
+        ]
+
+        ct1 = start_adata.obs[label_col].values[0]
+        ct2 = end_adata.obs[label_col].values[0]
+
+        idx1 = start_adata.obs['idx'].values[0]
+        idx2 = end_adata.obs['idx'].values[0]
+
+        coupling = np.asarray(c[i])
+        ns = np.asarray(normalized_strength)
+        mapping_output.append([idx1, ct1, idx2, ct2, coupling, ns])
+
+    mapping_df = pd.DataFrame(mapping_output)
+    mapping_df.columns = [
+        'idx1',
+        'source',
+        'idx2',
+        'target',
+        'coupling',
+        'normalized_strength',
+    ]
+
+    return result, mapping_df
 
 
-def compute_centroid_mapping(adata, col, ref, target, num_clusters=10, threshold=1e-8):
+def compute_centroid_mapping(
+    adata,
+    col,
+    ref,
+    target,
+    label_col,
+    num_clusters=10,
+    resolution=1,
+    threshold=1e-8,
+    epsilon=1e-3,
+    tau_a=0.999,
+    tau_b=0.999,
+    return_mapping=False,
+    cluster_algo=None,
+    cluster_col=None,
+):
     # Data preparation
     X = adata[adata.obs[col] == ref].X
     Y = adata[adata.obs[col] == target].X
 
-    # Clustering: Find centroids
-    num_clusters = num_clusters
-    kmeans_ref = KMeans(n_clusters=num_clusters, random_state=0).fit(X)
-    kmeans_query = KMeans(n_clusters=num_clusters, random_state=0).fit(Y)
+    adata_ref = adata[adata.obs[col] == ref].copy()
+    adata_target = adata[adata.obs[col] == target].copy()
 
-    # Get cluster centroids
-    centroids_ref = kmeans_ref.cluster_centers_
-    centroids_query = kmeans_query.cluster_centers_
+    # ----------------------------------------------------------------------
+    # Optionally find cluster centroids
+    # ----------------------------------------------------------------------
 
-    # Find the actual points closest to centroids
-    closest_ref_idx = [np.argmin(cdist(X, [centroid])) for centroid in centroids_ref]
-    closest_query_idx = [
-        np.argmin(cdist(Y, [centroid])) for centroid in centroids_query
-    ]
+    if cluster_algo == 'knn':
+        num_clusters = num_clusters
+        kmeans_ref = KMeans(n_clusters=num_clusters, random_state=0).fit(X)
+        kmeans_query = KMeans(n_clusters=num_clusters, random_state=0).fit(Y)
 
-    # Ensure indices are integers (avoid issues with .iloc)
-    closest_ref_idx = np.array(closest_ref_idx, dtype=int)
-    closest_query_idx = np.array(closest_query_idx, dtype=int)
+        # Get cluster centroids
+        centroids_ref = kmeans_ref.cluster_centers_
+        centroids_query = kmeans_query.cluster_centers_
 
-    # Extract indices from the 'source' condition in the AnnData object
-    source_idx = (
-        adata.obs.loc[adata.obs[col] == ref, 'idx'].iloc[closest_ref_idx].values
+    elif cluster_algo == 'leiden':
+        # Leiden clustering for reference condition
+        sc.pp.neighbors(adata_ref, use_rep='X')  # use the existing data in .X
+        sc.tl.leiden(adata_ref, resolution=resolution, key_added='leiden')
+
+        # Leiden clustering for target condition
+        sc.pp.neighbors(adata_target, use_rep='X')  # use the existing data in .X
+        sc.tl.leiden(adata_target, resolution=resolution, key_added='leiden')
+
+        # Get unique cluster identifiers
+        clusters_ref = adata_ref.obs['leiden'].astype(int).unique()
+        clusters_target = adata_target.obs['leiden'].astype(int).unique()
+
+        # Calculate centroids for each cluster in the reference and target
+        centroids_ref = np.array(
+            [
+                X[adata_ref.obs['leiden'].astype(int) == cluster].mean(axis=0)
+                for cluster in clusters_ref
+            ]
+        )
+        centroids_query = np.array(
+            [
+                Y[adata_target.obs['leiden'].astype(int) == cluster].mean(axis=0)
+                for cluster in clusters_target
+            ]
+        )
+
+    elif cluster_algo == 'precomputed':
+        # Get unique cluster identifiers
+        if cluster_col not in adata.obs.columns:
+            raise ValueError(
+                'Please provide a `cluster_col` argument'
+                'with the values of precomputed clusters.'
+            )
+        clusters_ref = adata_ref.obs[cluster_col].unique()
+        clusters_target = adata_target.obs[cluster_col].unique()
+
+        # Calculate centroids for each cluster in the reference and target
+        centroids_ref = np.array(
+            [
+                X[adata_ref.obs[cluster_col] == cluster].mean(axis=0)
+                for cluster in clusters_ref
+            ]
+        )
+        centroids_query = np.array(
+            [
+                Y[adata_target.obs[cluster_col] == cluster].mean(axis=0)
+                for cluster in clusters_target
+            ]
+        )
+
+    if cluster_algo is not None:
+        # Find the actual points closest to centroids
+        closest_ref_idx = [
+            np.argmin(cdist(X, [centroid])) for centroid in centroids_ref
+        ]
+        closest_query_idx = [
+            np.argmin(cdist(Y, [centroid])) for centroid in centroids_query
+        ]
+
+        # Ensure indices are integers (avoid issues with .iloc)
+        closest_ref_idx = np.array(closest_ref_idx, dtype=int)
+        closest_query_idx = np.array(closest_query_idx, dtype=int)
+
+        # Extract indices from the 'source' condition in the AnnData object
+        source_idx = (
+            adata.obs.loc[adata.obs[col] == ref, 'idx'].iloc[closest_ref_idx].values
+        )
+        target_idx = (
+            adata.obs.loc[adata.obs[col] == target, 'idx']
+            .iloc[closest_query_idx]
+            .values
+        )
+
+        # Create a subset of the AnnData object containing these indices
+        combined_indices = np.concatenate([source_idx, target_idx])
+        adata_centroid = adata[adata.obs['idx'].isin(combined_indices)].copy()
+
+    # ----------------------------------------------------------------------
+    # Match syntax for centroid-based analysis
+    # ----------------------------------------------------------------------
+
+    else:
+        adata_centroid = adata
+        closest_ref_idx = None
+        closest_query_idx = None
+
+    # ----------------------------------------------------------------------
+    # Compute optimal transport
+    # ----------------------------------------------------------------------
+
+    ot_out = compute_sinkhorn(
+        adata_centroid, col, ref, target, epsilon=epsilon, tau_a=tau_a, tau_b=tau_b
     )
-    target_idx = (
-        adata.obs.loc[adata.obs[col] == target, 'idx'].iloc[closest_query_idx].values
-    )
 
-    # Create a subset of the AnnData object containing these indices
-    combined_indices = np.concatenate([source_idx, target_idx])
-    adata_centroid = adata[adata.obs['idx'].isin(combined_indices)].copy()
+    print('Sinkhorn algorithm converged?', ot_out.converged)
 
-    # Output the shape of the new AnnData object
-    ot_out = compute_sinkhorn(adata_centroid, col, ref, target)
-
-    print('Converged?', ot_out.converged)
-
-    # Extract full UMAP coordinates
+    # Extract UMAP coordinates
     ref_umap = adata_centroid[adata_centroid.obs[col] == ref].obsm['X_umap']
     target_umap = adata_centroid[adata_centroid.obs[col] == target].obsm['X_umap']
 
@@ -258,11 +314,185 @@ def compute_centroid_mapping(adata, col, ref, target, num_clusters=10, threshold
     target_umap_jnp = jnp.array(target_umap)
 
     # Apply the modified mapping for point cloud alignment
-    point_map_centroid = compute_point_cloud_mapping(
-        ref_umap_jnp, target_umap_jnp, ot_out.matrix, threshold=threshold
+    point_map_centroid, mapping_df = compute_point_cloud_mapping(
+        ref_umap_jnp,
+        target_umap_jnp,
+        ot_out.matrix,
+        adata,
+        label_col,
+        threshold=threshold,
     )
 
-    return point_map_centroid, closest_ref_idx, closest_query_idx
+    # check dtype of output
+    mapping_df['coupling'] = mapping_df['coupling'].astype(float)
+
+    if return_mapping:
+        return (
+            point_map_centroid,
+            closest_ref_idx,
+            closest_query_idx,
+            mapping_df,
+            ot_out,
+        )
+    else:
+        point_map_centroid, closest_ref_idx, closest_query_idx, mapping_df
+
+
+# --------------------------------------------
+#  Heatmaps
+# --------------------------------------------
+
+
+def make_contingency_table(
+    df,
+    by='source',
+    labels_source=None,
+    labels_target=None,
+    use_label_order=False,
+    fig_size=(6, 5),
+    save_to=None,
+):
+    """
+    Processes the dataframe to keep only the row
+    with the largest 'coupling' for each 'idx1',
+    then computes the crosstabulation of 'source' and 'target',
+
+    Parameters:
+    df (pd.DataFrame): The input DataFrame with columns
+        ['idx1', 'source', 'idx2', 'target', 'coupling', 'normalized_strength']
+
+    by (str): Specifies whether to group by 'source' or 'target'
+
+    labels_source (list): The list of source labels to include in the crosstabulation
+
+    labels_target (list): The list of target labels to include in the crosstabulation
+
+    use_label_order (bool): Specifies whether to use the order of
+        labels_source and labels_target
+
+    fig_size (tuple): The size of the figure
+
+    save_to (str): The path to save the figure
+
+    """
+    if by == 'source':
+        idx_col = 'idx1'
+    elif by == 'target':
+        idx_col = 'idx2'
+
+    # Step 1: Keep the row with the largest 'coupling' for each 'idx1'
+    df_largest_coupling = df.loc[df.groupby(idx_col)['coupling'].idxmax()]
+
+    # Step 2: Create a crosstabulation of 'source' and 'target'
+    crosstab = pd.crosstab(df_largest_coupling['source'], df_largest_coupling['target'])
+
+    # Step 3: Ensure all values from order_source and order_target
+    # are included in the crosstab
+    if labels_source:
+        missing_sources = set(labels_source) - set(crosstab.index)
+        for source in missing_sources:
+            crosstab.loc[source] = 0
+
+        crosstab.index = pd.CategoricalIndex(
+            crosstab.index, categories=labels_source, ordered=True
+        )
+        crosstab = crosstab.sort_index(axis=0)
+
+    if labels_target:
+        missing_targets = set(labels_target) - set(crosstab.columns)
+        for target in missing_targets:
+            crosstab[target] = 0
+
+        if use_label_order:
+            crosstab.columns = pd.CategoricalIndex(
+                crosstab.columns, categories=labels_target, ordered=True
+            )
+            crosstab = crosstab.sort_index(axis=1)
+
+    # Step 4: Reorganize the crosstab to maximize the diagonal
+    # using the Hungarian algorithm
+    if not use_label_order:
+        cost_matrix = (
+            -crosstab.values
+        )  # We negate the matrix since we want to maximize the diagonal
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+        # Reorder columns based on the result of the Hungarian algorithm
+        ordered_targets = crosstab.columns[col_ind]
+
+        crosstab = crosstab.loc[:, ordered_targets]
+
+    # Step 5: Plot the crosstabulation table as a heatmap
+    plt.figure(figsize=fig_size)
+    sns.heatmap(crosstab, annot=True, fmt='d', cmap='Blues')
+    plt.xlabel('Target')
+    plt.ylabel('Source')
+    plt.tight_layout()
+
+    if save_to:
+        plt.savefig(save_to)
+
+    plt.show()
+
+    # Step 6: Perform chi-square test
+    if labels_target:
+        crosstab = crosstab.loc[:, crosstab.columns.isin(labels_target)]
+    if labels_source:
+        crosstab = crosstab.loc[crosstab.index.isin(labels_source), :]
+
+
+def plot_mapping_heatmap(
+    mapping_df, order_source=None, order_target=None, normalize=None, fig_size=(6, 5)
+):
+    """
+    Plots a heatmap of the given data, with an option to normalize rows or columns.
+
+    Parameters:
+    heatmap_data (pd.DataFrame): The data to plot in the heatmap.
+    normalize (str): Specifies whether to normalize rows, columns, or none.
+                     Options are 'rows', 'columns', or 'none'.
+    """
+    # Pivot
+    heatmap_data = mapping_df.pivot_table(
+        index='source', columns='target', values='coupling', aggfunc='sum'
+    ).fillna(0)
+
+    # Order source
+    if order_source:
+        heatmap_data.index = pd.CategoricalIndex(
+            heatmap_data.index, categories=order_source, ordered=True
+        )
+        heatmap_data = heatmap_data.sort_index(axis=0)
+
+    # Order target
+    if order_target:
+        heatmap_data.columns = pd.CategoricalIndex(
+            heatmap_data.columns, categories=order_target, ordered=True
+        )
+        heatmap_data = heatmap_data.sort_index(axis=1)
+
+    # Ensure the data is numeric
+    heatmap_data = heatmap_data.apply(pd.to_numeric, errors='coerce')
+    heatmap_data = heatmap_data.astype(float)
+
+    # Normalize rows or columns if specified
+    if normalize == 'row':
+        heatmap_data = heatmap_data.div(heatmap_data.sum(axis=1), axis=0)
+    elif normalize == 'column':
+        heatmap_data = heatmap_data.div(heatmap_data.sum(axis=0), axis=1)
+
+    # Create the heatmap
+    plt.figure(figsize=fig_size)
+    sns.heatmap(heatmap_data, annot=True, fmt='.1f', cmap='viridis', cbar=True)
+
+    # Add labels and title
+    if normalize:
+        plt.title(f'Transport plan, \nnormalized by {normalize}')
+    else:
+        plt.title('Transport plan')
+    plt.xlabel('Target labels')
+    plt.ylabel('Source labels')
+    plt.show()
 
 
 # --------------------------------------------
@@ -434,6 +664,7 @@ def plot_umap_with_centroids(
     point_map=None,
     closest_ref_idx=None,
     closest_query_idx=None,
+    show_legend=True,
 ):
     # Prepare data
     ref_adata = prepare_adata(adata, col, ref, ref_label, ref_label_order)
@@ -463,16 +694,18 @@ def plot_umap_with_centroids(
     plot_umap_scatter(ax, target_umap, target_colors, target_cmap, 'Target')
     plot_point_connections(ax, point_map, set_alpha)
 
-    # Highlight selected centroids
+    # Highlight selected centroids and add labels
     if closest_ref_idx is not None:
         ref_highlight_coords = ref_umap[closest_ref_idx, :]
-        ref_labels = ref_adata.obs[ref_label][closest_ref_idx]
+        ref_labels = ref_adata.obs[ref_label].iloc[closest_ref_idx].values
 
         if ref_cluster_colors is not None:
-            ref_highlight_color = [
-                ref_cluster_colors[ref_categories.tolist().index(label)]
-                for label in ref_labels
-            ]
+            ref_highlight_color = np.array(
+                [
+                    ref_cluster_colors[ref_categories.tolist().index(label)]
+                    for label in ref_labels
+                ]
+            )
         else:
             ref_highlight_color = 'gold'
 
@@ -486,15 +719,30 @@ def plot_umap_with_centroids(
             label='Selected Reference Points',
         )
 
+        # Add small text labels below the centroid points
+        for i, (x, y) in enumerate(ref_highlight_coords):
+            ax.text(
+                x,
+                y - 0.08,  # Shift the text a bit below the centroid
+                ref_labels[i],
+                color='black',
+                fontsize=12,
+                ha='center',
+                va='top',
+            )
+
     if closest_query_idx is not None:
         query_highlight_coords = target_umap[closest_query_idx, :]
-        query_labels = target_adata.obs[target_label][closest_query_idx]
+        query_labels = target_adata.obs[target_label].iloc[closest_query_idx].values
 
         if target_cluster_colors is not None:
-            query_highlight_color = [
-                target_cluster_colors[target_categories.tolist().index(label)]
-                for label in query_labels
-            ]
+            query_highlight_color = np.array(
+                [
+                    target_cluster_colors[target_categories.tolist().index(label)]
+                    for label in query_labels
+                ]
+            )
+
         else:
             query_highlight_color = 'lime'
 
@@ -508,15 +756,28 @@ def plot_umap_with_centroids(
             label='Selected Query Points',
         )
 
+        # Add small text labels below the centroid points
+        for i, (x, y) in enumerate(query_highlight_coords):
+            ax.text(
+                x,
+                y - 0.08,  # Shift the text a bit below the centroid
+                query_labels[i],
+                color='black',
+                fontsize=12,
+                ha='center',
+                va='top',
+            )
+
     # Legend
-    legend_elements = build_legend_elements(
-        ref_categories, ref_cluster_colors, 'Source'
-    )
-    legend_elements += build_legend_elements(
-        target_categories, target_cluster_colors, 'Target'
-    )
-    if legend_elements:
-        ax.legend(handles=legend_elements, loc='best', fontsize=12)
+    if show_legend:
+        legend_elements = build_legend_elements(
+            ref_categories, ref_cluster_colors, 'Source'
+        )
+        legend_elements += build_legend_elements(
+            target_categories, target_cluster_colors, 'Target'
+        )
+        if legend_elements:
+            ax.legend(handles=legend_elements, loc='best', fontsize=12)
 
     # Final touches
     ax.set_xlabel('UMAP1', fontsize=14)
