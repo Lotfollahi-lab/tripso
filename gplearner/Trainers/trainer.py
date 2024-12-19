@@ -209,16 +209,6 @@ class gpBase(pl.LightningModule):
         self.split_label = split_label
         self.set_gpfinder_weight_decay = set_gpfinder_weight_decay
 
-        # Initialise list to append loss and accuracy
-        for stage in ['train', 'val', 'test']:
-            setattr(self, f'{stage}_loss_per_gp', {})
-            setattr(self, f'{stage}_mgm_gene_pred', {})
-            setattr(self, f'{stage}_mgm_gene_true', {})
-
-            setattr(self, f'{stage}_gp_similarity_loss', [])
-
-            setattr(self, f'{stage}_loss', [])
-
         self.output_dir = output_dir
 
         # For output - cells
@@ -279,13 +269,14 @@ class gpBase(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         output = self.forward(batch, masking=True)
 
-        loss_output = self.compute_gp_loss(batch, output)
-
-        loss_per_gp = loss_output['loss_per_gp']
-        loss = loss_output['total_loss']
-
         if self.calc_gp_loss:
+            loss_output = self.compute_gp_loss(batch, output)
+            loss_per_gp = loss_output['loss_per_gp']
             self.log_gp_loss(loss_per_gp)
+        else:
+            loss_output = {'total_loss': torch.tensor(0).to(self.device)}
+
+        loss = loss_output['total_loss']
 
         self.log(
             'train/loss',
@@ -300,17 +291,19 @@ class gpBase(pl.LightningModule):
         return loss
 
     def on_train_epoch_end(self):
-        # reset step_output
-        stage = 'train'
-        setattr(self, f'{stage}_mgm_gene_pred', {})
-        setattr(self, f'{stage}_mgm_gene_true', {})
-        setattr(self, f'{stage}_gp_similarity_loss', [])
-        setattr(self, f'{stage}_loss', [])
+        pass
 
     def validation_step(self, batch, batch_idx):
         output = self.forward(batch, masking=True)
 
-        loss_output = self.compute_gp_loss(batch, output)
+        if self.calc_gp_loss:
+            loss_output = self.compute_gp_loss(batch, output)
+            loss_per_gp = loss_output['loss_per_gp']
+
+            self.log_gp_loss(loss_per_gp)
+
+        else:
+            loss_output = {'total_loss': torch.tensor(0).to(self.device)}
 
         loss = loss_output['total_loss']
         perp = torch.exp(loss)
@@ -466,12 +459,10 @@ class gpBase(pl.LightningModule):
 
         for i in range(len(self.model.gp_inputs)):
             # Loss
-            if self.calc_gp_loss and (
-                (
-                    self.model.multi_gp_encoder.encoder[i]
-                    .blocks[0]
-                    .attn.qkv.weight.requires_grad
-                )
+            if (
+                self.model.multi_gp_encoder.encoder[i]
+                .blocks[0]
+                .attn.qkv.weight.requires_grad
             ):
                 loss_i = F.cross_entropy(
                     output['logits_lm_list'][i].reshape(
@@ -657,10 +648,11 @@ class gpGlobal(gpBase):
     def training_step(self, batch, batch_idx):
         output = self.forward(batch, masking=True)
 
-        loss_base = self.compute_gp_loss(batch, output)
-
         if self.calc_gp_loss:
+            loss_base = self.compute_gp_loss(batch, output)
             self.log_gp_loss(loss_base['loss_per_gp'])
+        else:
+            loss_base = {'total_loss': torch.tensor(0).to(self.device)}
 
         if self.global_loss == 'supervised':
             clf_loss = self.compute_supervised_loss(output, batch, stage='train')
@@ -779,7 +771,10 @@ class gpGlobal(gpBase):
     def validation_step(self, batch, batch_idx):
         output = self.forward(batch, masking=True)
 
-        loss_base = super().compute_gp_loss(batch, output)
+        if self.calc_gp_loss:
+            loss_base = super().compute_gp_loss(batch, output)
+        else:
+            loss_base = {'total_loss': torch.tensor(0).to(self.device)}
 
         if self.global_loss == 'supervised':
             clf_loss = self.compute_supervised_loss(output, batch, stage='val')
