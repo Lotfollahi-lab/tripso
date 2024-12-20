@@ -5,7 +5,11 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import seaborn as sns
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import (
+    ListedColormap,
+    to_hex,
+    to_rgb,
+)
 from ott.geometry import pointcloud
 from ott.problems.linear import linear_problem
 from ott.solvers.linear import sinkhorn
@@ -495,12 +499,221 @@ def plot_mapping_heatmap(
     plt.show()
 
 
+def plot_gp_assignment_heatmap(
+    leiden_to_pred: pd.DataFrame,
+    predefined_order: list,
+    x_label='Leiden Clusters',
+    y_label='Reference cell types',
+):
+    """
+    Plots a heatmap where columns are Leiden cluster indices,
+    rows are the assigned categories in a predefined order,
+    and the values of the heatmap are the number of embeddings where
+    Leiden cluster j is assigned to class i.
+
+    Parameters:
+    - leiden_to_pred: pd.DataFrame, where columns are embedding names,
+        values are assigned classes,
+        and the index are Leiden clusters.
+    - predefined_order: list of assigned categories
+        in the order you want them to appear on the y-axis.
+    """
+
+    # Transpose DataFrame to ensure Leiden clusters are columns and embeddings are rows
+    transposed = leiden_to_pred.T
+
+    # Count the number of times each class appears for each Leiden cluster
+    category_counts = (
+        transposed.apply(lambda col: col.value_counts()).fillna(0).astype(int)
+    )
+
+    # Reindex to ensure the order of categories on the y-axis
+    category_counts = category_counts.reindex(predefined_order, axis=0).fillna(0)
+    category_counts = category_counts.astype(int)
+
+    # Optimize the order of the Leiden clusters to maximize the diagonal
+    cost_matrix = (
+        -category_counts.values
+    )  # We negate to convert maximization to minimization problem
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+    # Reorder the columns of category_counts based on the optimal assignment
+    reordered_category_counts = category_counts.iloc[:, col_ind]
+
+    # Create the heatmap
+    plt.figure(figsize=(10, 8))  # Adjust size as necessary
+    sns.heatmap(
+        reordered_category_counts,
+        annot=True,
+        fmt='d',
+        cmap='viridis',
+        cbar=True,
+        linewidths=0.5,
+    )
+
+    # Set labels and title
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+    plt.title('Heatmap of Assigned Categories')
+
+    plt.show()
+
+
+# --------------------------------------------
+#  Assign class labels to clusters
+# --------------------------------------------
+
+
+def summarize_sinkhorn_mapping(df, idx_col, input_df, cluster_col_name='leiden'):
+    '''
+
+    Inputs
+    - df: pd.DataFrame, with columns
+        ['idx1', 'source', 'idx2', 'target', 'coupling', 'normalized_strength', 'gp']
+        where 'gp' is the embedding name
+    - idx_col: str, the column name for the index column = the group to summarize by
+        For example, if idx_col = 'idx1', then we look for the target class
+        with the highest value for each value of idx1
+    - input_df: pd.DataFrame, where the index is cell indices,
+        and the columns are the input clusters labels
+
+    Outputs
+    - cluster_to_pred: pd.DataFrame, where columns are embedding names,
+        values are assigned classes,
+
+    '''
+    cluster_to_pred = pd.DataFrame(
+        index=sorted(list(input_df[cluster_col_name].unique())),
+    )
+
+    for gp in df['gp'].unique():
+        df1 = df[df['gp'] == gp]
+        topn = df1.loc[df1.groupby(idx_col)['coupling'].idxmax()]
+        topn['target'] = topn['target'].astype(int)
+
+        cluster_to_pred = cluster_to_pred.join(
+            topn[['source', 'target']]
+            .set_index('target')
+            .rename(columns={'source': gp}),
+            how='left',
+        )
+
+    return cluster_to_pred
+
+
+def get_largest_assignment_mapping(
+    leiden_to_pred: pd.DataFrame, unseen_threshold: int
+) -> dict:
+    """
+    Returns a dictionary mapping the indices (row labels eg leiden clusters)
+    to the value in the column where it has the largest assignment.
+    ** If the number of non-zero category counts for a cluster is less than
+    the unseen_threshold, the mapping for that cluster will be set to 'Unseen_{idx}'.
+
+    ** If the most common value is NaN, the mapping will be set to the second
+    most common value with the suffix 'like'.
+
+    ** If there are multiple columns tied for the maximum value, the mapping will be
+    set to the concatenated values of the tied columns.
+
+    Parameters:
+    - leiden_to_pred: pd.DataFrame, where columns are embedding names (eg GP),
+        values are assigned classes (eg cell types), and the index are input classes
+        (eg Leiden clusters)
+    - unseen_threshold: int, the minimum number of non-zero category counts
+        required for a cluster to be mapped to the column with the largest assignment.
+        IE if one cluster is mapped to no classes for > unseen_threshold embeddings,
+        it will be mapped to 'Unseen_{idx}'.
+
+    Returns:
+    - A dictionary where keys are the indices and values are the corresponding column
+        where the index has the largest assignment or 'Unseen_{idx}'
+    """
+
+    # Count the number of times each class appears for each Leiden cluster
+    df_leiden_col = leiden_to_pred.T
+
+    mapping = {}
+
+    for idx in df_leiden_col.columns:
+        value_counts = df_leiden_col[idx].value_counts(dropna=False)
+
+        # Count the number of non-zero, non-NaN entries in the column
+        non_zero_counts = (df_leiden_col[idx].notna() & (df_leiden_col[idx] != 0)).sum()
+
+        # If total number of non-zero,
+        # non-NaN values is less than threshold, assign 'Unseen_{idx}'
+        if non_zero_counts < unseen_threshold:
+            mapping[idx] = f'Unseen_{idx}'
+            continue
+
+        # If NaN is the most common value, assign 'Maybe_2nd most common value'
+        most_common_value, _ = value_counts.idxmax(), value_counts.max()
+        if pd.isna(most_common_value):  # Check if NaN is the most common
+            second_most_common_value = (
+                value_counts.index[1] if len(value_counts) > 1 else None
+            )
+            mapping[idx] = (
+                f'{second_most_common_value}_like'
+                if second_most_common_value is not None
+                else f'Unseen_{idx}'
+            )
+            continue
+
+        # Get all indices tied for the maximum count value
+        max_count = value_counts.max()
+        chosen_gp = value_counts[value_counts == max_count].index.tolist()
+
+        # If there are multiple columns tied for the maximum value, concatenate them
+        if len(chosen_gp) > 1:
+            chosen_gp = '_'.join(
+                map(str, chosen_gp)
+            )  # Convert each entry to string before concatenation
+
+        if isinstance(chosen_gp, list) and len(chosen_gp) == 1:
+            chosen_gp = chosen_gp[0]  # If it's a single item list, extract the item
+
+        mapping[idx] = chosen_gp
+
+    return mapping
+
+
 # --------------------------------------------
 #  Plotting
 # --------------------------------------------
 
 
-# Helper to encode colors
+def blend_colors(color1, color2):
+    """
+    Blend two colors to get the midpoint color.
+    Args:
+        color1 (str): Color name or hex code for the first color.
+        color2 (str): Color name or hex code for the second color.
+    Returns:
+        str: Hex code of the blended color.
+    """
+    rgb1 = to_rgb(color1)
+    rgb2 = to_rgb(color2)
+    blended_rgb = [(c1 + c2) / 2 for c1, c2 in zip(rgb1, rgb2)]
+    return to_hex(blended_rgb)
+
+
+def lighten_color(color, factor=0.5):
+    """
+    Lighten a color by blending it with white.
+    Args:
+        color (str): Color name or hex code for the color to lighten.
+        factor (float): A value between 0 and 1,
+        where 1 means no change and 0 means fully white.
+    Returns:
+        str: Hex code of the lightened color.
+    """
+    rgb = to_rgb(color)
+    white = (1, 1, 1)
+    lightened_rgb = [c * factor + (1 - factor) * w for c, w in zip(rgb, white)]
+    return to_hex(lightened_rgb)
+
+
 def encode_colors(data_obs, variable, colormap, custom_order=None):
     if variable is not None and variable in data_obs:
         if custom_order is not None:
