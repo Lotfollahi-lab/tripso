@@ -205,7 +205,6 @@ def compute_centroid_mapping(
     # ----------------------------------------------------------------------
 
     if cluster_algo == 'knn':
-        num_clusters = num_clusters
         kmeans_ref = KMeans(n_clusters=num_clusters, random_state=0).fit(X)
         kmeans_query = KMeans(n_clusters=num_clusters, random_state=0).fit(Y)
 
@@ -214,19 +213,15 @@ def compute_centroid_mapping(
         centroids_query = kmeans_query.cluster_centers_
 
     elif cluster_algo == 'leiden':
-        # Leiden clustering for reference condition
-        sc.pp.neighbors(adata_ref, use_rep='X')  # use the existing data in .X
+        sc.pp.neighbors(adata_ref, use_rep='X')
         sc.tl.leiden(adata_ref, resolution=resolution, key_added='leiden')
 
-        # Leiden clustering for target condition
-        sc.pp.neighbors(adata_target, use_rep='X')  # use the existing data in .X
+        sc.pp.neighbors(adata_target, use_rep='X')
         sc.tl.leiden(adata_target, resolution=resolution, key_added='leiden')
 
-        # Get unique cluster identifiers
         clusters_ref = adata_ref.obs['leiden'].astype(int).unique()
         clusters_target = adata_target.obs['leiden'].astype(int).unique()
 
-        # Calculate centroids for each cluster in the reference and target
         centroids_ref = np.array(
             [
                 X[adata_ref.obs['leiden'].astype(int) == cluster].mean(axis=0)
@@ -241,7 +236,6 @@ def compute_centroid_mapping(
         )
 
     elif cluster_algo == 'precomputed':
-        # Get unique cluster identifiers
         if cluster_col not in adata.obs.columns:
             raise ValueError(
                 'Please provide a `cluster_col` argument'
@@ -250,7 +244,6 @@ def compute_centroid_mapping(
         clusters_ref = adata_ref.obs[cluster_col].unique()
         clusters_target = adata_target.obs[cluster_col].unique()
 
-        # Calculate centroids for each cluster in the reference and target
         centroids_ref = np.array(
             [
                 X[adata_ref.obs[cluster_col] == cluster].mean(axis=0)
@@ -265,19 +258,35 @@ def compute_centroid_mapping(
         )
 
     if cluster_algo is not None:
-        # Find the actual points closest to centroids
-        closest_ref_idx = [
-            np.argmin(cdist(X, [centroid])) for centroid in centroids_ref
-        ]
-        closest_query_idx = [
-            np.argmin(cdist(Y, [centroid])) for centroid in centroids_query
-        ]
+        # Find the actual points closest to centroids,
+        # ensuring they belong to the respective clusters
+        closest_ref_idx = []
+        for i, centroid in enumerate(centroids_ref):
+            cluster_points = X[adata_ref.obs['leiden'].astype(int) == clusters_ref[i]]
+            cluster_indices = np.where(
+                adata_ref.obs['leiden'].astype(int) == clusters_ref[i]
+            )[0]
+            closest_point_idx = cluster_indices[
+                np.argmin(cdist(cluster_points, [centroid]))
+            ]
+            closest_ref_idx.append(closest_point_idx)
 
-        # Ensure indices are integers (avoid issues with .iloc)
+        closest_query_idx = []
+        for i, centroid in enumerate(centroids_query):
+            cluster_points = Y[
+                adata_target.obs['leiden'].astype(int) == clusters_target[i]
+            ]
+            cluster_indices = np.where(
+                adata_target.obs['leiden'].astype(int) == clusters_target[i]
+            )[0]
+            closest_point_idx = cluster_indices[
+                np.argmin(cdist(cluster_points, [centroid]))
+            ]
+            closest_query_idx.append(closest_point_idx)
+
         closest_ref_idx = np.array(closest_ref_idx, dtype=int)
         closest_query_idx = np.array(closest_query_idx, dtype=int)
 
-        # Extract indices from the 'source' condition in the AnnData object
         source_idx = (
             adata.obs.loc[adata.obs[col] == ref, 'idx'].iloc[closest_ref_idx].values
         )
@@ -287,13 +296,8 @@ def compute_centroid_mapping(
             .values
         )
 
-        # Create a subset of the AnnData object containing these indices
         combined_indices = np.concatenate([source_idx, target_idx])
         adata_centroid = adata[adata.obs['idx'].isin(combined_indices)].copy()
-
-    # ----------------------------------------------------------------------
-    # Match syntax for centroid-based analysis
-    # ----------------------------------------------------------------------
 
     else:
         adata_centroid = adata
@@ -310,14 +314,12 @@ def compute_centroid_mapping(
 
     print('Sinkhorn algorithm converged?', ot_out.converged)
 
-    # Extract UMAP coordinates
     ref_umap = adata_centroid[adata_centroid.obs[col] == ref].obsm['X_umap']
     target_umap = adata_centroid[adata_centroid.obs[col] == target].obsm['X_umap']
 
     ref_umap_jnp = jnp.array(ref_umap)
     target_umap_jnp = jnp.array(target_umap)
 
-    # Apply the modified mapping for point cloud alignment
     point_map_centroid, mapping_df = compute_point_cloud_mapping(
         ref_umap_jnp,
         target_umap_jnp,
@@ -327,7 +329,6 @@ def compute_centroid_mapping(
         threshold=threshold,
     )
 
-    # check dtype of output
     mapping_df['coupling'] = mapping_df['coupling'].astype(float)
 
     if return_mapping:
@@ -564,16 +565,17 @@ def plot_gp_assignment_heatmap(
 # --------------------------------------------
 
 
-def summarize_sinkhorn_mapping(df, idx_col, input_df, cluster_col_name='leiden'):
+def summarize_sinkhorn_mapping(df, groupby, input_df, cluster_col_name='leiden'):
     '''
 
     Inputs
     - df: pd.DataFrame, with columns
         ['idx1', 'source', 'idx2', 'target', 'coupling', 'normalized_strength', 'gp']
         where 'gp' is the embedding name
-    - idx_col: str, the column name for the index column = the group to summarize by
-        For example, if idx_col = 'idx1', then we look for the target class
-        with the highest value for each value of idx1
+    - groupby: str, the column name for the index column = the group to summarize by
+        For example, if idx_col = 'target',
+        then we group by the classes from the target distribtuion, and look for the
+        classes from the source distribution with the highest values
     - input_df: pd.DataFrame, where the index is cell indices,
         and the columns are the input clusters labels
 
@@ -588,7 +590,7 @@ def summarize_sinkhorn_mapping(df, idx_col, input_df, cluster_col_name='leiden')
 
     for gp in df['gp'].unique():
         df1 = df[df['gp'] == gp]
-        topn = df1.loc[df1.groupby(idx_col)['coupling'].idxmax()]
+        topn = df1.loc[df1.groupby(groupby)['coupling'].idxmax()]
         topn['target'] = topn['target'].astype(int)
 
         cluster_to_pred = cluster_to_pred.join(
