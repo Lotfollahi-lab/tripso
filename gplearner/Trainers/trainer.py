@@ -1088,6 +1088,7 @@ class gpGlobalAdversarial(gpGlobal):
             loss = clf_loss['total_loss'] + adversarial_loss
             opt_main.zero_grad()
             loss.backward()
+            opt_main.step()
 
             # Log losses
             for t in self.supervised_main_tasks:
@@ -1129,6 +1130,7 @@ class gpGlobalAdversarial(gpGlobal):
             loss = clf_loss_adv['total_loss']
             opt_adv.zero_grad()
             loss.backward()
+            opt_adv.step()
 
             # Log losses
             for t in self.supervised_adv_tasks:
@@ -1157,11 +1159,13 @@ class gpGlobalAdversarial(gpGlobal):
 
         # update main scheduler
         train_loss_main = self.trainer.callback_metrics.get('train/loss_main')
-        sched_main.step(train_loss_main)
+        if train_loss_main is not None:
+            sched_main.step(train_loss_main)
 
         # update adv scheduler
         train_loss_adv = self.trainer.callback_metrics.get('train/loss_adv')
-        sched_adv.step(train_loss_adv)
+        if train_loss_adv is not None:
+            sched_adv.step(train_loss_adv)
 
         return super().on_train_epoch_end()
 
@@ -1336,10 +1340,6 @@ class gpGlobalAdversarial(gpGlobal):
                 'lr_scheduler': lr_scheduler_adv,
             },
         ]
-
-
-# TODO: Update classification heads (MLP) with arguments
-
 
 # TODO: (Later) make new class for gpTransformerGlobalAdversarial
 
