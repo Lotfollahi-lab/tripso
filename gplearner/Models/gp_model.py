@@ -1223,7 +1223,7 @@ class gpTransformerGlobal(gpTransformerBase):
 
         if self.global_loss == 'supervised':
             for t, i in self.supervised_tasks.items():
-                if t in self.adversarial_labels:
+                if self.adversarial_labels and t in self.adversarial_labels:
                     cell_token_reversed = self.gradient_reversal_layer(
                         cell_output['cell_token']
                     )
