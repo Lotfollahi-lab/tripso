@@ -3,6 +3,7 @@ import random
 import warnings
 from typing import (
     Dict,
+    List,
     Literal,
     Optional,
 )
@@ -118,6 +119,8 @@ def run_training_from_select_gps(
     use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
     load_cell_token_learner: bool = False,
+    adversarial_labels: Optional[List[str]] = None,
+    gradient_rev_lambda: float = 1.0,
 ):
     """
     Wrapper function for training gpLearner model
@@ -201,6 +204,10 @@ def run_training_from_select_gps(
         whether to use flash attention in transformer block
     load_cell_token_learner:
         whether to load the cell token learner from previous global training
+    adversarial_labels: list
+        list of labels for negative classification with gradient reversal
+    gradient_rev_lambda
+        scaling factor for reversed gradients
     """
     ##########################################
     # Setup
@@ -463,6 +470,8 @@ def configure_model_version(args, tag):
     }
 
     if tag == 'old':
+        global_params['adversarial_labels'] = args['adversarial_labels']
+        global_params['gradient_rev_lambda'] = args['gradient_rev_lambda']
         global_params['supervised_labels'] = args['supervised_labels_old']
         global_params['global_loss'] = args[f'global_loss_{tag}']
         model_type = args['model_type_old']

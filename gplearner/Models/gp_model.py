@@ -4,7 +4,11 @@
 
 import os
 import pickle
-from typing import Dict, Optional
+from typing import (
+    Dict,
+    List,
+    Optional,
+)
 
 # imports
 import pandas as pd
@@ -15,6 +19,7 @@ from peft import PeftConfig, get_peft_model
 from transformers import BertConfig, BertForMaskedLM
 
 from ..Modules.modules import (
+    GradientReversalLayer,
     Mlp,
     PromptEncoder,
     gpTransformerEncoder,
@@ -1119,6 +1124,8 @@ class gpTransformerGlobal(gpTransformerBase):
         total_n_genes=25426,
         reconstruction_loss='nb',
         supervised_labels: Optional[Dict] = None,
+        adversarial_labels: Optional[List[str]] = None,
+        gradient_rev_lambda: float = 1.0,
         global_masking_rate=0,
         global_n_blocks=1,
         use_flash=False,
@@ -1162,6 +1169,13 @@ class gpTransformerGlobal(gpTransformerBase):
                     for k in supervised_labels.keys()
                 ]
             )
+
+            self.adversarial_labels = adversarial_labels
+
+            if self.adversarial_labels is not None:
+                self.gradient_reversal_layer = GradientReversalLayer(
+                    lambda_=gradient_rev_lambda
+                )
 
         if self.global_loss == 'reconstruction':
             self.reconstruction_loss = reconstruction_loss
@@ -1209,7 +1223,15 @@ class gpTransformerGlobal(gpTransformerBase):
 
         if self.global_loss == 'supervised':
             for t, i in self.supervised_tasks.items():
-                base_output[f'logits_{t}'] = self.clf_head[i](cell_output['cell_token'])
+                if self.adversarial_labels and t in self.adversarial_labels:
+                    cell_token_reversed = self.gradient_reversal_layer(
+                        cell_output['cell_token']
+                    )
+                    base_output[f'logits_{t}'] = self.clf_head[i](cell_token_reversed)
+                else:
+                    base_output[f'logits_{t}'] = self.clf_head[i](
+                        cell_output['cell_token']
+                    )
 
         elif self.global_loss == 'masking':
             base_output['gp_logits_lm'] = cell_output['gp_logits_lm']
