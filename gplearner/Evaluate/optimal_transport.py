@@ -213,6 +213,7 @@ def compute_centroid_mapping(
         centroids_query = kmeans_query.cluster_centers_
 
     elif cluster_algo == 'leiden':
+        cluster_col = 'leiden'
         sc.pp.neighbors(adata_ref, use_rep='X')
         sc.tl.leiden(adata_ref, resolution=resolution, key_added='leiden')
 
@@ -262,10 +263,8 @@ def compute_centroid_mapping(
         # ensuring they belong to the respective clusters
         closest_ref_idx = []
         for i, centroid in enumerate(centroids_ref):
-            cluster_points = X[adata_ref.obs['leiden'].astype(int) == clusters_ref[i]]
-            cluster_indices = np.where(
-                adata_ref.obs['leiden'].astype(int) == clusters_ref[i]
-            )[0]
+            cluster_points = X[adata_ref.obs[cluster_col] == clusters_ref[i]]
+            cluster_indices = np.where(adata_ref.obs[cluster_col] == clusters_ref[i])[0]
             closest_point_idx = cluster_indices[
                 np.argmin(cdist(cluster_points, [centroid]))
             ]
@@ -273,11 +272,9 @@ def compute_centroid_mapping(
 
         closest_query_idx = []
         for i, centroid in enumerate(centroids_query):
-            cluster_points = Y[
-                adata_target.obs['leiden'].astype(int) == clusters_target[i]
-            ]
+            cluster_points = Y[adata_target.obs[cluster_col] == clusters_target[i]]
             cluster_indices = np.where(
-                adata_target.obs['leiden'].astype(int) == clusters_target[i]
+                adata_target.obs[cluster_col] == clusters_target[i]
             )[0]
             closest_point_idx = cluster_indices[
                 np.argmin(cdist(cluster_points, [centroid]))
@@ -573,7 +570,7 @@ def summarize_sinkhorn_mapping(df, groupby, input_df, cluster_col_name='leiden')
         ['idx1', 'source', 'idx2', 'target', 'coupling', 'normalized_strength', 'gp']
         where 'gp' is the embedding name
     - groupby: str, the column name for the index column = the group to summarize by
-        For example, if idx_col = 'target',
+        For example, if groupby = 'target',
         then we group by the classes from the target distribtuion, and look for the
         classes from the source distribution with the highest values
     - input_df: pd.DataFrame, where the index is cell indices,
@@ -591,11 +588,11 @@ def summarize_sinkhorn_mapping(df, groupby, input_df, cluster_col_name='leiden')
     for gp in df['gp'].unique():
         df1 = df[df['gp'] == gp]
         topn = df1.loc[df1.groupby(groupby)['coupling'].idxmax()]
-        topn['target'] = topn['target'].astype(int)
+        topn[groupby] = topn[groupby]  # .astype(int)
 
         cluster_to_pred = cluster_to_pred.join(
             topn[['source', 'target']]
-            .set_index('target')
+            .set_index(groupby)
             .rename(columns={'source': gp}),
             how='left',
         )
