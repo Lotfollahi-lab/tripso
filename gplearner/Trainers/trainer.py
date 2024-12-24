@@ -1341,6 +1341,7 @@ class gpGlobalAdversarial(gpGlobal):
             },
         ]
 
+
 # TODO: (Later) make new class for gpTransformerGlobalAdversarial
 
 # ------------------------------------------------------

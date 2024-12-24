@@ -49,6 +49,7 @@ from ..Trainers.trainer import (
     EmbEvaluator,
     gpBase,
     gpGlobal,
+    gpGlobalAdversarial,
     gpPrototypes,
 )
 from ..Utils.geneformer_utils import get_gf_repo
@@ -115,6 +116,8 @@ class gpEval:
     global_loss :
         loss used to train global attention model
         (for compatibility with gpGlobal init)
+    adversarial:
+        whether we're running adversarial training
 
     Returns
     -------
@@ -142,6 +145,7 @@ class gpEval:
         gp_inputs: Optional[list] = None,
         gpmean_fm_encoder_pkg: Optional[str] = 'geneformer',
         gpmean_fm_encoder_name: Optional[str] = 'gf-6L-30M-i2048',
+        adversarial: bool = False,
     ):
         # set seed for reproducibility
         np.random.seed(seed)
@@ -151,6 +155,7 @@ class gpEval:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         self.seed = seed
+        self.adversarial = adversarial
 
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
@@ -231,9 +236,14 @@ class gpEval:
             )
 
         elif self.model_type == 'Global':
-            gp_transformer = gpGlobal.load_from_checkpoint(
-                self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
-            )
+            if self.adversarial:
+                gp_transformer = gpGlobalAdversarial.load_from_checkpoint(
+                    self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
+                )
+            else:
+                gp_transformer = gpGlobal.load_from_checkpoint(
+                    self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
+                )
 
         elif self.model_type == 'Prototypes':
             gp_transformer = gpPrototypes.load_from_checkpoint(
