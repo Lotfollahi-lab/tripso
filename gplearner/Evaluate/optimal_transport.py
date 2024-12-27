@@ -499,9 +499,12 @@ def plot_mapping_heatmap(
 
 def plot_gp_assignment_heatmap(
     leiden_to_pred: pd.DataFrame,
-    predefined_order: list,
+    predefined_order_row: list,
+    predefined_order_column=None,
     x_label='Leiden Clusters',
     y_label='Reference cell types',
+    fig_size=(10, 8),
+    save_to=None,
 ):
     """
     Plots a heatmap where columns are Leiden cluster indices,
@@ -513,9 +516,19 @@ def plot_gp_assignment_heatmap(
     - leiden_to_pred: pd.DataFrame, where columns are embedding names,
         values are assigned classes,
         and the index are Leiden clusters.
-    - predefined_order: list of assigned categories
+    - predefined_order_row: list of assigned categories
         in the order you want them to appear on the y-axis.
+    - predefined_order_column: list of Leiden cluster indices
+        in the order you want them to appear on the x-axis.
+    - x_label: Label for the x-axis.
+    - y_label: Label for the y-axis.
+    - fig_size: Tuple defining the size of the figure.
+    - save_to: Path to save the resulting figure. If None, does not save.
     """
+
+    # Ensure 'Unmapped' is included in the predefined order
+    if 'Unmapped' not in predefined_order_row:
+        predefined_order_row.append('Unmapped')
 
     # Transpose DataFrame to ensure Leiden clusters are columns and embeddings are rows
     transposed = leiden_to_pred.T
@@ -525,23 +538,40 @@ def plot_gp_assignment_heatmap(
         transposed.apply(lambda col: col.value_counts()).fillna(0).astype(int)
     )
 
+    # Identify clusters with all NaN values and assign them to 'Unmapped'
+    unmapped_clusters = category_counts.columns[category_counts.sum(axis=0) == 0]
+    for cluster in unmapped_clusters:
+        category_counts.loc['Unmapped', cluster] = 1
+
     # Reindex to ensure the order of categories on the y-axis
-    category_counts = category_counts.reindex(predefined_order, axis=0).fillna(0)
+    category_counts = category_counts.reindex(predefined_order_row, axis=0).fillna(0)
     category_counts = category_counts.astype(int)
 
-    # Optimize the order of the Leiden clusters to maximize the diagonal
-    cost_matrix = (
-        -category_counts.values
-    )  # We negate to convert maximization to minimization problem
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    # Match predefined order
+    if predefined_order_column:
+        # Reindex the columns to match the predefined order
+        category_counts = category_counts.loc[:, predefined_order_column]
+    else:
+        # Optimize the order of the Leiden clusters to maximize the diagonal
+        num_rows, num_cols = category_counts.shape
 
-    # Reorder the columns of category_counts based on the optimal assignment
-    reordered_category_counts = category_counts.iloc[:, col_ind]
+        # Pad the cost matrix with dummy rows if necessary
+        if num_cols > num_rows:
+            padding = np.zeros((num_cols - num_rows, num_cols))
+            padded_cost_matrix = np.vstack((-category_counts.values, padding))
+        else:
+            padded_cost_matrix = -category_counts.values
+
+        # Apply linear sum assignment
+        row_ind, col_ind = linear_sum_assignment(padded_cost_matrix)
+
+        # Reorder the columns of category_counts based on the optimal assignment
+        category_counts = category_counts.iloc[:, col_ind]
 
     # Create the heatmap
-    plt.figure(figsize=(10, 8))  # Adjust size as necessary
+    plt.figure(figsize=fig_size)
     sns.heatmap(
-        reordered_category_counts,
+        category_counts,
         annot=True,
         fmt='d',
         cmap='viridis',
@@ -554,6 +584,9 @@ def plot_gp_assignment_heatmap(
     plt.ylabel(y_label)
     plt.title('Heatmap of Assigned Categories')
 
+    if save_to:
+        plt.savefig(save_to)
+
     plt.show()
 
 
@@ -562,7 +595,9 @@ def plot_gp_assignment_heatmap(
 # --------------------------------------------
 
 
-def summarize_sinkhorn_mapping(df, groupby, input_df, cluster_col_name='leiden'):
+def summarize_sinkhorn_mapping(
+    df, groupby, input_df, cluster_col_name='leiden', full_input_cluster_list=None
+):
     '''
 
     Inputs
@@ -575,6 +610,14 @@ def summarize_sinkhorn_mapping(df, groupby, input_df, cluster_col_name='leiden')
         classes from the source distribution with the highest values
     - input_df: pd.DataFrame, where the index is cell indices,
         and the columns are the input clusters labels
+    - cluster_col_name: name of the column within input_df that has the labels
+        we are interested in
+    - full_input_cluster_list: list
+        list of all of the input clusters
+        this allows us to retrieve clusters that are not  mapped to any population
+        across any GP
+        Note this is a brute force approach, check the clusters were actually included
+        in the OT computation
 
     Outputs
     - cluster_to_pred: pd.DataFrame, where columns are embedding names,
@@ -585,6 +628,12 @@ def summarize_sinkhorn_mapping(df, groupby, input_df, cluster_col_name='leiden')
         index=sorted(list(input_df[cluster_col_name].unique())),
     )
 
+    # if we group by target, use the source column as a "prediction"
+    col_name = 'source'
+
+    # if we group by source, use the target column as a "prediction"
+    col_name = 'target'
+
     for gp in df['gp'].unique():
         df1 = df[df['gp'] == gp]
         topn = df1.loc[df1.groupby(groupby)['coupling'].idxmax()]
@@ -593,9 +642,21 @@ def summarize_sinkhorn_mapping(df, groupby, input_df, cluster_col_name='leiden')
         cluster_to_pred = cluster_to_pred.join(
             topn[['source', 'target']]
             .set_index(groupby)
-            .rename(columns={'source': gp}),
+            .rename(columns={col_name: gp}),
             how='left',
         )
+
+    if full_input_cluster_list:
+        for cluster in full_input_cluster_list:
+            if cluster not in cluster_to_pred.index:
+                # Create a new row with NaN values
+                new_row = pd.DataFrame(
+                    [[np.nan] * len(cluster_to_pred.columns)],
+                    columns=cluster_to_pred.columns,
+                    index=[cluster],
+                )
+                # Append the new row to the dataframe
+                cluster_to_pred = pd.concat([cluster_to_pred, new_row])
 
     return cluster_to_pred
 
