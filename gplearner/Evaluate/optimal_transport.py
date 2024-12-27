@@ -634,10 +634,12 @@ def summarize_sinkhorn_mapping(
     )
 
     # if we group by target, use the source column as a "prediction"
-    col_name = 'source'
+    if groupby == 'target':
+        col_name = 'source'
 
     # if we group by source, use the target column as a "prediction"
-    col_name = 'target'
+    elif groupby == 'source':
+        col_name = 'target'
 
     for gp in df['gp'].unique():
         df1 = df[df['gp'] == gp]
