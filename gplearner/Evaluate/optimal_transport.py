@@ -505,6 +505,7 @@ def plot_gp_assignment_heatmap(
     y_label='Reference cell types',
     fig_size=(10, 8),
     save_to=None,
+    show_unmapped=True,
 ):
     """
     Plots a heatmap where columns are Leiden cluster indices,
@@ -524,28 +525,32 @@ def plot_gp_assignment_heatmap(
     - y_label: Label for the y-axis.
     - fig_size: Tuple defining the size of the figure.
     - save_to: Path to save the resulting figure. If None, does not save.
+    - show_unmapped: Boolean indicating whether to include the 'Unmapped'
+        category in the plot.
     """
 
-    # Ensure 'Unmapped' is included in the predefined order
-    if 'Unmapped' not in predefined_order_row:
+    # Ensure 'Unmapped' is included in the predefined order if show_unmapped is True
+    if show_unmapped and 'Unmapped' not in predefined_order_row:
         predefined_order_row.append('Unmapped')
 
     # Transpose DataFrame to ensure Leiden clusters are columns and embeddings are rows
     transposed = leiden_to_pred.T
+
+    # Fill NaN values in the DataFrame with 'Unmapped'
+    transposed = transposed.fillna('Unmapped')
 
     # Count the number of times each class appears for each Leiden cluster
     category_counts = (
         transposed.apply(lambda col: col.value_counts()).fillna(0).astype(int)
     )
 
-    # Identify clusters with all NaN values and assign them to 'Unmapped'
-    unmapped_clusters = category_counts.columns[category_counts.sum(axis=0) == 0]
-    for cluster in unmapped_clusters:
-        category_counts.loc['Unmapped', cluster] = 1
-
     # Reindex to ensure the order of categories on the y-axis
     category_counts = category_counts.reindex(predefined_order_row, axis=0).fillna(0)
     category_counts = category_counts.astype(int)
+
+    # Optionally drop the 'Unmapped' category if show_unmapped is False
+    if not show_unmapped:
+        category_counts = category_counts.drop('Unmapped', axis=0, errors='ignore')
 
     # Match predefined order
     if predefined_order_column:
