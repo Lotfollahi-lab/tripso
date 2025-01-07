@@ -208,6 +208,15 @@ def compute_centroid_mapping(
         kmeans_ref = KMeans(n_clusters=num_clusters, random_state=0).fit(X)
         kmeans_query = KMeans(n_clusters=num_clusters, random_state=0).fit(Y)
 
+        # Assign labels to cells as 'knn_cluster' in adata_ref and adata_target
+        # as type str to match leiden
+        adata_ref.obs['knn_cluster'] = kmeans_ref.labels_.astype(str)
+        adata_target.obs['knn_cluster'] = kmeans_query.labels_.astype(str)
+        clusters_ref = adata_ref.obs['knn_cluster'].unique()
+        clusters_target = adata_target.obs['knn_cluster'].unique()
+
+        cluster_col = 'knn_cluster'
+
         # Get cluster centroids
         centroids_ref = kmeans_ref.cluster_centers_
         centroids_query = kmeans_query.cluster_centers_
@@ -263,8 +272,10 @@ def compute_centroid_mapping(
         # ensuring they belong to the respective clusters
         closest_ref_idx = []
         for i, centroid in enumerate(centroids_ref):
-            cluster_points = X[adata_ref.obs[cluster_col] == clusters_ref[i]]
-            cluster_indices = np.where(adata_ref.obs[cluster_col] == clusters_ref[i])[0]
+            cluster_points = X[adata_ref.obs[cluster_col] == str(clusters_ref[i])]
+            cluster_indices = np.where(
+                adata_ref.obs[cluster_col] == str(clusters_ref[i])
+            )[0]
             closest_point_idx = cluster_indices[
                 np.argmin(cdist(cluster_points, [centroid]))
             ]
@@ -272,9 +283,9 @@ def compute_centroid_mapping(
 
         closest_query_idx = []
         for i, centroid in enumerate(centroids_query):
-            cluster_points = Y[adata_target.obs[cluster_col] == clusters_target[i]]
+            cluster_points = Y[adata_target.obs[cluster_col] == str(clusters_target[i])]
             cluster_indices = np.where(
-                adata_target.obs[cluster_col] == clusters_target[i]
+                adata_target.obs[cluster_col] == str(clusters_target[i])
             )[0]
             closest_point_idx = cluster_indices[
                 np.argmin(cdist(cluster_points, [centroid]))
@@ -284,17 +295,13 @@ def compute_centroid_mapping(
         closest_ref_idx = np.array(closest_ref_idx, dtype=int)
         closest_query_idx = np.array(closest_query_idx, dtype=int)
 
-        source_idx = (
-            adata.obs.loc[adata.obs[col] == ref, 'idx'].iloc[closest_ref_idx].values
-        )
+        source_idx = adata.obs.loc[adata.obs[col] == ref].index[closest_ref_idx].values
         target_idx = (
-            adata.obs.loc[adata.obs[col] == target, 'idx']
-            .iloc[closest_query_idx]
-            .values
+            adata.obs.loc[adata.obs[col] == target].index[closest_query_idx].values
         )
 
         combined_indices = np.concatenate([source_idx, target_idx])
-        adata_centroid = adata[adata.obs['idx'].isin(combined_indices)].copy()
+        adata_centroid = adata[adata.obs.index.isin(combined_indices)].copy()
 
     else:
         adata_centroid = adata
