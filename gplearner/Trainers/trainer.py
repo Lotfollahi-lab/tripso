@@ -298,10 +298,6 @@ class gpBase(pl.LightningModule):
 
         if self.calc_gp_loss:
             loss_output = self.compute_gp_loss(batch, output)
-            loss_per_gp = loss_output['loss_per_gp']
-
-            self.log_gp_loss(loss_per_gp)
-
         else:
             loss_output = {'total_loss': torch.tensor(0).to(self.device)}
 
