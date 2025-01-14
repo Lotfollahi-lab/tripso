@@ -1171,7 +1171,7 @@ class gpTransformerGlobal(gpTransformerBase):
 
             clf_heads = []
             for k in supervised_labels.keys():
-                if k in self.adversarial_labels:
+                if self.adversarial_labels and k in self.adversarial_labels:
                     clf_heads.append(
                         MLP(
                             in_channels=self.gp_latent_size,

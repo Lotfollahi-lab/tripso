@@ -441,9 +441,14 @@ def configure_callbacks(save_id, args):
     # Make sure the directory exists, create it if not
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    if 'adversarial_labels' in args and args['adversarial_labels']:
+        monitor_metric = 'train/loss_main_step'
+    else:
+        monitor_metric = 'train/loss_step'
+
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         # monitor='val/loss',
-        monitor='train/loss_step',
+        monitor=monitor_metric,
         dirpath=checkpoint_dir,
         filename=save_id,
         save_top_k=1,  # figure out how to get best checkpoint

@@ -1156,18 +1156,45 @@ class gpGlobalAdversarial(gpGlobal):
 
     def on_train_epoch_end(self):
         sched_main, sched_adv = self.lr_schedulers()
-
+        
         # update main scheduler
         train_loss_main = self.trainer.callback_metrics.get('train/loss_main')
         if train_loss_main is not None:
             sched_main.step(train_loss_main)
-
+        
         # update adv scheduler
         train_loss_adv = self.trainer.callback_metrics.get('train/loss_adv')
         if train_loss_adv is not None:
             sched_adv.step(train_loss_adv)
+        
+        # compute accuracy
+        for t in self.model.supervised_tasks:
+            
+            if self.freq_adv == 0 and t in self.supervised_adv_tasks:
+                continue
+            
+            clf_pred = torch.cat(getattr(self, 'train_clf_pred')[t])
+            clf_true = torch.cat(getattr(self, 'train_clf_true')[t])
+            acc = torch.sum(clf_pred == clf_true).float() / clf_true.shape[0]
 
-        return super().on_train_epoch_end()
+            self.log(
+                f'train/{t}_accuracy',
+                acc,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+
+            # empty lists
+            getattr(self, 'train_clf_pred')[t] = []
+            getattr(self, 'train_clf_true')[t] = []
+
+        # empty lists
+        self.train_true_counts_list = []
+        self.train_pred_counts_list = []
+
+        setattr(self, f'train_loss', [])
 
     def validation_step(self, batch, batch_idx):
         # compute main loss
