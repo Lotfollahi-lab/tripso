@@ -4,7 +4,7 @@
 
 import os
 import pickle
-from typing import Dict, Optional
+from typing import List, Dict, Optional
 
 # imports
 import pandas as pd
@@ -205,6 +205,7 @@ class gpWrapper(nn.Module):
         fm_model_input_size,
         use_diffl,
         use_flex,
+        token_ids_to_mask: Optional[List[int]] = None,
     ):
         super().__init__()
 
@@ -217,6 +218,7 @@ class gpWrapper(nn.Module):
         self.learning_new_gp = learn_new_gp
         self.gene_name_path = gene_name_path
         self.gene_token_path = gene_token_path
+        self.token_ids_to_mask = torch.tensor(token_ids_to_mask)
 
         # Get vocab size
         with open(gene_token_path, 'rb') as f:
@@ -323,6 +325,12 @@ class gpWrapper(nn.Module):
 
                 tokens_pad_unencoded = tokens_pad
                 tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
+                
+                # update attn_mask by masking token_ids_to_mask
+                if self.token_ids_to_mask:
+                    id_mask = ~torch.isin(tokens_pad, self.token_ids_to_mask)
+                    id_mask = id_mask.int()
+                    attn_mask = attn_mask * id_mask
 
                 # get token GP representation, logits for gene level prediction,
                 # and gene_labels where masked genes = -100
@@ -837,6 +845,7 @@ class gpTransformerBase(nn.Module):
         bert_config=None,
         gp_latent_size=256,  # legacy, for baselines
         use_gf_embeddings=False,
+        token_ids_to_mask: Optional[List[int]] = None,
     ):
         """
         database :
@@ -1043,6 +1052,7 @@ class gpTransformerBase(nn.Module):
             fm_model_input_size=fm_model_input_size,
             use_diffl=use_diffl,
             use_flex=use_flex,
+            token_ids_to_mask=token_ids_to_mask,
         )
 
     def forward(

@@ -2,6 +2,7 @@ import os
 import random
 import warnings
 from typing import (
+    List,
     Dict,
     Literal,
     Optional,
@@ -118,6 +119,7 @@ def run_training_from_select_gps(
     use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
     load_cell_token_learner: bool = False,
+    token_ids_to_mask: Optional[List[int]] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -201,6 +203,8 @@ def run_training_from_select_gps(
         whether to use flash attention in transformer block
     load_cell_token_learner:
         whether to load the cell token learner from previous global training
+    token_ids_to_mask:
+        token ids to mask in the HVG GP block.
     """
     ##########################################
     # Setup
@@ -452,6 +456,7 @@ def configure_model_version(args, tag):
         'bert_config': args['bert_config'],
         'use_diffl': args['use_diffl'],
         'use_flex': args['use_flex'],
+        'token_ids_to_mask': args['token_ids_to_mask']
     }
 
     global_params = {
