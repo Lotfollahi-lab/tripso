@@ -26,6 +26,7 @@ from ..Models.gp_model import (
     gpTransformerBase,
     gpTransformerBaseWithPrompt,
     gpTransformerGlobal,
+    gpTransformerGlobalLinear,
     gpTransformerGlobalWithPrompt,
     gpTransformerPrototypes,
 )
@@ -494,7 +495,12 @@ def configure_model_version(args, tag):
         return model
 
     if model_type == 'Global':
-        model = gpTransformerGlobal(**common_params, **global_params)
+        if (args['global_loss'] == 'supervised') and (
+            args['gp_of_interest'] is not None
+        ):
+            model = gpTransformerGlobalLinear(**common_params, **global_params)
+        else:
+            model = gpTransformerGlobal(**common_params, **global_params)
         return model
 
     if model_type == 'Mean':
