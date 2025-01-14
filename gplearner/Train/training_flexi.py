@@ -32,6 +32,7 @@ from ..Models.gp_model import (
 from ..Trainers.trainer import (
     gpBase,
     gpGlobal,
+    gpGlobalAdversarial,
     gpPrototypes,
 )
 from ..Utils.geneformer_utils import get_gf_repo
@@ -118,6 +119,10 @@ def run_training_from_select_gps(
     use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
     load_cell_token_learner: bool = False,
+    adversarial_labels: Optional[list[str]] = None,
+    lambda_adv_loss: float = 0.1,
+    lr_adv: float = 1e-3,
+    freq_adv: int = 1,
 ):
     """
     Wrapper function for training gpLearner model
@@ -201,6 +206,12 @@ def run_training_from_select_gps(
         whether to use flash attention in transformer block
     load_cell_token_learner:
         whether to load the cell token learner from previous global training
+    adversarial_labels: dict
+        list of labels for adversarial classification with entropy maximization
+    lr_adv: float
+        learning rate for adversarial clf heads
+    freq_adv: int
+        number of adversarial training steps for every main training step
     """
     ##########################################
     # Setup
@@ -467,6 +478,7 @@ def configure_model_version(args, tag):
         global_params['global_loss'] = args[f'global_loss_{tag}']
         model_type = args['model_type_old']
     else:
+        global_params['adversarial_labels'] = args['adversarial_labels']
         global_params['supervised_labels'] = args['supervised_labels']
         global_params['global_loss'] = args['global_loss']
         model_type = args['model_type']
@@ -524,6 +536,12 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
         'total_n_genes': args['total_n_genes'],
     }
 
+    global_adv_params = {
+        'lambda_adv_loss': args['lambda_adv_loss'],
+        'lr_adv': args['lr_adv'],
+        'freq_adv': args['freq_adv'],
+    }
+
     if tag == 'old':
         global_params['global_loss'] = args[f'global_loss_{tag}']
         model_type = args['model_type_old']
@@ -545,5 +563,11 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
         return pl_model
 
     if model_type == 'Global':
-        pl_model = gpGlobal(**common_params, **global_params)
+        if args['adversarial_labels'] is None:
+            pl_model = gpGlobal(**common_params, **global_params)
+        else:
+            pl_model = gpGlobalAdversarial(
+                **common_params, **global_params, **global_adv_params
+            )
+
         return pl_model

@@ -4,7 +4,11 @@
 
 import os
 import pickle
-from typing import Dict, Optional
+from typing import (
+    Dict,
+    List,
+    Optional,
+)
 
 # imports
 import pandas as pd
@@ -12,6 +16,7 @@ import torch
 import torch.nn as nn
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from peft import PeftConfig, get_peft_model
+from torchvision.ops import MLP
 from transformers import BertConfig, BertForMaskedLM
 
 from ..Modules.modules import (
@@ -264,7 +269,7 @@ class gpWrapper(nn.Module):
             lookup_tensor[gp_tokens_tensor.long()] = indices
             self.register_buffer(f'gp{i}_tokens_lookup', lookup_tensor)
 
-        self.encoder: nn.ModuleList[gpTransformerEncoder] = nn.ModuleList(
+        self.encoder = nn.ModuleList(
             [
                 gpTransformerEncoder(
                     n_gp_tokens=len(getattr(self, f'gp{i}_tokens')),
@@ -1119,10 +1124,15 @@ class gpTransformerGlobal(gpTransformerBase):
         total_n_genes=25426,
         reconstruction_loss='nb',
         supervised_labels: Optional[Dict] = None,
+        adversarial_labels: List[str] = [],
         global_masking_rate=0,
         global_n_blocks=1,
         use_flash=False,
         n_bins=10,
+        adv_classifier_config: dict = {
+            'num_hidden_layers': 2,
+            'hidden_dim': 128,
+        },
         **kwargs,
     ):
         super().__init__(
@@ -1156,12 +1166,28 @@ class gpTransformerGlobal(gpTransformerBase):
                 t: i for i, t in enumerate(supervised_labels.keys())
             }
 
-            self.clf_head = nn.ModuleList(
-                [
-                    nn.Linear(self.gp_latent_size, getattr(self, f'{k}_n_class'))
-                    for k in supervised_labels.keys()
-                ]
-            )
+            self.adv_classifier_config = adv_classifier_config
+            self.adversarial_labels = adversarial_labels
+
+            clf_heads = []
+            for k in supervised_labels.keys():
+                if self.adversarial_labels and k in self.adversarial_labels:
+                    clf_heads.append(
+                        MLP(
+                            in_channels=self.gp_latent_size,
+                            hidden_channels=(
+                                self.adv_classifier_config['num_hidden_layers']
+                                * [self.adv_classifier_config['hidden_dim']]
+                            )
+                            + [getattr(self, f'{k}_n_class')],
+                            activation_layer=torch.nn.GELU,
+                        )
+                    )
+                else:
+                    clf_heads.append(
+                        nn.Linear(self.gp_latent_size, getattr(self, f'{k}_n_class'))
+                    )
+            self.clf_head = nn.ModuleList(clf_heads)
 
         if self.global_loss == 'reconstruction':
             self.reconstruction_loss = reconstruction_loss
