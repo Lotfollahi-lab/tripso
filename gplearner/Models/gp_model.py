@@ -218,7 +218,12 @@ class gpWrapper(nn.Module):
         self.learning_new_gp = learn_new_gp
         self.gene_name_path = gene_name_path
         self.gene_token_path = gene_token_path
-        self.token_ids_to_mask = torch.tensor(token_ids_to_mask)
+        
+        if token_ids_to_mask is not None:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.token_ids_to_mask = torch.tensor(token_ids_to_mask).to(device)
+        else:
+            self.token_ids_to_mask = token_ids_to_mask
 
         # Get vocab size
         with open(gene_token_path, 'rb') as f:
@@ -327,9 +332,12 @@ class gpWrapper(nn.Module):
                 tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
                 
                 # update attn_mask by masking token_ids_to_mask
-                if self.token_ids_to_mask:
+                if hasattr(self, 'token_ids_to_mask') and self.token_ids_to_mask is not None:
                     id_mask = ~torch.isin(tokens_pad, self.token_ids_to_mask)
                     id_mask = id_mask.int()
+                    id_mask = torch.cat(
+                        [torch.ones_like(id_mask)[:, 0].unsqueeze(-1), id_mask], dim=-1
+                    ) # extra entry for CLS token at the beginning
                     attn_mask = attn_mask * id_mask
 
                 # get token GP representation, logits for gene level prediction,
@@ -1225,7 +1233,7 @@ class gpTransformerGlobal(gpTransformerBase):
         if return_gene_embeddings:
             return base_output
         cell_output = self.base_output_to_cell_output(
-            base_output, masking=masking_global
+            base_output, masking_global=masking_global
         )
 
         base_output['cell_token'] = cell_output['cell_token']
@@ -1269,7 +1277,7 @@ class gpTransformerGlobalLinear(gpTransformerGlobal):
     """
 
     def __init__(self, **kwargs):
-        super.__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def base_output_to_cell_output(
         self,
