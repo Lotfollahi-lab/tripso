@@ -1644,7 +1644,7 @@ def calc_eval_metrics(
     # Evaluate based on the task
     if task == 'classification':
         accuracy = accuracy_score(y_test, y_pred)
-        print(f'Accuracy: {accuracy:.2f}')
+        print(f'Accuracy: {accuracy: .2f}')
 
         report = classification_report(y_test, y_pred, output_dict=True)
         output_df = wrangle_classification_report(report)
@@ -1686,9 +1686,9 @@ def calc_eval_metrics(
         mae = mean_absolute_error(y_test, y_pred)
         r2 = r2_score(y_test, y_pred)
 
-        print(f'Mean Squared Error (MSE): {mse:.2f}')
-        print(f'Mean Absolute Error (MAE): {mae:.2f}')
-        print(f'R-squared (R2): {r2:.2f}')
+        print(f'Mean Squared Error (MSE): {mse: .2f}')
+        print(f'Mean Absolute Error (MAE): {mae: .2f}')
+        print(f'R-squared (R2): {r2: .2f}')
 
         metrics = {
             'Mean Squared Error': mse,
