@@ -51,14 +51,14 @@ from ..Trainers.trainer import (
     EmbEvaluator,
     gpBase,
     gpGlobal,
+    gpGlobalLoRA,
     gpPrototypes,
 )
 from ..Utils.geneformer_utils import get_gf_repo
-from ..Utils.utils import (
+from ..Utils.utils import (  # find_latest_file,
     MidpointNormalize,
     align_indices,
     build_token_to_gene_name_dict,
-    find_latest_file,
     remove_single_data_points,
     summarize_attributions,
     wrangle_classification_report,
@@ -156,18 +156,20 @@ class gpEval:
 
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
-            tag = (
-                model_type_in_checkpoint
-                if model_type_in_checkpoint is not None
-                else model_type
-            )
+            # tag = (
+            #     model_type_in_checkpoint
+            #     if model_type_in_checkpoint is not None
+            #     else model_type
+            # )
 
             if path_to_trained_model is None:
                 model_path = output_dir
             else:
                 model_path = path_to_trained_model
 
-            latest_ckpt = find_latest_file(model_path, tissue, tag)
+            # latest_ckpt = find_latest_file(model_path, tissue, tag)
+            latest_ckpt = os.path.join(model_path, 'checkpoints/last.ckpt')
+
             print('Latest .ckpt file:', latest_ckpt)
             self.checkpoint_path = os.path.join(model_path, latest_ckpt)
 
@@ -237,6 +239,11 @@ class gpEval:
                 self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
             )
 
+        elif self.model_type == 'Global_LoRA':
+            gp_transformer = gpGlobalLoRA.load_from_checkpoint(
+                self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
+            )
+
         elif self.model_type == 'Prototypes':
             gp_transformer = gpPrototypes.load_from_checkpoint(
                 self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
@@ -292,7 +299,8 @@ class gpEval:
             )
         elif self.fm_encoder_pkg == 'from_scratch':
             self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
-            self.max_len = self.model.gf_wrapper.model.config.max_position_embeddings
+            # TO DO --> flexibly account for different model sizes
+            self.max_len = 4096
 
         # Disable flash for attention matrix generation
         if return_attention:
@@ -307,6 +315,12 @@ class gpEval:
                     self.model.cell_token_learner.encoder.blocks[
                         j
                     ].attn.use_flash = False
+
+        # Freeze all parameters for LoRA model
+        if self.model_type == 'Global_LoRA':
+            print('\nFreezing parameters for LoRA model\n')
+            for param in self.model.parameters():
+                param.requires_grad = False
 
         return gp_transformer
 

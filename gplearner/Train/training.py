@@ -36,6 +36,7 @@ from ..Models.gp_model import (
 from ..Trainers.trainer import (
     gpBase,
     gpGlobal,
+    gpGlobalLoRA,
     gpPrototypes,
 )
 from ..Utils.geneformer_utils import get_gf_repo
@@ -86,6 +87,7 @@ def run_training(
     fm_encoder_pkg: str = 'geneformer',
     peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
+    data_seed: Optional[int] = None,
     supervised_rem_var: Optional[str] = None,
     num_virtual_tokens: int = 0,
     virtual_tokens_label: Optional[str] = None,
@@ -95,23 +97,23 @@ def run_training(
     prototype_labels_key: Optional[str] = None,
     lambda_prototype_loss: float = 1e-2,
     prbm_path: Optional[str] = None,
-    use_baseline_tk: Optional[bool] = False,
-    tk_vocab_size: Optional[int] = 0,
+    use_l2_norm: Optional[bool] = False,
+    gp_latent_size: Optional[int] = None,
+    all_genes: Optional[list] = None,
     # for large scale pretraining:
     limit_train_batches: Optional[float] = 1.0,
     limit_val_batches: Optional[float] = 1.0,
     val_check_interval: Optional[float] = 1.0,
     mean_emb_dict: Optional[str] = None,
-    gene2vec: Optional[str] = None,
     use_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: Optional[bool] = False,
     vocab_gene_names: Optional[list] = None,
     precision=32,  # 'bf16-mixed',
     bert_config: Dict = {},
-    use_diffl: Optional[bool] = False,
-    use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
     calc_gp_loss: Optional[bool] = True,
+    calc_gene_loss: Optional[bool] = True,
+    lora_config_args: Optional[dict] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -226,6 +228,9 @@ def run_training(
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+    if data_seed is None:
+        data_seed = seed
+
     torch.set_float32_matmul_precision('medium')
 
     args = locals()
@@ -265,7 +270,7 @@ def run_training(
         adata_path=adata_path,
         use_weighted_sampler=use_weighted_sampler,
         label_key=sample_by,
-        seed=seed,
+        seed=data_seed,
         load_exp=use_onehot_wrapper is True,
         model_input_size=model_input_size,
     )
@@ -278,7 +283,7 @@ def run_training(
     # Other arguments for set up
     # --------------------------------------------------
 
-    if (model_type == 'Global') & (global_loss == 'reconstruction'):
+    if ('Global' in model_type) & (global_loss == 'reconstruction'):
         if adata_path is None:
             raise ValueError('Please provide path to anndata object')
         else:
@@ -293,7 +298,7 @@ def run_training(
     args['total_n_genes'] = total_n_genes
     args['n_condition_combined'] = n_condition_combined
 
-    if (reconstruction_loss == 'mse') & (model_type == 'Global'):
+    if (reconstruction_loss == 'mse') & ('Global' in model_type):
         warnings.warn(
             'Using MSE loss for reconstruction'
             '\nMake sure you pass anndata object with log normalized counts'
@@ -330,6 +335,8 @@ def run_training(
         pl_model = load_from_ckpt('sequential', pl_model, args)
     elif (global_training == 'finetune') | (global_training == 'finetune_global'):
         pl_model = load_from_ckpt('finetune', pl_model, args)
+    elif global_training == 'finetune_gene_encoder':
+        pl_model = load_from_ckpt('finetune_gene_encoder', pl_model, args)
 
     if learn_new_gp:
         pl_model = load_from_ckpt('learn_new_gp', pl_model, args)
@@ -352,7 +359,7 @@ def run_training(
         devices=-1,
         accelerator='auto',
         precision=precision,
-        profiler='advanced',
+        # ='advanced',
         num_nodes=num_nodes,
         strategy=strategy,
         limit_train_batches=limit_train_batches,
@@ -415,7 +422,7 @@ def configure_callbacks(save_id, args):
     global_loss = args['global_loss']
     output_dir = args['output_dir']
 
-    if model_type == 'Global':
+    if (model_type == 'Global') | (model_type == 'Global_LoRA'):
         if global_loss == 'supervised':
             early_stopping_callback = EarlyStopping(
                 monitor='val/accuracy',
@@ -484,17 +491,15 @@ def configure_logger(args):
             'use_flash': args['use_flash'],
             'weight_decay': args['weight_decay'],
             'num_virtual_tokens': args['num_virtual_tokens'],
-            # 'condition_on_z_mean': args['mean_emb_dict'] is not None,
-            'use_baseline_tk': args['use_baseline_tk'],
             'use_onehot_wrapper': args['use_onehot_wrapper'],
             'use_pos_emb': args['use_pos_emb'],
             'precision': args['precision'],
             'fm_encoder_name': args['fm_encoder_name'],
             'fm_encoder_pkg': args['fm_encoder_pkg'],
             'bert_config': args['bert_config'],
-            'use_diffl': args['use_diffl'],
-            'use_flex': args['use_flex'],
             'use_gf_embeddings': args['use_gf_embeddings'],
+            'gp_latent_size': args['gp_latent_size'],
+            'use_l2_norm_main': args['use_l2_norm'],
         }
     )
 
@@ -559,9 +564,6 @@ def configure_model(args):
         'use_flash': args['use_flash'],
         'learn_new_gp': args['learn_new_gp'],
         'peft_config_path': args['peft_config_path'],
-        'use_baseline_tk': args['use_baseline_tk'],
-        'tk_vocab_size': args['tk_vocab_size'],
-        'gene2vec': args['gene2vec'],
         'use_pos_emb': args['use_pos_emb'],
         'use_onehot_wrapper': args['use_onehot_wrapper'],
         'vocab_gene_names': args['vocab_gene_names'],
@@ -569,9 +571,10 @@ def configure_model(args):
         'fm_encoder_name': args['fm_encoder_name'],
         'fm_encoder_pkg': args['fm_encoder_pkg'],
         'bert_config': args['bert_config'],
-        'use_diffl': args['use_diffl'],
-        'use_flex': args['use_flex'],
         'use_gf_embeddings': args['use_gf_embeddings'],
+        'use_l2_norm': args['use_l2_norm'],
+        'gp_latent_size': args['gp_latent_size'],
+        'all_genes': args['all_genes'],
     }
 
     global_params = {
@@ -603,7 +606,7 @@ def configure_model(args):
         model = gpTransformerBase(**common_params)
         return model
 
-    if args['model_type'] == 'Global':
+    if (args['model_type'] == 'Global') | (args['model_type'] == 'Global_LoRA'):
         model = gpTransformerGlobal(**common_params, **global_params)
         return model
 
@@ -630,6 +633,7 @@ def configure_lightning_module(model, gp_similarity, args):
         # if args['strategy'].startswith('deepspeed')
         # else
         'calc_gp_loss': args['calc_gp_loss'],
+        'calc_gene_loss': args['calc_gene_loss'],
     }
 
     global_params = {
@@ -654,6 +658,15 @@ def configure_lightning_module(model, gp_similarity, args):
 
     if args['model_type'] == 'Global':
         pl_model = gpGlobal(**common_params, **global_params)
+        return pl_model
+
+    if args['model_type'] == 'Global_LoRA':
+        pl_model = gpGlobalLoRA(
+            lora_config_args=args['lora_config_args'],
+            **common_params,
+            **global_params,
+        )
+
         return pl_model
 
 
@@ -721,6 +734,30 @@ def load_from_ckpt(mode, pl_model, args):
                 ('cell_token_learner' in name)
                 | ('clf_head' in name)
                 | ('count_head' in name)
+                | ('theta' in name)
+            ):
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
+        return pl_model
+
+    elif mode == 'finetune_gene_encoder':
+        # latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+        # checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
+
+        checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
+        pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
+
+        # freeze base model
+        for name, param in pl_model.model.named_parameters():
+            if (
+                ('cell_token_learner' in name)
+                | ('clf_head' in name)
+                | ('count_head' in name)
+                | ('gf_wrapper' in name)
+                | ('theta' in name)
             ):
                 param.requires_grad = True
             else:
@@ -729,11 +766,13 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif (mode == 'finetune') | (mode == 'finetune_global'):
-        try:
-            latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Global')
-        except FileNotFoundError:
-            latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        # try:
+        #     latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Global')
+        # except FileNotFoundError:
+        #     latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+
+        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
+
         checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 

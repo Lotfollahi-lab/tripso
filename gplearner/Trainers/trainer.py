@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
+from peft import LoraConfig, get_peft_model
 from scipy.sparse import csr_matrix
 from sklearn.metrics import classification_report, roc_auc_score
 from torch import optim
@@ -128,6 +129,8 @@ class gpBase(pl.LightningModule):
         hparam_save: str = 'all',
         set_gpfinder_weight_decay: Optional[float] = None,
         calc_gp_loss: bool = True,
+        freeze_all_but_last: bool = False,
+        calc_gene_loss: bool = False,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -142,6 +145,7 @@ class gpBase(pl.LightningModule):
         self.model = model
         self.model_type = 'Base'
         self.calc_gp_loss = calc_gp_loss
+        self.calc_gene_loss = calc_gene_loss
 
         if use_gp_similarity_loss and gp_similarity is None:
             raise ValueError(
@@ -269,14 +273,31 @@ class gpBase(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         output = self.forward(batch, masking=True)
 
+        # Optionally calculate MLM for gene encoder
+        if self.calc_gene_loss:
+            gene_loss = self.compute_gene_loss(batch, output)
+            self.log(
+                'train/gene_masking_loss',
+                gene_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+            loss = gene_loss
+        else:
+            loss = torch.tensor(0.0).to(self.device)
+
+        # GP masking loss
         if self.calc_gp_loss:
             loss_output = self.compute_gp_loss(batch, output)
             loss_per_gp = loss_output['loss_per_gp']
             self.log_gp_loss(loss_per_gp)
         else:
-            loss_output = {'total_loss': torch.tensor(0).to(self.device)}
+            loss_output = {'total_loss': torch.tensor(0.0).to(self.device)}
 
-        loss = loss_output['total_loss']
+        loss += loss_output['total_loss']
 
         self.log(
             'train/loss',
@@ -445,6 +466,16 @@ class gpBase(pl.LightningModule):
             )
 
             return None
+
+    def compute_gene_loss(self, batch, fw_pass_output):
+        loss = F.cross_entropy(
+            fw_pass_output['gene_mlm_logits'].reshape(
+                -1, fw_pass_output['gene_mlm_logits'].shape[-1]
+            ),
+            fw_pass_output['gene_mlm_labels'].reshape(-1),
+        )
+
+        return loss
 
     def compute_gp_loss(self, batch, fw_pass_output):
         output = fw_pass_output
@@ -1023,6 +1054,82 @@ class gpGlobal(gpBase):
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         return reconstruction_loss
+
+
+class gpGlobalLoRA(gpGlobal):
+    def __init__(self, lora_config_args, stage='train', **kwargs):
+        # define global model
+        super().__init__(**kwargs)
+        self.modules_to_finetune = lora_config_args['modules_to_finetune']
+        self.lora_config_dict = {
+            k: v for k, v in lora_config_args.items() if k != 'modules_to_finetune'
+        }
+
+        self.setup_lora(stage=stage)
+
+    def setup_lora(self, stage):
+        gp_modules = []
+        for n, p in self.model.named_parameters():
+            if 'gf_wrapper' in self.modules_to_finetune:
+                if 'attention.self.query' in n or 'attention.self.key' in n:
+                    name = n.replace('.weight', '').replace('bias.', '')
+                    gp_modules.append(name)
+
+            if 'multi_gp_encoder' in self.modules_to_finetune:
+                if 'attn.qkv' in n:
+                    name = n.replace('.weight', '').replace('bias.', '')
+                    gp_modules.append(name)
+
+        lora_config = LoraConfig(
+            r=self.lora_config_dict['r'],
+            lora_alpha=self.lora_config_dict['lora_alpha'],
+            target_modules=gp_modules,
+            lora_dropout=self.lora_config_dict['lora_dropout'],
+        )
+
+        self.model = get_peft_model(self.model, lora_config)
+
+        if stage == 'train':
+            # Enable gradients global learner
+            for name, param in self.model.named_parameters():
+                if (
+                    name == 'theta'
+                    or 'cell_token_learner' in name
+                    or 'clf_head' in name
+                    or 'count_head' in name
+                ):
+                    param.requires_grad = True
+
+            if 'multi_gp_encoder' not in self.modules_to_finetune:
+                for n, p in self.model.named_parameters():
+                    if 'multi_gp_encoder' in n:
+                        p.requires_grad = False
+
+            self.model.print_trainable_parameters()
+
+    def state_dict(self):
+        """Save model and LoRA adapter parameters."""
+        base_state_dict = super().state_dict()
+        # Save LoRA adapter parameters separately
+        lora_state_dict = self.model.state_dict()  # Includes LoRA parameters
+        base_state_dict.update(lora_state_dict)  # Merge dictionaries
+
+        return base_state_dict
+
+    def load_state_dict(self, state_dict, strict=False):
+        """Load model and LoRA adapter parameters."""
+        # # Extract LoRA configuration and modules to finetune
+        # self.modules_to_finetune = state_dict['modules_to_finetune']
+        # self.lora_config_args = state_dict['lora_config_args']
+
+        # Separate LoRA adapter parameters
+        lora_state_dict = {k: v for k, v in state_dict.items() if 'lora' in k}
+        base_state_dict = {k: v for k, v in state_dict.items() if 'lora' not in k}
+
+        # Load base model parameters
+        super().load_state_dict(base_state_dict, strict=False)
+        # Load LoRA adapter parameters
+        self.model.load_state_dict(lora_state_dict, strict=False)
 
 
 # ------------------------------------------------------

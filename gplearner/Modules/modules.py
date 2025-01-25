@@ -23,165 +23,46 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange, repeat
 from flash_attn import flash_attn_func
 from torch import Tensor
 
-try:
-    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-
-except ModuleNotFoundError:
-    print('flex_attention not available')
-
-
-from gplearner.Utils.utils import (
-    RMSNorm,
-    apply_rotary_emb,
+from ..Utils.utils import (
     drop_path,
     mlm_mask_generator,
     trunc_normal_,
 )
 
 ######################################################################
-# Flex attention
-######################################################################
-
-# Compile flex_attention function if available
-try:
-    flex_attention = torch.compile(
-        flex_attention, dynamic=False, mode='max-autotune-no-cudagraphs'
-    )
-except NameError:
-    pass
-
-######################################################################
-# Differential transformer
-# from https://github.com/microsoft/unilm/blob/master/
-# Diff-Transformer/multihead_flashdiff_2.py
-# Accessed 10/10/2024
+# Extra
 ######################################################################
 
 
-def init_method(tensor, **kwargs):
-    nn.init.kaiming_uniform_(tensor, a=math.sqrt(5))
-
-
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
-    bs, n_kv_heads, slen, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        x[:, :, None, :, :]
-        .expand(bs, n_kv_heads, n_rep, slen, head_dim)
-        .reshape(bs, n_kv_heads * n_rep, slen, head_dim)
-    )
-
-
-def lambda_init_fn(depth):
-    return 0.8 - 0.6 * math.exp(-0.3 * depth)
-
-
-class MultiheadFlashDiff2(nn.Module):
-    """
-    DiffAttn implemented with FlashAttention,
-    for packages that does not support different qk/v dimensions
-    e.g., flash-attention (https://github.com/Dao-AILab/flash-attention)
-    """
-
-    def __init__(
-        self,
-        embed_dim,
-        depth,
-        num_heads,
-        # args:
-        model_parallel_size,
-        decoder_kv_attention_heads,
-    ):
+class ReduceDim(nn.Module):
+    def __init__(self, dim_in, dim_out):
         super().__init__()
-        self.embed_dim = embed_dim
-        # num_heads set to half of Transformer's #heads
-        self.num_heads = num_heads // model_parallel_size
-        self.num_kv_heads = (
-            decoder_kv_attention_heads // model_parallel_size
-            if decoder_kv_attention_heads is not None
-            else num_heads // model_parallel_size
-        )
-        self.n_rep = self.num_heads // self.num_kv_heads
+        if dim_in == dim_out:
+            self.dim_red_layer = nn.Identity()
+        else:
+            self.dim_red_layer = nn.Sequential(
+                nn.Linear(dim_in, dim_out),
+                nn.GELU(),
+            )
 
-        self.head_dim = embed_dim // num_heads  # // 2 (otherwise cant reshape)
-        self.scaling = self.head_dim**-0.5
+        self.apply(self._init_weights)
 
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.k_proj = nn.Linear(embed_dim, embed_dim // self.n_rep, bias=False)
-        self.v_proj = nn.Linear(embed_dim, embed_dim // self.n_rep, bias=False)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=0.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
-        self.lambda_init = lambda_init_fn(depth)
-        self.lambda_q1 = nn.Parameter(
-            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
-        )
-        self.lambda_k1 = nn.Parameter(
-            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
-        )
-        self.lambda_q2 = nn.Parameter(
-            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
-        )
-        self.lambda_k2 = nn.Parameter(
-            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
-        )
-
-        self.subln = RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=False)
-
-    def forward(
-        self,
-        x,
-        rel_pos,
-        attn_mask=None,
-    ):
-        bsz, tgt_len, embed_dim = x.size()
-        src_len = tgt_len
-
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
-
-        q = q.view(bsz, tgt_len, 2 * self.num_heads, self.head_dim)
-        k = k.view(bsz, src_len, 2 * self.num_kv_heads, self.head_dim)
-        v = v.view(bsz, src_len, self.num_kv_heads, 2, self.head_dim)
-
-        q = apply_rotary_emb(q, *rel_pos, interleaved=True)
-        k = apply_rotary_emb(k, *rel_pos, interleaved=True)
-
-        q = q.reshape(bsz, tgt_len, self.num_heads, 2, self.head_dim)
-        k = k.reshape(bsz, src_len, self.num_kv_heads, 2, self.head_dim)
-        q1, q2 = q[:, :, :, 0], q[:, :, :, 1]
-        k1, k2 = k[:, :, :, 0], k[:, :, :, 1]
-        v1, v2 = v[:, :, :, 0], v[:, :, :, 1]
-
-        attn11 = flash_attn_func(q1, k1, v1, causal=True)
-        attn12 = flash_attn_func(q1, k1, v2, causal=True)
-        attn1 = torch.cat([attn11, attn12], dim=-1)
-
-        attn21 = flash_attn_func(q2, k2, v1, causal=True)
-        attn22 = flash_attn_func(q2, k2, v2, causal=True)
-        attn2 = torch.cat([attn21, attn22], dim=-1)
-
-        lambda_1 = torch.exp(
-            torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()
-        ).type_as(q)
-        lambda_2 = torch.exp(
-            torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()
-        ).type_as(q)
-        lambda_full = lambda_1 - lambda_2 + self.lambda_init
-        attn = attn1 - lambda_full * attn2
-
-        attn = self.subln(attn)
-        attn = attn * (1 - self.lambda_init)
-        attn = attn.reshape(bsz, tgt_len, self.num_heads * 2 * self.head_dim)
-
-        attn = self.out_proj(attn)
-        return attn
+    def forward(self, x):
+        return self.dim_red_layer(x)
 
 
 ######################################################################
@@ -255,7 +136,7 @@ class Attention(nn.Module):
         self.use_flash = use_flash
         self.use_flex = use_flex
 
-    def forward(self, x, attn_mask, return_attention, block_mask):
+    def forward(self, x, attn_mask, return_attention):
         if self.use_flash:
             return_attention = False
             # do masking here
@@ -287,15 +168,6 @@ class Attention(nn.Module):
             #     # if scale is None, default is 1/sqrt(dim)
 
             x = attn_out.reshape(B, N, C)
-
-        elif self.use_flex:
-            attn_out = flex_attention(
-                q,
-                k,
-                v,
-                # score_mod = score_mod,
-                block_mask=block_mask,
-            )
 
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -368,13 +240,13 @@ class Block(nn.Module):
             drop=drop,
         )
 
-    def forward(self, x, attn_mask, return_attention, block_mask):
+    def forward(self, x, attn_mask, return_attention):
         y, attn = self.attn(
             self.norm1(x),
             attn_mask=attn_mask,
             return_attention=return_attention,
-            block_mask=block_mask,
         )  # attn is None when using flash attention
+
         # y = self.attn(self.norm1(x), attn_mask=attn_mask)
 
         x = x + self.drop_path(y)
@@ -549,9 +421,9 @@ class gpTransformerEncoder(nn.Module):
         use_pos_emb='sin_cos',
         vocab_size=None,
         use_flash=False,
-        use_diffl=False,  # use differential transformer
         seq_len=2048,
-        use_flex=False,
+        use_l2_norm=False,
+        output_dim=None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -559,8 +431,13 @@ class gpTransformerEncoder(nn.Module):
         self.mask_emb = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.use_pos_emb = use_pos_emb
         self.pos_drop = nn.Dropout(p=drop_rate)
-        self.use_flex = use_flex
         self.num_heads = num_heads
+        self.use_l2_norm = use_l2_norm
+        self.embed_dim = embed_dim
+
+        if output_dim is None:
+            output_dim = embed_dim
+        self.output_dim = output_dim
 
         dpr = [
             x.item() for x in torch.linspace(0, drop_path_rate, depth)
@@ -576,42 +453,24 @@ class gpTransformerEncoder(nn.Module):
             no_mask_tokens=[None],
         )
 
-        self.use_diffl = use_diffl
-        if use_diffl:
-            if num_heads == 1:
-                raise ValueError('Differential transformer requires num_heads > 1')
-            self.blocks = nn.ModuleList(
-                [
-                    MultiheadFlashDiff2(
-                        embed_dim,
-                        depth,
-                        num_heads,
-                        model_parallel_size=2,
-                        decoder_kv_attention_heads=num_heads,
-                    )
-                ]
-            )
-
-        else:
-            self.blocks = nn.ModuleList(
-                [
-                    Block(
-                        dim=embed_dim,
-                        num_heads=num_heads,
-                        mlp_ratio=mlp_ratio,
-                        qkv_bias=qkv_bias,
-                        qk_scale=qk_scale,
-                        drop=drop_rate,
-                        attn_drop=attn_drop_rate,
-                        drop_path=dpr[i],
-                        norm_layer=norm_layer,
-                        use_flash=use_flash,
-                        use_flex=use_flex,
-                        seq_len=seq_len + 1,  # +1 for cls
-                    )
-                    for i in range(depth)
-                ]
-            )
+        self.blocks = nn.ModuleList(
+            [
+                Block(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_scale=qk_scale,
+                    drop=drop_rate,
+                    attn_drop=attn_drop_rate,
+                    drop_path=dpr[i],
+                    norm_layer=norm_layer,
+                    use_flash=use_flash,
+                    seq_len=seq_len + 1,  # +1 for cls
+                )
+                for i in range(depth)
+            ]
+        )
 
         self.norm = norm_layer(embed_dim)
         trunc_normal_(self.cls_token, std=0.02)
@@ -620,11 +479,14 @@ class gpTransformerEncoder(nn.Module):
         # self.decoder = nn.Linear(embed_dim, n_gp_tokens, bias=False)
         self.vocab_size = vocab_size
         if self.vocab_size is None:
-            self.decoder = nn.Linear(embed_dim, n_gp_tokens, bias=False)
+            self.decoder = nn.Linear(output_dim, n_gp_tokens, bias=False)
         else:
-            self.decoder = nn.Linear(embed_dim, self.vocab_size, bias=False)
+            self.decoder = nn.Linear(output_dim, self.vocab_size, bias=False)
 
         self.decoder_bias = nn.Parameter(torch.zeros(n_gp_tokens))
+
+        if self.output_dim is not None and (output_dim != embed_dim):
+            self.dim_red = ReduceDim(embed_dim, self.output_dim)
 
         self.apply(self._init_weights)
 
@@ -638,14 +500,12 @@ class gpTransformerEncoder(nn.Module):
             self.pos_embed = LearntPositionalEncoding(
                 d_model=embed_dim, max_seq_length=seq_len + 1
             )
-
-        if self.use_diffl:
-            # Differential transformer uses rotatory embeddings
-            self.pos_embed = nn.Identity()
-            self.rope = RotaryPositionalEmbeddings(
-                dim=embed_dim // num_heads // 2,
-                max_seq_len=seq_len + 1,
-            )
+        elif self.use_pos_emb == 'absolute':
+            # following Bert
+            # https://github.com/huggingface/transformers/blob/main/src/
+            # transformers/models/bert/modeling_bert.py#L159
+            self.pos_embed = nn.Embedding(seq_len + 1, embed_dim)
+            trunc_normal_(self.pos_embed.weight, std=0.02)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -698,7 +558,10 @@ class gpTransformerEncoder(nn.Module):
         gene_labels = torch.cat((cls_label, gene_labels), dim=1)
 
         # add positional encoding to each token
-        if self.use_pos_emb is not None:
+        if self.use_pos_emb == 'absolute':
+            x = x + self.pos_embed.weight[: x.size(1)]
+
+        elif self.use_pos_emb is not None:
             x = self.pos_embed(x)
 
         return self.pos_drop(x), gene_labels
@@ -719,57 +582,24 @@ class gpTransformerEncoder(nn.Module):
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
 
-        # Optionally prepare mask to be shared across heads and layers
-        if self.use_flex:
-            # B, H, Q_LEN, KV_LEN
-            # convert attention mask to bool
-            attn_mask = attn_mask.bool()
-            attn_mask = (
-                attn_mask.unsqueeze(1)
-                .unsqueeze(2)
-                .expand(x.shape[0], self.num_heads, x.shape[1], x.shape[1])
-            )
-
-            torch._dynamo.config.optimize_ddp = False
-            torch._dynamo.config.suppress_errors = True
-
-            def padding(b, h, q_idx, kv_idx):
-                # print('q_idx', q_idx)
-                # return attn_mask #[b, q_idx]
-                return attn_mask[b, h, q_idx, kv_idx]
-
-            block_mask = create_block_mask(
-                padding,
-                B=x.shape[0],
-                H=self.num_heads,
-                Q_LEN=x.shape[1],
-                KV_LEN=x.shape[1],
-                BLOCK_SIZE=x.shape[1],
-                # _compile=True
-            )
-
-        else:
-            block_mask = None
-
         for blk in self.blocks:
-            if self.use_diffl:
-                x = blk(
-                    x,
-                    rel_pos=(self.rope.cache_cos, self.rope.cache_sin),
-                    attn_mask=attn_mask,
-                )
-                attn = None
-            else:
-                x, attn = blk(
-                    x,
-                    attn_mask=attn_mask,
-                    return_attention=return_attention,
-                    block_mask=block_mask,
-                )
+            x, attn = blk(
+                x,
+                attn_mask=attn_mask,
+                return_attention=return_attention,
+            )
 
-        x = self.norm(x)
+        if self.use_l2_norm:
+            x = F.normalize(x, p=2, dim=-1)  # following scimilarity
+        else:
+            x = self.norm(x)
+
+        if self.output_dim is not None and (self.output_dim != self.embed_dim):
+            x = self.dim_red(x)
 
         token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
+        # instead of token, take mean of all gene embeddings
+        # token = x[:, 1:, :].mean(dim=1)
 
         logits_lm = self.decoder(x)
 
@@ -1016,7 +846,6 @@ if __name__ == '__main__':
         embed_dim=32,
         seq_len=16,
         num_heads=8,
-        use_flex=True,
     )
 
     # for n, p in model.named_parameters():
