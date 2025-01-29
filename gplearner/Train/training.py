@@ -81,7 +81,7 @@ def run_training(
     adata_path: Optional[str] = None,
     use_flash: Optional[bool] = False,
     weight_decay: float = 0.0,
-    use_weighted_sampler: Optional[bool] = False,
+    sampler: Optional[str] = None,
     sample_by: Optional[str] = None,
     fm_encoder_name: str = 'gf-6L-30M-i2048',
     fm_encoder_pkg: str = 'geneformer',
@@ -268,7 +268,7 @@ def run_training(
         batch_size=batch_size,
         frac_for_training=frac_for_training,
         adata_path=adata_path,
-        use_weighted_sampler=use_weighted_sampler,
+        sampler=sampler,
         label_key=sample_by,
         seed=data_seed,
         load_exp=use_onehot_wrapper is True,
@@ -500,6 +500,8 @@ def configure_logger(args):
             'use_gf_embeddings': args['use_gf_embeddings'],
             'gp_latent_size': args['gp_latent_size'],
             'use_l2_norm_main': args['use_l2_norm'],
+            'mask_gp_genes_in_gene_encoder': isinstance(args['all_genes'], list),
+            'sampling': 'random' if args['sampler'] is None else args['sampler'],
         }
     )
 

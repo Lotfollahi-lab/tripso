@@ -110,7 +110,7 @@ class gfWrapper(nn.Module):
         gene_output = {}
         gene_output['gene_emb'] = emb_out
 
-        return emb_out
+        return gene_output
 
 
 class GeneWrapper(nn.Module):
@@ -137,6 +137,7 @@ class GeneWrapper(nn.Module):
             self.gene_embeddings = nn.Embedding.from_pretrained(
                 gene_emb_weight,
                 padding_idx=0,
+                # freeze=config_dict['freeze_word_emb'],
             )
 
             if '16' in config_dict['torch_dtype']:
@@ -156,15 +157,40 @@ class GeneWrapper(nn.Module):
             )
 
         # Look up table for re-encoding tokens to max vocab size
-        gene_tokens = get_gp_tokens(
-            all_genes,
-            do_ensembl_conversion,
-            'GP and HVG genes union',
-            gene_token_path,
-            gene_name_path,
-        )
+        if isinstance(all_genes, dict):
+            hvg_tokens = get_gp_tokens(
+                all_genes['hvg'],
+                do_ensembl_conversion,
+                'GP and HVG genes union',
+                gene_token_path,
+                gene_name_path,
+            )
 
-        gene_tokens_tensor = torch.tensor(list(gene_tokens), dtype=torch.int32)
+            gp_tokens = get_gp_tokens(
+                all_genes['gp_genes'],
+                do_ensembl_conversion,
+                'GP genes',
+                gene_token_path,
+                gene_name_path,
+            )
+
+            gene_tokens = list(hvg_tokens) + list(gp_tokens)
+            no_mask_tokens = [0, 1, 2, 3] + list(gp_tokens)
+        else:
+            gene_tokens = get_gp_tokens(
+                all_genes,
+                do_ensembl_conversion,
+                'GP and HVG genes union',
+                gene_token_path,
+                gene_name_path,
+            )
+
+            gene_tokens = list(gene_tokens)
+
+            # [0, 1, 2, 3] based on Geneformer vocab
+            no_mask_tokens = [0, 1, 2, 3]
+
+        gene_tokens_tensor = torch.tensor(gene_tokens, dtype=torch.int32)
 
         self.register_buffer('gene_tokens', gene_tokens_tensor)
 
@@ -181,7 +207,7 @@ class GeneWrapper(nn.Module):
         # Initialize transformer encoder model for getting gene embeddings
 
         self.model = gpTransformerEncoder(
-            n_gp_tokens=len(all_genes),
+            n_gp_tokens=len(gene_tokens),
             embed_dim=config_dict['hidden_size'],
             depth=config_dict['num_hidden_layers'],
             num_heads=config_dict['num_attention_heads'],
@@ -191,6 +217,7 @@ class GeneWrapper(nn.Module):
             use_l2_norm=config_dict['use_l2_norm'],
             output_dim=gp_latent_size,
             use_flash=config_dict['use_flash'],
+            no_mask_tokens=no_mask_tokens,
         )
 
     def forward(self, input_dataset, masking):
@@ -224,6 +251,7 @@ class GeneWrapper(nn.Module):
         gene_output['gene_emb'] = emb_out['gene_embeddings']
         gene_output['gene_mlm_labels'] = emb_out['gene_labels']
         gene_output['gene_mlm_logits'] = emb_out['logits_lm']
+        gene_output['gene_encoder_cls'] = emb_out['cls']
 
         return gene_output
 
@@ -322,6 +350,7 @@ class gpWrapper(nn.Module):
                     seq_len=fm_model_input_size,
                     use_pos_emb=use_pos_emb,
                     use_l2_norm=use_l2_norm,
+                    no_mask_tokens=[0, 1, 2, 3],
                 )
                 for i in range(len(gp_inputs))
             ]
@@ -1136,6 +1165,7 @@ class gpTransformerBase(nn.Module):
         if 'gene_mlm_logits' in emb_out:
             output['gene_mlm_labels'] = emb_out['gene_mlm_labels']
             output['gene_mlm_logits'] = emb_out['gene_mlm_logits']
+            output['gene_encoder_cls'] = emb_out['gene_encoder_cls']
 
         # Optionally return geneformer cell embeddings
         if return_gf_cell_emb:

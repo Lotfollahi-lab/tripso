@@ -360,6 +360,9 @@ class gpBase(pl.LightningModule):
                     output['num_genes_per_cell_list'][i].cpu().numpy().T
                 )
 
+            if 'gene_encoder_cls' in output:
+                emb_dict['gene_encoder_cls'] = output['gene_encoder_cls'].detach().cpu()
+
             if 'cell_token' in output:
                 emb_dict['cell_token'] = output['cell_token'].detach().cpu()
 

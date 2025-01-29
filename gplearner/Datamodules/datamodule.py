@@ -20,6 +20,7 @@ from torch.utils.data import (
     WeightedRandomSampler,
     random_split,
 )
+from transformers.trainer_pt_utils import LengthGroupedSampler
 
 from ..Models.gp_model import gfWrapper
 from ..Utils.utils import build_gp_input_matrix, get_gp_tokens
@@ -316,7 +317,7 @@ class txDataModule(LightningDataModule):
         batch_size=3,
         num_workers=4,
         shuffle=False,
-        use_weighted_sampler=False,
+        sampler=None,
         label_key=None,
         return_tuple=False,
         filter_key=None,
@@ -371,7 +372,13 @@ class txDataModule(LightningDataModule):
             'Please ensure this matches your tokenization.'
         )
 
-        self.use_weighted_sampler = use_weighted_sampler
+        self.use_weighted_sampler = False
+        self.use_length_sampler = False
+
+        if sampler == 'weighted':
+            self.use_weighted_sampler = True
+        elif sampler == 'length':
+            self.use_length_sampler = True
 
     def prepare_data(self):
         # Check if the folder path exists
@@ -444,6 +451,11 @@ class txDataModule(LightningDataModule):
             generator=torch.Generator().manual_seed(self.seed),  # (42),
         )
 
+        # Optionally store lengths for use with LengthGroupedSampler
+        if self.use_length_sampler:
+            print('\nLoading lengths for LengthGroupedSampler\n')
+            self.lengths = [d['tk']['length'] for d in self.train_dataset]
+
     def train_dataloader(self):
         if self.use_weighted_sampler:
             sampler = WeightedRandomSampler(
@@ -452,7 +464,26 @@ class txDataModule(LightningDataModule):
                 ),
                 num_samples=len(self.train_dataset),
                 replacement=True,
-                generator=torch.Generator().manual_seed(42),
+                generator=torch.Generator().manual_seed(self.seed),
+            )
+
+            dataloader = DataLoader(
+                self.train_dataset,
+                collate_fn=self.custom_collate,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                sampler=sampler,
+                pin_memory=True,
+                drop_last=True,
+            )
+
+        elif self.use_length_sampler:
+            sampler = LengthGroupedSampler(
+                dataset=self.train_dataset,
+                lengths=self.lengths,
+                batch_size=self.batch_size,
+                generator=torch.Generator().manual_seed(self.seed),
             )
 
             dataloader = DataLoader(

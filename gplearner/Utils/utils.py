@@ -1023,7 +1023,13 @@ class mlm_mask_generator:
         self.no_change_prob = no_change_prob
         self.randomize_prob = randomize_prob
         self.masking_prob = masking_prob
-        self.no_mask_tokens = no_mask_tokens + [padding_token, mask_token]
+        # self.no_mask_tokens = no_mask_tokens + [padding_token, mask_token]
+
+        # Convert no_mask_tokens to a set for fast membership checks
+        self.no_mask_tokens = torch.tensor(
+            no_mask_tokens + [padding_token, mask_token], dtype=torch.long
+        )
+
         self.padding_token = padding_token
         self.mask_token = mask_token
 
@@ -1035,9 +1041,15 @@ class mlm_mask_generator:
         # Mask `masking_prob` of tokens
         full_mask = torch.rand(x.shape, device=x.device) < self.masking_prob
 
-        # Unmask `no_mask_tokens`
-        for t in self.no_mask_tokens:
-            full_mask &= x != t
+        # # Unmask `no_mask_tokens`
+        # for t in self.no_mask_tokens:
+        #     full_mask &= x != t
+
+        # no_mask is True if id is in no_mask_tokens
+        # (same shape as x)
+        no_mask = (x[..., None] == self.no_mask_tokens.to(x.device)).any(dim=-1)
+
+        full_mask &= ~no_mask
 
         # A mask for tokens to be replaced with original tokens
         unchanged = full_mask & (

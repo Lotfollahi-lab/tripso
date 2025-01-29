@@ -25,7 +25,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from flash_attn import flash_attn_func
+
+# from flash_attn import flash_attn_func
 from torch import Tensor
 
 from ..Utils.utils import (
@@ -153,21 +154,24 @@ class Attention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         if self.use_flash:
-            attn_out = flash_attn_func(q, k, v)  # (batch_size, seqlen, nheads, headdim)
+            # attn_out = flash_attn_func(q, k, v)
+            # # (batch_size, seqlen, nheads, headdim)
+            # x = attn_out.reshape(B, N, C)
 
-            # with torch.backends.cuda.sdp_kernel(enable_flash=True):
-            #     # from https://discuss.pytorch.org/t/flash-attention/174955/14
-            #     attn_out = F.scaled_dot_product_attention(
-            #         q,
-            #         k,
-            #         v,
-            #         # pytorch flash attention does not support mask
-            #         scale=self.scale,
-            #         dropout_p=0.0,
-            #     )
-            #     # if scale is None, default is 1/sqrt(dim)
+            with torch.backends.cuda.sdp_kernel(enable_flash=True):
+                # from https://discuss.pytorch.org/t/flash-attention/174955/14
+                attn_out = F.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    # pytorch flash attention does not support mask
+                    scale=self.scale,
+                    dropout_p=0.0,
+                )  # if scale is None, default is 1/sqrt(dim)
 
-            x = attn_out.reshape(B, N, C)
+                # attn_out shape: (B, num_heads, seq_len, emb_size//num_heads)
+                # transpose so that it is (B, seq_len, num_heads, emb_size//num_heads)
+                x = attn_out.transpose(1, 2).reshape(B, N, C)
 
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -424,6 +428,7 @@ class gpTransformerEncoder(nn.Module):
         seq_len=2048,
         use_l2_norm=False,
         output_dim=None,
+        no_mask_tokens=[None],
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -450,13 +455,16 @@ class gpTransformerEncoder(nn.Module):
             masking_prob=mlm_masking_prob,
             randomize_prob=0.1,
             no_change_prob=0.1,
-            no_mask_tokens=[None],
+            no_mask_tokens=no_mask_tokens,
         )
+
+        if self.output_dim is not None and (output_dim != embed_dim):
+            self.dim_red = ReduceDim(embed_dim, self.output_dim)
 
         self.blocks = nn.ModuleList(
             [
                 Block(
-                    dim=embed_dim,
+                    dim=self.output_dim,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
                     qkv_bias=qkv_bias,
@@ -472,7 +480,7 @@ class gpTransformerEncoder(nn.Module):
             ]
         )
 
-        self.norm = norm_layer(embed_dim)
+        self.norm = norm_layer(self.output_dim)
         trunc_normal_(self.cls_token, std=0.02)
 
         # Decoder for masked language modelling
@@ -484,9 +492,6 @@ class gpTransformerEncoder(nn.Module):
             self.decoder = nn.Linear(output_dim, self.vocab_size, bias=False)
 
         self.decoder_bias = nn.Parameter(torch.zeros(n_gp_tokens))
-
-        if self.output_dim is not None and (output_dim != embed_dim):
-            self.dim_red = ReduceDim(embed_dim, self.output_dim)
 
         self.apply(self._init_weights)
 
@@ -559,7 +564,8 @@ class gpTransformerEncoder(nn.Module):
 
         # add positional encoding to each token
         if self.use_pos_emb == 'absolute':
-            x = x + self.pos_embed.weight[: x.size(1)]
+            pos = self.pos_embed(torch.arange(x.shape[1], device=x.device))
+            x = x + pos
 
         elif self.use_pos_emb is not None:
             x = self.pos_embed(x)
@@ -582,6 +588,10 @@ class gpTransformerEncoder(nn.Module):
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
 
+        # Optionally reduce dimensions
+        if self.output_dim is not None and (self.output_dim != self.embed_dim):
+            x = self.dim_red(x)
+
         for blk in self.blocks:
             x, attn = blk(
                 x,
@@ -593,9 +603,6 @@ class gpTransformerEncoder(nn.Module):
             x = F.normalize(x, p=2, dim=-1)  # following scimilarity
         else:
             x = self.norm(x)
-
-        if self.output_dim is not None and (self.output_dim != self.embed_dim):
-            x = self.dim_red(x)
 
         token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
         # instead of token, take mean of all gene embeddings
