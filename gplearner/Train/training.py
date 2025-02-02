@@ -100,6 +100,7 @@ def run_training(
     use_l2_norm: Optional[bool] = False,
     gp_latent_size: Optional[int] = None,
     all_genes: Optional[list] = None,
+    condition_on_length: Optional[bool] = False,
     # for large scale pretraining:
     limit_train_batches: Optional[float] = 1.0,
     limit_val_batches: Optional[float] = 1.0,
@@ -251,7 +252,7 @@ def run_training(
 
     # Instantiate datamodule
     if fm_encoder_pkg == 'from_scratch':
-        model_input_size = bert_config['max_position_embeddings']
+        model_input_size = bert_config['tokenization_input_size']
     else:
         # Get Geneformer model config
         geneformer_repo_path = get_gf_repo()
@@ -273,6 +274,8 @@ def run_training(
         seed=data_seed,
         load_exp=use_onehot_wrapper is True,
         model_input_size=model_input_size,
+        condition_on_length=condition_on_length,
+        output_dir=output_dir,
     )
 
     # Load gpdb
@@ -502,6 +505,7 @@ def configure_logger(args):
             'use_l2_norm_main': args['use_l2_norm'],
             'mask_gp_genes_in_gene_encoder': isinstance(args['all_genes'], list),
             'sampling': 'random' if args['sampler'] is None else args['sampler'],
+            'condition_on_length': args['condition_on_length'],
         }
     )
 
@@ -577,6 +581,7 @@ def configure_model(args):
         'use_l2_norm': args['use_l2_norm'],
         'gp_latent_size': args['gp_latent_size'],
         'all_genes': args['all_genes'],
+        'condition_on_length': args['condition_on_length'],
     }
 
     global_params = {

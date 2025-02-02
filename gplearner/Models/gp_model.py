@@ -123,6 +123,7 @@ class GeneWrapper(nn.Module):
         config_dict,
         gp_latent_size,
         use_gf_embeddings=None,
+        condition_on_length=False,
     ):
         super().__init__()
 
@@ -140,7 +141,7 @@ class GeneWrapper(nn.Module):
                 # freeze=config_dict['freeze_word_emb'],
             )
 
-            if '16' in config_dict['torch_dtype']:
+            if '16' in str(config_dict['torch_dtype']):
                 self.gene_embeddings.half()
 
         elif isinstance(use_gf_embeddings, str):
@@ -212,17 +213,26 @@ class GeneWrapper(nn.Module):
             depth=config_dict['num_hidden_layers'],
             num_heads=config_dict['num_attention_heads'],
             mlm_masking_prob=config_dict['mlm_masking_prob'],
-            seq_len=config_dict['max_position_embeddings'],
+            seq_len=config_dict['max_seq_len'],
             use_pos_emb=config_dict['use_pos_emb'],
             use_l2_norm=config_dict['use_l2_norm'],
             output_dim=gp_latent_size,
             use_flash=config_dict['use_flash'],
             no_mask_tokens=no_mask_tokens,
+            condition_on_length=condition_on_length,
         )
+
+        self.max_seq_len = config_dict['max_seq_len']
 
     def forward(self, input_dataset, masking):
         # input is tokenized dataset
         # get gene embeddings based on input_ids
+        if hasattr(self, 'max_seq_len') and self.max_seq_len:
+            if input_dataset['input_ids'].shape[1] > self.max_seq_len:
+                input_dataset['input_ids'] = input_dataset['input_ids'][
+                    :, : self.max_seq_len
+                ]
+
         genes = self.gene_embeddings(input_dataset['input_ids'])
 
         # encode gene labels
@@ -245,6 +255,7 @@ class GeneWrapper(nn.Module):
             masking=masking,
             return_attention=False,
             return_gene_embeddings=True,
+            lengths=input_dataset['scaled_length'],
         )
 
         gene_output = {}
@@ -279,6 +290,7 @@ class gpWrapper(nn.Module):
         use_pos_emb,
         fm_model_input_size,
         use_l2_norm,
+        condition_on_length,
     ):
         super().__init__()
 
@@ -351,6 +363,7 @@ class gpWrapper(nn.Module):
                     use_pos_emb=use_pos_emb,
                     use_l2_norm=use_l2_norm,
                     no_mask_tokens=[0, 1, 2, 3],
+                    condition_on_length=condition_on_length,
                 )
                 for i in range(len(gp_inputs))
             ]
@@ -377,6 +390,17 @@ class gpWrapper(nn.Module):
         # Extract embeddings for each gene program
         for i in range(len(self.gp_inputs)):
             if (gp_of_interest is None) or (self.gp_inputs[i] == gp_of_interest):
+                # ensure max inputs ids matches gene encoder output
+                if (
+                    gf_emb_dict['gene_emb'].shape[1]
+                    != input_dataset['input_ids'].shape[1]
+                ):
+                    input_ids = input_dataset['input_ids'][
+                        :, : gf_emb_dict['gene_emb'].shape[1]
+                    ]
+                else:
+                    input_ids = input_dataset['input_ids']
+
                 (
                     emb_pad,
                     tokens_pad,
@@ -384,7 +408,7 @@ class gpWrapper(nn.Module):
                     attn_mask,
                 ) = build_gp_input_matrix(
                     gf_emb_dict['gene_emb'],  # geneformer embeddings
-                    input_dataset['input_ids'],
+                    input_ids,
                     getattr(self, f'gp{i}_tokens'),
                 )
 
@@ -407,6 +431,7 @@ class gpWrapper(nn.Module):
                     masking=masking,
                     return_attention=return_attention,
                     return_gene_embeddings=return_gene_embeddings,
+                    lengths=num_genes_per_cell,
                 )
 
                 gp_token_list.append(encoder_output['cls'])
@@ -910,6 +935,7 @@ class gpTransformerBase(nn.Module):
         use_gf_embeddings=False,
         use_l2_norm=False,
         all_genes=None,
+        condition_on_length=False,
     ):
         """
         database :
@@ -964,6 +990,7 @@ class gpTransformerBase(nn.Module):
         self.fm_encoder_pkg = fm_encoder_pkg
         self.fm_encoder_name = fm_encoder_name
         self.use_l2_norm = use_l2_norm
+        self.condition_on_length = condition_on_length
 
         if fm_encoder_pkg == 'geneformer':
             geneformer_repo_path = get_gf_repo()
@@ -1030,7 +1057,7 @@ class gpTransformerBase(nn.Module):
             )
 
         elif fm_encoder_pkg == 'from_scratch':
-            fm_model_input_size = bert_config['max_position_embeddings']
+            fm_model_input_size = bert_config['tokenization_input_size']
 
             if gp_latent_size is None:
                 gp_latent_size = bert_config['hidden_size']
@@ -1051,17 +1078,6 @@ class gpTransformerBase(nn.Module):
                     'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
                 )
 
-            # # overwrite to match geneformer
-            # if use_gf_embeddings == 'gf-12L-95M-i4096':
-            #     gp_latent_size = 512
-
-            # self.gf_wrapper = BertWrapper(
-            #     config_dict=bert_config,
-            #     fm_layer_to_quant=0,
-            #     token_dictionary_file=self.gene_token_path,
-            #     use_gf_embeddings=use_gf_embeddings,
-            #     gp_latent_size=gp_latent_size,
-            # )
             self.gf_wrapper = GeneWrapper(
                 config_dict=bert_config,
                 gene_name_path=self.gene_name_path,
@@ -1070,6 +1086,7 @@ class gpTransformerBase(nn.Module):
                 do_ensembl_conversion=do_ensembl_conversion,
                 use_gf_embeddings=use_gf_embeddings,
                 gp_latent_size=gp_latent_size,
+                condition_on_length=condition_on_length,
             )
 
         else:
@@ -1125,6 +1142,7 @@ class gpTransformerBase(nn.Module):
             use_pos_emb=use_pos_emb,
             fm_model_input_size=fm_model_input_size,
             use_l2_norm=use_l2_norm,
+            condition_on_length=condition_on_length,
         )
 
     def forward(

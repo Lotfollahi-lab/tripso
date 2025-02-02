@@ -343,6 +343,10 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
         )
 
         trainer = pl.Trainer(
@@ -619,6 +623,10 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
         )
 
         trainer = pl.Trainer(
@@ -724,20 +732,24 @@ class gpEval:
             token_to_gene_to_keep_dict = None
 
         # Initialize trainer
-        txdata = txDataModule(
-            folder=self.dataset_path,
-            batch_size=self.batch_size,
-            data_split_to_pass_to_test_step=split,
-            fm_encoder_name=self.fm_encoder_name,
-            model_input_size=self.max_len,
-        )
-
         gp_transformer = self._init_trainer(
             return_attention=True,
             gp=gp,
             num_virtual_tokens=self.num_virtual_tokens,
             split_label=split,
             token_to_gene_to_keep_dict=token_to_gene_to_keep_dict,
+        )
+
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_test_step=split,
+            fm_encoder_name=self.fm_encoder_name,
+            model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
         )
 
         trainer = pl.Trainer(
@@ -764,6 +776,10 @@ class gpEval:
 
         print('Dataset path', self.dataset_path)
 
+        gp_transformer = self._init_trainer(
+            test_random_baseline=True, num_virtual_tokens=self.num_virtual_tokens
+        )
+
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
@@ -771,11 +787,12 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
         )
 
-        gp_transformer = self._init_trainer(
-            test_random_baseline=True, num_virtual_tokens=self.num_virtual_tokens
-        )
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
         trainer.test(gp_transformer, txdata)
 
@@ -786,6 +803,10 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(self.gp_transformer.model, 'condition_on_length')
+            and self.gp_transformer.model.condition_on_length
+            else None,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
@@ -809,6 +830,10 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)

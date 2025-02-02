@@ -138,11 +138,6 @@ class Attention(nn.Module):
         self.use_flex = use_flex
 
     def forward(self, x, attn_mask, return_attention):
-        if self.use_flash:
-            return_attention = False
-            # do masking here
-            x = x * attn_mask.unsqueeze(-1)
-
         # Attention mask is 0 for padding tokens (no attention)
         B, N, C = x.shape
 
@@ -160,6 +155,12 @@ class Attention(nn.Module):
 
             with torch.backends.cuda.sdp_kernel(enable_flash=True):
                 # from https://discuss.pytorch.org/t/flash-attention/174955/14
+                mask = attn_mask.unsqueeze(1).unsqueeze(2)
+                mask = mask.expand(-1, self.num_heads, x.shape[1], x.shape[1])
+
+                # match x dtype
+                mask = mask.bool()
+
                 attn_out = F.scaled_dot_product_attention(
                     q,
                     k,
@@ -167,6 +168,7 @@ class Attention(nn.Module):
                     # pytorch flash attention does not support mask
                     scale=self.scale,
                     dropout_p=0.0,
+                    attn_mask=mask,
                 )  # if scale is None, default is 1/sqrt(dim)
 
                 # attn_out shape: (B, num_heads, seq_len, emb_size//num_heads)
@@ -429,20 +431,15 @@ class gpTransformerEncoder(nn.Module):
         use_l2_norm=False,
         output_dim=None,
         no_mask_tokens=[None],
+        condition_on_length=False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.mask_emb = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.use_pos_emb = use_pos_emb
         self.pos_drop = nn.Dropout(p=drop_rate)
         self.num_heads = num_heads
         self.use_l2_norm = use_l2_norm
-        self.embed_dim = embed_dim
-
-        if output_dim is None:
-            output_dim = embed_dim
-        self.output_dim = output_dim
+        self.condition_on_length = condition_on_length
 
         dpr = [
             x.item() for x in torch.linspace(0, drop_path_rate, depth)
@@ -458,8 +455,39 @@ class gpTransformerEncoder(nn.Module):
             no_mask_tokens=no_mask_tokens,
         )
 
-        if self.output_dim is not None and (output_dim != embed_dim):
-            self.dim_red = ReduceDim(embed_dim, self.output_dim)
+        if output_dim is None:
+            output_dim = embed_dim
+
+        if output_dim is not None and (output_dim != embed_dim):
+            self.dim_red = ReduceDim(embed_dim, output_dim)
+
+        # Masking and cls is before appending lengths
+        # (if we are conditioning on lengths)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, output_dim))
+        self.mask_emb = nn.Parameter(torch.zeros(1, 1, output_dim))
+
+        if self.use_pos_emb == 'sin_cos':
+            self.pos_embed = PositionalEncoding(
+                d_model=output_dim,
+                dropout=drop_rate,
+                max_len=seq_len + 1,  # 2048
+            )
+        elif self.use_pos_emb == 'learned':
+            self.pos_embed = LearntPositionalEncoding(
+                d_model=output_dim, max_seq_length=seq_len + 1
+            )
+        elif self.use_pos_emb == 'absolute':
+            # following Bert
+            # https://github.com/huggingface/transformers/blob/main/src/
+            # transformers/models/bert/modeling_bert.py#L159
+            self.pos_embed = nn.Embedding(seq_len + 1, output_dim)
+            trunc_normal_(self.pos_embed.weight, std=0.02)
+
+        if self.condition_on_length:
+            self.length_mask = nn.Parameter(torch.zeros(1, 1, output_dim))
+            output_dim += 1
+
+        self.output_dim = output_dim
 
         self.blocks = nn.ModuleList(
             [
@@ -484,33 +512,14 @@ class gpTransformerEncoder(nn.Module):
         trunc_normal_(self.cls_token, std=0.02)
 
         # Decoder for masked language modelling
-        # self.decoder = nn.Linear(embed_dim, n_gp_tokens, bias=False)
         self.vocab_size = vocab_size
-        if self.vocab_size is None:
-            self.decoder = nn.Linear(output_dim, n_gp_tokens, bias=False)
-        else:
-            self.decoder = nn.Linear(output_dim, self.vocab_size, bias=False)
+        decoder_in = self.output_dim
+        decoder_out = n_gp_tokens if self.vocab_size is None else self.vocab_size
 
+        self.decoder = nn.Linear(decoder_in, decoder_out, bias=False)
         self.decoder_bias = nn.Parameter(torch.zeros(n_gp_tokens))
 
         self.apply(self._init_weights)
-
-        if self.use_pos_emb == 'sin_cos':
-            self.pos_embed = PositionalEncoding(
-                d_model=embed_dim,
-                dropout=drop_rate,
-                max_len=seq_len + 1,  # 2048
-            )
-        elif self.use_pos_emb == 'learned':
-            self.pos_embed = LearntPositionalEncoding(
-                d_model=embed_dim, max_seq_length=seq_len + 1
-            )
-        elif self.use_pos_emb == 'absolute':
-            # following Bert
-            # https://github.com/huggingface/transformers/blob/main/src/
-            # transformers/models/bert/modeling_bert.py#L159
-            self.pos_embed = nn.Embedding(seq_len + 1, embed_dim)
-            trunc_normal_(self.pos_embed.weight, std=0.02)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -580,7 +589,12 @@ class gpTransformerEncoder(nn.Module):
         attn_mask,
         return_attention,
         return_gene_embeddings=False,
+        lengths=None,
     ):
+        # Optionally reduce dimensions
+        if hasattr(self, 'dim_red') and (self.output_dim != self.embed_dim):
+            x = self.dim_red(x)
+
         # Random masking:
         if masking:
             x, gene_labels = self.random_gene_masking(x, gene_labels)
@@ -588,9 +602,16 @@ class gpTransformerEncoder(nn.Module):
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
 
-        # Optionally reduce dimensions
-        if self.output_dim is not None and (self.output_dim != self.embed_dim):
-            x = self.dim_red(x)
+        if hasattr(self, 'condition_on_length') and self.condition_on_length:
+            if len(lengths.shape) == 1:
+                lengths = lengths.unsqueeze(-1)
+
+            # zero out lengths for masked tokens
+            true_emb = gene_labels == -100
+            lengths = lengths * true_emb
+
+            lengths = lengths.expand(-1, x.shape[1]).unsqueeze(-1)
+            x = torch.cat([x, lengths], dim=-1)
 
         for blk in self.blocks:
             x, attn = blk(
@@ -604,7 +625,10 @@ class gpTransformerEncoder(nn.Module):
         else:
             x = self.norm(x)
 
-        token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
+        if hasattr(self, 'condition_on_length') and self.condition_on_length:
+            token = x[:, 0, :-1]
+        else:
+            token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
         # instead of token, take mean of all gene embeddings
         # token = x[:, 1:, :].mean(dim=1)
 
@@ -617,7 +641,10 @@ class gpTransformerEncoder(nn.Module):
             output['attention'] = attn
 
         if return_gene_embeddings:
-            output['gene_embeddings'] = x[:, 1:, :]
+            if hasattr(self, 'condition_on_length') and self.condition_on_length:
+                output['gene_embeddings'] = x[:, 1:, :-1]
+            else:
+                output['gene_embeddings'] = x[:, 1:, :]
 
         return output
 
