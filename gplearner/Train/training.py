@@ -7,7 +7,6 @@ from typing import (
     Dict,
     Literal,
     Optional,
-    Union,
 )
 
 import numpy as np
@@ -62,7 +61,6 @@ def run_training(
     strategy: str = 'ddp_find_unused_parameters_true',
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
-    finetune_lr: Union[float, dict] = 1e-5,
     resume_training: Optional[bool] = False,
     gp_inputs: Optional[list] = None,
     frac_for_training: Optional[float] = 1.0,
@@ -506,6 +504,7 @@ def configure_logger(args):
             'mask_gp_genes_in_gene_encoder': isinstance(args['all_genes'], list),
             'sampling': 'random' if args['sampler'] is None else args['sampler'],
             'condition_on_length': args['condition_on_length'],
+            'seed': args['seed'],
         }
     )
 
@@ -537,13 +536,6 @@ def configure_logger(args):
             wandb_logger.experiment.config.update(
                 {
                     'reconstruction_loss': args['reconstruction_loss'],
-                }
-            )
-
-        if 'finetune' in args['global_training']:
-            wandb_logger.experiment.config.update(
-                {
-                    'finetune_lr': args['finetune_lr'],
                 }
             )
 
@@ -627,8 +619,6 @@ def configure_lightning_module(model, gp_similarity, args):
         'model': model,
         # 'model_type': args['model_type'],
         'lr': args['lr'],
-        'finetune_lr': args['finetune_lr'],
-        'use_finetune_lr': 'finetune' in args['global_training'],
         'total_epochs': args['n_epochs'],
         'lr_scheduler': args['lr_scheduler'],
         'use_gp_similarity_loss': gp_similarity is not None,
@@ -777,6 +767,13 @@ def load_from_ckpt(mode, pl_model, args):
         #     latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Global')
         # except FileNotFoundError:
         #     latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+
+        warnings.warn(
+            'Finetuning global model from base model'
+            'finetune_lr parameter is deprecated.'
+            'Please specify learning rate for base model as'
+            '{"gene_encoder": lr, "multi_gp_encoder": lr, "default": lr}'
+        )
 
         latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
 

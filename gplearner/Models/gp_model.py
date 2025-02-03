@@ -687,6 +687,9 @@ class cellWrapper(nn.Module):
             mlm_masking_prob=global_masking_rate,
             use_flash=use_flash,
             use_l2_norm=use_l2_norm,
+            no_mask_tokens=[
+                len(self.gp_inputs) + 1
+            ],  # gp token labels are 0 to len(gp_inputs)-1
         )
 
     def build_input_matrix(self, z, num_genes_per_cell_list):

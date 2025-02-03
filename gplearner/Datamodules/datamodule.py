@@ -465,6 +465,9 @@ class txDataModule(LightningDataModule):
 
         # Optionally fit scalar for lengths
         if self.condition_on_length:
+            # self.length_scaler = pd.read_pickle(
+            # os.path.join(self.output_dir, 'length_scaler.pkl')
+            # )
             if self.length_scaler_path is None:
                 print('\nFitting scaler for length normalization\n')
                 lengths = np.array([d['tk']['length'] for d in self.train_dataset])
