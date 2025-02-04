@@ -1215,7 +1215,7 @@ class gpTransformerGlobal(gpTransformerBase):
         if return_gene_embeddings:
             return base_output
         cell_output = self.base_output_to_cell_output(
-            base_output, masking=masking_global
+            base_output, masking_global=masking_global
         )
 
         base_output['cell_token'] = cell_output['cell_token']
@@ -1259,7 +1259,7 @@ class gpTransformerGlobalLinear(gpTransformerGlobal):
     """
 
     def __init__(self, **kwargs):
-        super.__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def base_output_to_cell_output(
         self,
