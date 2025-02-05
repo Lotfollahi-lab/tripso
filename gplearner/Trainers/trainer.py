@@ -127,8 +127,8 @@ class gpBase(pl.LightningModule):
         hparam_save: str = 'all',
         set_gpfinder_weight_decay: Optional[float] = None,
         calc_gp_loss: bool = True,
-        freeze_all_but_last: bool = False,
         calc_gene_loss: bool = False,
+        warmup: Optional[int] = 0,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -144,6 +144,7 @@ class gpBase(pl.LightningModule):
         self.model_type = 'Base'
         self.calc_gp_loss = calc_gp_loss
         self.calc_gene_loss = calc_gene_loss
+        self.warmup = warmup
 
         if use_gp_similarity_loss and gp_similarity is None:
             raise ValueError(
@@ -235,7 +236,7 @@ class gpBase(pl.LightningModule):
         self.token_dataset = None
         self.attn_adata_holder: List[ad.AnnData] = []
 
-    def forward(self, x, masking):
+    def forward(self, x, masking, epoch):
         out = self.model(
             x,
             masking=masking,
@@ -243,6 +244,7 @@ class gpBase(pl.LightningModule):
             tokens_to_keep=self.tokens_to_keep,
             gp_of_interest=self.gp,
             return_attention=self.return_attention,
+            epoch=epoch,
         )
 
         return out
@@ -267,7 +269,7 @@ class gpBase(pl.LightningModule):
                 )
 
     def training_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True)
+        output = self.forward(batch, masking=True, epoch=self.current_epoch)
 
         # Optionally calculate MLM for gene encoder
         if self.calc_gene_loss:
@@ -286,10 +288,11 @@ class gpBase(pl.LightningModule):
             loss = torch.tensor(0.0).to(self.device)
 
         # GP masking loss
-        if self.calc_gp_loss:
-            loss_output = self.compute_gp_loss(batch, output)
-            loss_per_gp = loss_output['loss_per_gp']
-            self.log_gp_loss(loss_per_gp)
+        if hasattr(self, 'warmup') and self.current_epoch >= self.warmup:
+            if self.calc_gp_loss:
+                loss_output = self.compute_gp_loss(batch, output)
+                loss_per_gp = loss_output['loss_per_gp']
+                self.log_gp_loss(loss_per_gp)
         else:
             loss_output = {'total_loss': torch.tensor(0.0).to(self.device)}
 
@@ -311,7 +314,7 @@ class gpBase(pl.LightningModule):
         pass
 
     def validation_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True)
+        output = self.forward(batch, masking=True, epoch='val')
 
         if self.calc_gp_loss:
             loss_output = self.compute_gp_loss(batch, output)
@@ -346,7 +349,7 @@ class gpBase(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         if self.save_emb:
-            output = self.forward(batch, masking=False)
+            output = self.forward(batch, masking=False, epoch='test')
 
             emb_dict = {}
 

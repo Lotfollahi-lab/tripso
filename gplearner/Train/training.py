@@ -113,6 +113,7 @@ def run_training(
     calc_gp_loss: Optional[bool] = True,
     calc_gene_loss: Optional[bool] = True,
     lora_config_args: Optional[dict] = None,
+    warmup: Optional[int] = 0,
 ):
     """
     Wrapper function for training gpLearner model
@@ -505,6 +506,8 @@ def configure_logger(args):
             'sampling': 'random' if args['sampler'] is None else args['sampler'],
             'condition_on_length': args['condition_on_length'],
             'seed': args['seed'],
+            'data_seed': args['data_seed'],
+            'warmup': args['warmup'],
         }
     )
 
@@ -574,6 +577,7 @@ def configure_model(args):
         'gp_latent_size': args['gp_latent_size'],
         'all_genes': args['all_genes'],
         'condition_on_length': args['condition_on_length'],
+        'warmup': args['warmup'],
     }
 
     global_params = {
@@ -631,6 +635,7 @@ def configure_lightning_module(model, gp_similarity, args):
         # else
         'calc_gp_loss': args['calc_gp_loss'],
         'calc_gene_loss': args['calc_gene_loss'],
+        'warmup': args['warmup'],
     }
 
     global_params = {

@@ -186,7 +186,7 @@ class GeneWrapper(nn.Module):
                 gene_name_path,
             )
 
-            gene_tokens = list(gene_tokens)
+            gene_tokens = sorted(list(gene_tokens))
 
             # [0, 1, 2, 3] based on Geneformer vocab
             no_mask_tokens = [0, 1, 2, 3]
@@ -225,6 +225,10 @@ class GeneWrapper(nn.Module):
         self.max_seq_len = config_dict['max_seq_len']
 
     def forward(self, input_dataset, masking):
+        # print('idx', input_dataset['idx'])
+        # Clean up - remove Geneformer cls since we add our own
+        input_dataset['input_ids'] = input_dataset['input_ids'][:, 1:]
+
         # input is tokenized dataset
         # get gene embeddings based on input_ids
         if hasattr(self, 'max_seq_len') and self.max_seq_len:
@@ -259,7 +263,12 @@ class GeneWrapper(nn.Module):
         )
 
         gene_output = {}
-        gene_output['gene_emb'] = emb_out['gene_embeddings']
+        gene_output['gene_emb'] = emb_out['gene_embeddings'].clone().detach()
+
+        # print('Gene emb cell 1', gene_output['gene_emb'][0, :5, :5])
+        # print(('Emb first 5 genes', emb_out['gene_embeddings'][:5, 0, :5]))
+        # raise ValueError('stop')
+
         gene_output['gene_mlm_labels'] = emb_out['gene_labels']
         gene_output['gene_mlm_logits'] = emb_out['logits_lm']
         gene_output['gene_encoder_cls'] = emb_out['cls']
@@ -939,6 +948,7 @@ class gpTransformerBase(nn.Module):
         use_l2_norm=False,
         all_genes=None,
         condition_on_length=False,
+        warmup=0,
     ):
         """
         database :
@@ -994,6 +1004,7 @@ class gpTransformerBase(nn.Module):
         self.fm_encoder_name = fm_encoder_name
         self.use_l2_norm = use_l2_norm
         self.condition_on_length = condition_on_length
+        self.warmup = warmup
 
         if fm_encoder_pkg == 'geneformer':
             geneformer_repo_path = get_gf_repo()
@@ -1157,12 +1168,16 @@ class gpTransformerBase(nn.Module):
         return_gf_cell_emb=False,
         gp_of_interest=None,
         masking=False,
+        epoch=None,
     ):
         # input is tokenized dataset
         emb_out = self.gf_wrapper(
             input_dataset,
             masking=masking,
         )
+
+        if hasattr(self, 'warmup') and isinstance(epoch, int) and epoch < self.warmup:
+            return emb_out
 
         # Extract embeddings for each gene program
         # For backwards compataibilty
