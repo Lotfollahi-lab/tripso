@@ -224,7 +224,12 @@ class GeneWrapper(nn.Module):
 
         self.max_seq_len = config_dict['max_seq_len']
 
-    def forward(self, input_dataset, masking):
+    def forward(
+        self,
+        input_dataset,
+        masking,
+        return_mean_non_padding=False,
+    ):
         # print('idx', input_dataset['idx'])
         # Clean up - remove Geneformer cls since we add our own
         input_dataset['input_ids'] = input_dataset['input_ids'][:, 1:]
@@ -260,6 +265,7 @@ class GeneWrapper(nn.Module):
             return_attention=False,
             return_gene_embeddings=True,
             lengths=input_dataset['scaled_length'],
+            return_mean_non_padding=return_mean_non_padding,
         )
 
         gene_output = {}
@@ -387,6 +393,7 @@ class gpWrapper(nn.Module):
         return_gene_embeddings=False,
         tokens_to_keep=None,
         gp_of_interest=None,
+        return_mean_non_padding=False,
     ):
         # Subset GP embeddings
         gp_token_list = []
@@ -441,6 +448,7 @@ class gpWrapper(nn.Module):
                     return_attention=return_attention,
                     return_gene_embeddings=return_gene_embeddings,
                     lengths=num_genes_per_cell,
+                    return_mean_non_padding=return_mean_non_padding,
                 )
 
                 gp_token_list.append(encoder_output['cls'])

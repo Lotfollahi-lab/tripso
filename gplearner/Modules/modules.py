@@ -589,6 +589,7 @@ class gpTransformerEncoder(nn.Module):
         attn_mask,
         return_attention,
         return_gene_embeddings=False,
+        return_mean_non_padding=False,
         lengths=None,
     ):
         # Optionally reduce dimensions
@@ -629,8 +630,14 @@ class gpTransformerEncoder(nn.Module):
             token = x[:, 0, :-1]
         else:
             token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
+
         # instead of token, take mean of all gene embeddings
         # token = x[:, 1:, :].mean(dim=1)
+        if return_mean_non_padding:
+            mask_non_padding = attn_mask[:, 1:]
+            x = x[:, 1:, :]
+            x = x * mask_non_padding.unsqueeze(-1)
+            token = x.sum(dim=1) / mask_non_padding.sum(dim=1).unsqueeze(-1)
 
         logits_lm = self.decoder(x)
 

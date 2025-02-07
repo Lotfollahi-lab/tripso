@@ -121,6 +121,7 @@ class gpBase(pl.LightningModule):
         token_to_gene_to_keep_dict: Optional[Dict] = None,
         gene_dir_tag: Optional[str] = None,
         return_attention: bool = False,
+        return_mean_non_padding: bool = False,
         gp: Optional[str] = None,
         save_emb: bool = False,
         split_label: str = 'train',
@@ -225,6 +226,7 @@ class gpBase(pl.LightningModule):
         self.tokens_to_keep = tokens_to_keep
         self.token_to_gene_to_keep_dict = token_to_gene_to_keep_dict
         self.genes_to_keep = genes_to_keep
+        self.return_mean_non_padding = return_mean_non_padding
 
         self.gene_dir_tag = gene_dir_tag
         self.return_attention = return_attention
@@ -349,7 +351,12 @@ class gpBase(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         if self.save_emb:
-            output = self.forward(batch, masking=False, epoch='test')
+            if self.return_mean_non_padding:
+                output = self.forward(
+                    batch, masking=False, epoch='test', return_mean_non_padding=True
+                )
+            else:
+                output = self.forward(batch, masking=False, epoch='test')
 
             emb_dict = {}
 
@@ -442,7 +449,10 @@ class gpBase(pl.LightningModule):
 
     def on_test_epoch_end(self):
         if self.save_emb:
-            output_path = os.path.join(self.output_dir, 'embeddings')
+            if self.return_mean_non_padding:
+                output_path = os.path.join(self.output_dir, 'mean_embeddings')
+            else:
+                output_path = os.path.join(self.output_dir, 'embeddings')
             os.makedirs(output_path, exist_ok=True)
             output_name = os.path.join(output_path, f'{self.split_label}_set')
             self.emb_dataset.save_to_disk(output_name)

@@ -228,6 +228,7 @@ class gpEval:
         num_virtual_tokens=0,
         return_virtual_tokens=False,
         token_to_gene_to_keep_dict=None,
+        return_mean_non_padding=False,
     ):
         if self.model_type == 'Base':
             gp_transformer = gpBase.load_from_checkpoint(
@@ -276,6 +277,7 @@ class gpEval:
         gp_transformer.save_emb = save_emb
         gp_transformer.split_label = split_label
         gp_transformer.return_virtual_tokens = return_virtual_tokens
+        gp_transformer.return_mean_non_padding = return_mean_non_padding
 
         gp_transformer.model.multi_gp_encoder.num_virtual_tokens = num_virtual_tokens
         gp_transformer.model.cond_to_shift = self.cond_to_shift
@@ -324,7 +326,9 @@ class gpEval:
 
         return gp_transformer
 
-    def generate_embeddings(self, split='train', precision=32):
+    def generate_embeddings(
+        self, split='train', precision=32, return_mean_non_padding=False
+    ):
         '''
         Save embeddings as Dataset
         '''
@@ -334,6 +338,7 @@ class gpEval:
             split_label=split,
             hparam_save=self.hparam_save,
             num_virtual_tokens=self.num_virtual_tokens,
+            return_mean_non_padding=return_mean_non_padding,
         )
 
         txdata = txDataModule(
