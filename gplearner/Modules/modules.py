@@ -639,6 +639,9 @@ class gpTransformerEncoder(nn.Module):
             x = x * mask_non_padding.unsqueeze(-1)
             token = x.sum(dim=1) / mask_non_padding.sum(dim=1).unsqueeze(-1)
 
+            # set to all 0 if no GP genes --> avoids nan values
+            token[mask_non_padding.sum(dim=1) == 0] = 0
+
         logits_lm = self.decoder(x)
 
         output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
