@@ -247,6 +247,7 @@ class gpBase(pl.LightningModule):
             gp_of_interest=self.gp,
             return_attention=self.return_attention,
             epoch=epoch,
+            return_mean_non_padding=self.return_mean_non_padding,
         )
 
         return out
@@ -351,12 +352,7 @@ class gpBase(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         if self.save_emb:
-            if self.return_mean_non_padding:
-                output = self.forward(
-                    batch, masking=False, epoch='test', return_mean_non_padding=True
-                )
-            else:
-                output = self.forward(batch, masking=False, epoch='test')
+            output = self.forward(batch, masking=False, epoch='test')
 
             emb_dict = {}
 

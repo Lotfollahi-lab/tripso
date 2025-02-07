@@ -337,7 +337,7 @@ class gpWrapper(nn.Module):
                 gene_name_path,
             )
 
-            gp_tokens_tensor = torch.tensor(list(gp_tokens), dtype=torch.int32)
+            gp_tokens_tensor = torch.tensor(sorted(list(gp_tokens)), dtype=torch.int32)
 
             self.register_buffer(f'gp{i}_tokens', gp_tokens_tensor)
 
@@ -1177,11 +1177,13 @@ class gpTransformerBase(nn.Module):
         gp_of_interest=None,
         masking=False,
         epoch=None,
+        return_mean_non_padding=False,
     ):
         # input is tokenized dataset
         emb_out = self.gf_wrapper(
             input_dataset,
             masking=masking,
+            return_mean_non_padding=return_mean_non_padding,
         )
 
         if hasattr(self, 'warmup') and isinstance(epoch, int) and epoch < self.warmup:
@@ -1203,6 +1205,7 @@ class gpTransformerBase(nn.Module):
             return_attention=return_attention,
             tokens_to_keep=tokens_to_keep,
             gp_of_interest=gp_to_pass,
+            return_mean_non_padding=return_mean_non_padding,
         )
 
         # Optionally return logits for gene encoder
