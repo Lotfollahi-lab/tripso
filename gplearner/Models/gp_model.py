@@ -124,6 +124,8 @@ class GeneWrapper(nn.Module):
         gp_latent_size,
         use_gf_embeddings=None,
         condition_on_length=False,
+        attn_dropout=0.0,
+        init_sparsity=0.0,
     ):
         super().__init__()
 
@@ -220,6 +222,8 @@ class GeneWrapper(nn.Module):
             use_flash=config_dict['use_flash'],
             no_mask_tokens=no_mask_tokens,
             condition_on_length=condition_on_length,
+            attn_drop_rate=attn_dropout,
+            sparsity=init_sparsity,
         )
 
         self.max_seq_len = config_dict['max_seq_len']
@@ -306,6 +310,8 @@ class gpWrapper(nn.Module):
         fm_model_input_size,
         use_l2_norm,
         condition_on_length,
+        attn_dropout,
+        init_sparsity,
     ):
         super().__init__()
 
@@ -379,6 +385,8 @@ class gpWrapper(nn.Module):
                     use_l2_norm=use_l2_norm,
                     no_mask_tokens=[0, 1, 2, 3],
                     condition_on_length=condition_on_length,
+                    attn_drop_rate=attn_dropout,
+                    sparsity=init_sparsity,
                 )
                 for i in range(len(gp_inputs))
             ]
@@ -394,6 +402,7 @@ class gpWrapper(nn.Module):
         tokens_to_keep=None,
         gp_of_interest=None,
         return_mean_non_padding=False,
+        init_sparsity=0.0,
     ):
         # Subset GP embeddings
         gp_token_list = []
@@ -957,6 +966,7 @@ class gpTransformerBase(nn.Module):
         all_genes=None,
         condition_on_length=False,
         warmup=0,
+        init_sparsity=0.0,
     ):
         """
         database :
@@ -1109,6 +1119,8 @@ class gpTransformerBase(nn.Module):
                 use_gf_embeddings=use_gf_embeddings,
                 gp_latent_size=gp_latent_size,
                 condition_on_length=condition_on_length,
+                attn_dropout=attn_dropout,
+                init_sparsity=init_sparsity,
             )
 
         else:
@@ -1165,6 +1177,8 @@ class gpTransformerBase(nn.Module):
             fm_model_input_size=fm_model_input_size,
             use_l2_norm=use_l2_norm,
             condition_on_length=condition_on_length,
+            attn_dropout=attn_dropout,
+            init_sparsity=init_sparsity,
         )
 
     def forward(
@@ -1329,6 +1343,8 @@ class gpTransformerGlobal(gpTransformerBase):
         gp_of_interest=None,
         masking=False,
         masking_global=False,
+        epoch=None,
+        return_mean_non_padding=False,
     ):
         return_gf_cell_emb = True if self.global_loss == 'mse' else False
 
@@ -1340,11 +1356,16 @@ class gpTransformerGlobal(gpTransformerBase):
             return_gf_cell_emb,
             gp_of_interest=gp_of_interest,
             masking=masking,
+            epoch=epoch,
+            return_mean_non_padding=return_mean_non_padding,
         )
 
         if return_gene_embeddings:
             return base_output
-        cell_output = self.cell_token_learner(base_output, masking=masking_global)
+        cell_output = self.cell_token_learner(
+            base_output,
+            masking=masking_global,
+        )
 
         base_output['cell_token'] = cell_output['cell_token']
 

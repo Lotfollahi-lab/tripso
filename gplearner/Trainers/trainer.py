@@ -686,7 +686,7 @@ class gpGlobal(gpBase):
                 setattr(self, f'{stage}_pred_counts_list', [])
 
     def training_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True)
+        output = self.forward(batch, masking=True, epoch='Global')
 
         if self.calc_gp_loss:
             loss_base = self.compute_gp_loss(batch, output)
@@ -809,7 +809,7 @@ class gpGlobal(gpBase):
         setattr(self, f'{stage}_loss', [])
 
     def validation_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True)
+        output = self.forward(batch, masking=True, epoch='Global')
 
         if self.calc_gp_loss:
             loss_base = super().compute_gp_loss(batch, output)

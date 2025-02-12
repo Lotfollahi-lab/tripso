@@ -132,6 +132,7 @@ class Attention(nn.Module):
 
         self.qkv = nn.Linear(input_dim, input_dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
+        self.attn_drop_rate = attn_drop
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         self.use_flash = use_flash
@@ -167,7 +168,7 @@ class Attention(nn.Module):
                     v,
                     # pytorch flash attention does not support mask
                     scale=self.scale,
-                    dropout_p=0.0,
+                    dropout_p=self.attn_drop_rate,
                     attn_mask=mask,
                 )  # if scale is None, default is 1/sqrt(dim)
 
@@ -432,6 +433,7 @@ class gpTransformerEncoder(nn.Module):
         output_dim=None,
         no_mask_tokens=[None],
         condition_on_length=False,
+        sparsity=0.0,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -519,7 +521,36 @@ class gpTransformerEncoder(nn.Module):
         self.decoder = nn.Linear(decoder_in, decoder_out, bias=False)
         self.decoder_bias = nn.Parameter(torch.zeros(n_gp_tokens))
 
-        self.apply(self._init_weights)
+        self.sparsity = sparsity
+        if self.sparsity > 0:
+            self.apply(self.sparse_init)
+
+        else:
+            self.apply(self._init_weights)
+
+    def sparse_init(self, m, std=0.01):
+        """
+        Initialize the tensor with sparsity and standard deviation for non-zero values.
+        Parameters:
+        tensor (torch.Tensor): The weight tensor to be initialized.
+        sparsity (float): Fraction of elements set to zero
+        std (float): Standard deviation of the non-zero elements.
+        """
+        if isinstance(m, nn.Linear):
+            with torch.no_grad():
+                mask = (
+                    torch.rand(m.weight.shape) > self.sparsity
+                )  # True for non-zero elements
+                values = torch.randn(m.weight.shape) * std  # Random normal values
+                m.weight.zero_()  # Set all elements to zero
+                m.weight[mask] = values[mask]  # Assign only to non-zero positions
+
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):

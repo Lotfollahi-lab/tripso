@@ -99,6 +99,7 @@ def run_training(
     gp_latent_size: Optional[int] = None,
     all_genes: Optional[list] = None,
     condition_on_length: Optional[bool] = False,
+    init_sparsity: Optional[float] = 0.0,
     # for large scale pretraining:
     limit_train_batches: Optional[float] = 1.0,
     limit_val_batches: Optional[float] = 1.0,
@@ -508,6 +509,7 @@ def configure_logger(args):
             'seed': args['seed'],
             'data_seed': args['data_seed'],
             'warmup': args['warmup'],
+            'init_sparsity': args['init_sparsity'],
         }
     )
 
@@ -578,6 +580,7 @@ def configure_model(args):
         'all_genes': args['all_genes'],
         'condition_on_length': args['condition_on_length'],
         'warmup': args['warmup'],
+        'init_sparsity': args['init_sparsity'],
     }
 
     global_params = {
