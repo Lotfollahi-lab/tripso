@@ -58,7 +58,7 @@ def wrangle_mapping(
         if set(label_source) != set(order_source):
             raise ValueError(
                 'Mismatch between source labels and categories.'
-                f'\nProvided categories are {set(label_source)},'
+                f'\nProvided categories are {set(label_source)}, '
                 f'but categories are {set(order_source)}'
             )
 
@@ -66,7 +66,7 @@ def wrangle_mapping(
         if set(label_target) != set(order_target):
             raise ValueError(
                 'Mismatch between target labels and categories.'
-                f'\nProvided categories are {set(label_target)},'
+                f'\nProvided categories are {set(label_target)}, '
                 f'but categories are {set(order_target)}'
             )
 

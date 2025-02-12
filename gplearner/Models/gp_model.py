@@ -471,7 +471,10 @@ class gpWrapper(nn.Module):
                 continue
 
         # Concatenate tensors
-        z = torch.stack(gp_token_list, dim=1)
+        if len(gp_token_list) > 1:
+            z = torch.stack(gp_token_list, dim=1)
+        else:
+            z = gp_token_list[0].unsqueeze(dim=1)
 
         # store for output
         output = {
@@ -1334,6 +1337,14 @@ class gpTransformerGlobal(gpTransformerBase):
                     d_model=self.gp_latent_size,
                 )
 
+    def base_output_to_cell_output(
+        self,
+        base_output: Dict[str, torch.Tensor],
+        masking_global: bool = False,
+    ):
+        cell_output = self.cell_token_learner(base_output, masking=masking_global)
+        return cell_output
+
     def forward(
         self,
         input_dataset,
@@ -1362,6 +1373,7 @@ class gpTransformerGlobal(gpTransformerBase):
 
         if return_gene_embeddings:
             return base_output
+          
         cell_output = self.cell_token_learner(
             base_output,
             masking=masking_global,
@@ -1397,6 +1409,28 @@ class gpTransformerGlobal(gpTransformerBase):
         output = self.cell_token_learner.get_attn(base_output)
 
         return output
+
+
+class gpTransformerGlobalLinear(gpTransformerGlobal):
+    """Equivalent to gpTransformerGlobal, but with no cell token learner
+    in the forward pass.
+    
+    The cell token is simply taken to be the gp token of the first
+    gp of interest.
+    """
+
+    def __init__(self, **kwargs):
+        super.__init__(**kwargs)
+
+    def base_output_to_cell_output(
+        self,
+        base_output: Dict[str, torch.Tensor],
+        masking_global: bool = False,
+    ):
+        cell_output = {
+            'cell_token': base_output['z'][:, 0, ...]
+        }  # <CLS> of gp_of_interest
+        return cell_output
 
 
 ####################################

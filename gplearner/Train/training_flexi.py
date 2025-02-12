@@ -26,6 +26,7 @@ from ..Models.gp_model import (
     gpTransformerBase,
     gpTransformerBaseWithPrompt,
     gpTransformerGlobal,
+    gpTransformerGlobalLinear,
     gpTransformerGlobalWithPrompt,
     gpTransformerPrototypes,
 )
@@ -118,6 +119,7 @@ def run_training_from_select_gps(
     use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
     load_cell_token_learner: bool = False,
+    gp_of_interest: Optional[str] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -201,6 +203,8 @@ def run_training_from_select_gps(
         whether to use flash attention in transformer block
     load_cell_token_learner:
         whether to load the cell token learner from previous global training
+    gp_of_interest
+        Sole GP to use in forward pass
     """
     ##########################################
     # Setup
@@ -491,7 +495,12 @@ def configure_model_version(args, tag):
         return model
 
     if model_type == 'Global':
-        model = gpTransformerGlobal(**common_params, **global_params)
+        if (args['global_loss'] == 'supervised') and (
+            args['gp_of_interest'] is not None
+        ):
+            model = gpTransformerGlobalLinear(**common_params, **global_params)
+        else:
+            model = gpTransformerGlobal(**common_params, **global_params)
         return model
 
     if model_type == 'Mean':
@@ -517,6 +526,8 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
         # DeepSpeedCPUAdam
         # if args['strategy'].startswith('deepspeed')
         # else
+        'gp': args['gp_of_interest'],
+        'calc_gp_loss': args['calc_gp_loss'],
     }
 
     global_params = {
