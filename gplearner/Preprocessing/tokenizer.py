@@ -35,7 +35,7 @@ class GPTokenizer(TranscriptomeTokenizer):
         tokenized_by_gp = []
 
         for i, genes in enumerate(tokenized_cells):
-            x = list(set(genes) & self.gp_tokens)
+            x = [g for g in genes if g in self.gp_tokens]
             tokenized_by_gp += [x]
 
         dataset_dict = {'input_ids': tokenized_by_gp}
