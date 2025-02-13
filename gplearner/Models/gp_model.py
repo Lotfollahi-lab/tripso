@@ -1373,10 +1373,10 @@ class gpTransformerGlobal(gpTransformerBase):
 
         if return_gene_embeddings:
             return base_output
-          
-        cell_output = self.cell_token_learner(
+
+        cell_output = self.base_output_to_cell_output(
             base_output,
-            masking=masking_global,
+            masking_global=masking_global,
         )
 
         base_output['cell_token'] = cell_output['cell_token']
@@ -1414,7 +1414,7 @@ class gpTransformerGlobal(gpTransformerBase):
 class gpTransformerGlobalLinear(gpTransformerGlobal):
     """Equivalent to gpTransformerGlobal, but with no cell token learner
     in the forward pass.
-    
+
     The cell token is simply taken to be the gp token of the first
     gp of interest.
     """
