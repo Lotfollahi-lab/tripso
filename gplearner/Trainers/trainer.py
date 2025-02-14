@@ -383,7 +383,7 @@ class gpBase(pl.LightningModule):
             return None
 
         if self.return_gene_embeddings:
-            output = self.forward(batch, masking=False)
+            output = self.forward(batch, masking=False, epoch=None)
 
             emb_dict = {}
 
@@ -410,7 +410,7 @@ class gpBase(pl.LightningModule):
         if self.return_attention:
             # returns a dictionary where each gene is a key
             if self.gp != 'cell_token':
-                output = self.model.get_cls_attn(batch, self.gp)
+                output = self.model.get_cls_attn(batch, self.gp, masking=False)
 
                 token_names = list(output.keys())
 

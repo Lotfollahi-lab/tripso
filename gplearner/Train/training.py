@@ -502,14 +502,10 @@ def configure_logger(args):
             'bert_config': args['bert_config'],
             'use_gf_embeddings': args['use_gf_embeddings'],
             'gp_latent_size': args['gp_latent_size'],
-            'use_l2_norm_main': args['use_l2_norm'],
             'mask_gp_genes_in_gene_encoder': isinstance(args['all_genes'], list),
             'sampling': 'random' if args['sampler'] is None else args['sampler'],
-            'condition_on_length': args['condition_on_length'],
             'seed': args['seed'],
             'data_seed': args['data_seed'],
-            'warmup': args['warmup'],
-            'init_sparsity': args['init_sparsity'],
         }
     )
 
@@ -534,6 +530,10 @@ def configure_logger(args):
             wandb_logger.experiment.config.update(
                 {
                     'global_masking_rate': args['global_masking_rate'],
+                    'use_l2_norm_main': args['use_l2_norm'],
+                    'condition_on_length': args['condition_on_length'],
+                    'warmup': args['warmup'],
+                    'init_sparsity': args['init_sparsity'],
                 }
             )
 
