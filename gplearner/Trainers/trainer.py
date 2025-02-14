@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
+from peft import LoraConfig, get_peft_model
 from scipy.sparse import csr_matrix
 from sklearn.metrics import classification_report, roc_auc_score
 from torch import optim
@@ -104,7 +105,7 @@ class gpBase(pl.LightningModule):
         lambda_go_similarity=1e-2,
         go_similarity: Optional[pd.DataFrame] = None,
         go_similarity_gp: Optional[str] = 'hvg',  # GP to apply GO similarity loss:
-        lr: float = 1e-3,
+        lr: Union[float, Dict] = 1e-3,
         weight_decay: float = 0,
         optimizer: Union[
             optim.Adam,
@@ -120,14 +121,15 @@ class gpBase(pl.LightningModule):
         token_to_gene_to_keep_dict: Optional[Dict] = None,
         gene_dir_tag: Optional[str] = None,
         return_attention: bool = False,
+        return_mean_non_padding: bool = False,
         gp: Optional[str] = None,
-        finetune_lr: Union[float, dict] = 1e-5,
-        use_finetune_lr: bool = False,
         save_emb: bool = False,
         split_label: str = 'train',
         hparam_save: str = 'all',
         set_gpfinder_weight_decay: Optional[float] = None,
         calc_gp_loss: bool = True,
+        calc_gene_loss: bool = False,
+        warmup: Optional[int] = 0,
     ) -> None:
         super().__init__()
         # save hyperparameters
@@ -142,6 +144,8 @@ class gpBase(pl.LightningModule):
         self.model = model
         self.model_type = 'Base'
         self.calc_gp_loss = calc_gp_loss
+        self.calc_gene_loss = calc_gene_loss
+        self.warmup = warmup
 
         if use_gp_similarity_loss and gp_similarity is None:
             raise ValueError(
@@ -203,8 +207,6 @@ class gpBase(pl.LightningModule):
         self.total_epochs = total_epochs
         self.weight_decay = weight_decay
         self.optimizer_class = optimizer
-        self.finetune_lr = finetune_lr
-        self.use_finetune_lr = use_finetune_lr
         self.save_emb = save_emb
         self.split_label = split_label
         self.set_gpfinder_weight_decay = set_gpfinder_weight_decay
@@ -224,6 +226,7 @@ class gpBase(pl.LightningModule):
         self.tokens_to_keep = tokens_to_keep
         self.token_to_gene_to_keep_dict = token_to_gene_to_keep_dict
         self.genes_to_keep = genes_to_keep
+        self.return_mean_non_padding = return_mean_non_padding
 
         self.gene_dir_tag = gene_dir_tag
         self.return_attention = return_attention
@@ -235,7 +238,7 @@ class gpBase(pl.LightningModule):
         self.token_dataset = None
         self.attn_adata_holder: List[ad.AnnData] = []
 
-    def forward(self, x, masking):
+    def forward(self, x, masking, epoch):
         out = self.model(
             x,
             masking=masking,
@@ -243,6 +246,8 @@ class gpBase(pl.LightningModule):
             tokens_to_keep=self.tokens_to_keep,
             gp_of_interest=self.gp,
             return_attention=self.return_attention,
+            epoch=epoch,
+            return_mean_non_padding=self.return_mean_non_padding,
         )
 
         return out
@@ -267,16 +272,34 @@ class gpBase(pl.LightningModule):
                 )
 
     def training_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True)
+        output = self.forward(batch, masking=True, epoch=self.current_epoch)
 
-        if self.calc_gp_loss:
-            loss_output = self.compute_gp_loss(batch, output)
-            loss_per_gp = loss_output['loss_per_gp']
-            self.log_gp_loss(loss_per_gp)
+        # Optionally calculate MLM for gene encoder
+        if self.calc_gene_loss:
+            gene_loss = self.compute_gene_loss(batch, output)
+            self.log(
+                'train/gene_masking_loss',
+                gene_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+            loss = gene_loss
         else:
-            loss_output = {'total_loss': torch.tensor(0).to(self.device)}
+            loss = torch.tensor(0.0).to(self.device)
 
-        loss = loss_output['total_loss']
+        # GP masking loss
+        if hasattr(self, 'warmup') and self.current_epoch >= self.warmup:
+            if self.calc_gp_loss:
+                loss_output = self.compute_gp_loss(batch, output)
+                loss_per_gp = loss_output['loss_per_gp']
+                self.log_gp_loss(loss_per_gp)
+        else:
+            loss_output = {'total_loss': torch.tensor(0.0).to(self.device)}
+
+        loss += loss_output['total_loss']
 
         self.log(
             'train/loss',
@@ -294,14 +317,10 @@ class gpBase(pl.LightningModule):
         pass
 
     def validation_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True)
+        output = self.forward(batch, masking=True, epoch='val')
 
         if self.calc_gp_loss:
             loss_output = self.compute_gp_loss(batch, output)
-            loss_per_gp = loss_output['loss_per_gp']
-
-            self.log_gp_loss(loss_per_gp)
-
         else:
             loss_output = {'total_loss': torch.tensor(0).to(self.device)}
 
@@ -333,7 +352,7 @@ class gpBase(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         if self.save_emb:
-            output = self.forward(batch, masking=False)
+            output = self.forward(batch, masking=False, epoch='test')
 
             emb_dict = {}
 
@@ -342,6 +361,9 @@ class gpBase(pl.LightningModule):
                 emb_dict[f'{gp}_num_genes'] = (
                     output['num_genes_per_cell_list'][i].cpu().numpy().T
                 )
+
+            if 'gene_encoder_cls' in output:
+                emb_dict['gene_encoder_cls'] = output['gene_encoder_cls'].detach().cpu()
 
             if 'cell_token' in output:
                 emb_dict['cell_token'] = output['cell_token'].detach().cpu()
@@ -361,7 +383,7 @@ class gpBase(pl.LightningModule):
             return None
 
         if self.return_gene_embeddings:
-            output = self.forward(batch, masking=False)
+            output = self.forward(batch, masking=False, epoch=None)
 
             emb_dict = {}
 
@@ -388,7 +410,7 @@ class gpBase(pl.LightningModule):
         if self.return_attention:
             # returns a dictionary where each gene is a key
             if self.gp != 'cell_token':
-                output = self.model.get_cls_attn(batch, self.gp)
+                output = self.model.get_cls_attn(batch, self.gp, masking=False)
 
                 token_names = list(output.keys())
 
@@ -423,7 +445,10 @@ class gpBase(pl.LightningModule):
 
     def on_test_epoch_end(self):
         if self.save_emb:
-            output_path = os.path.join(self.output_dir, 'embeddings')
+            if self.return_mean_non_padding:
+                output_path = os.path.join(self.output_dir, 'mean_embeddings')
+            else:
+                output_path = os.path.join(self.output_dir, 'embeddings')
             os.makedirs(output_path, exist_ok=True)
             output_name = os.path.join(output_path, f'{self.split_label}_set')
             self.emb_dataset.save_to_disk(output_name)
@@ -449,6 +474,16 @@ class gpBase(pl.LightningModule):
             )
 
             return None
+
+    def compute_gene_loss(self, batch, fw_pass_output):
+        loss = F.cross_entropy(
+            fw_pass_output['gene_mlm_logits'].reshape(
+                -1, fw_pass_output['gene_mlm_logits'].shape[-1]
+            ),
+            fw_pass_output['gene_mlm_labels'].reshape(-1),
+        )
+
+        return loss
 
     def compute_gp_loss(self, batch, fw_pass_output):
         output = fw_pass_output
@@ -510,21 +545,23 @@ class gpBase(pl.LightningModule):
 
         def get_lr_for_param(name):
             """Determine the learning rate for a parameter based on its name."""
-            if isinstance(self.finetune_lr, float):
-                # Use finetune_lr for specific parameter names
-                if 'multi_gp_encoder' in name or 'gf_wrapper' in name:
-                    return self.finetune_lr
-                else:
-                    return self.lr
-            elif isinstance(self.finetune_lr, dict):
+            if isinstance(self.lr, float):
+                return self.lr
+            elif isinstance(self.lr, dict):
                 # Use the learning rate from the dict if a key matches part of the name
-                for key, lr in self.finetune_lr.items():
+                for key, lr in self.lr.items():
                     if key in name:
                         return lr
-                # Default to self.lr if no key matches
-                return self.lr
+                # Default if no key matches
+                if 'default' in self.lr:
+                    return self.lr['default']
+                else:
+                    raise ValueError(
+                        f'No matching lr for parameter {name},'
+                        'and no default value provided'
+                    )
             else:
-                raise ValueError('finetune_lr must be either a float or a dict.')
+                raise ValueError('lr must be either a float or a dict.')
 
         # Group parameters with their respective learning rates
         lr_to_params = {}
@@ -540,10 +577,13 @@ class gpBase(pl.LightningModule):
             {'params': param_list, 'lr': lr} for lr, param_list in lr_to_params.items()
         ]
 
+        default_lr = self.lr if isinstance(self.lr, float) else self.lr['default']
+
         optimizer = self.optimizer_class(
-            grouped_parameters, lr=self.lr, weight_decay=self.weight_decay
+            grouped_parameters, lr=default_lr, weight_decay=self.weight_decay
         )
 
+        # Configure the learning rate scheduler.
         if self.lr_scheduler == 'ReduceLROnPlateau':
             print('Using ReduceLROnPlateau scheduler')
             LRscheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -646,7 +686,7 @@ class gpGlobal(gpBase):
                 setattr(self, f'{stage}_pred_counts_list', [])
 
     def training_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True)
+        output = self.forward(batch, masking=True, epoch='Global')
 
         if self.calc_gp_loss:
             loss_base = self.compute_gp_loss(batch, output)
@@ -769,7 +809,7 @@ class gpGlobal(gpBase):
         setattr(self, f'{stage}_loss', [])
 
     def validation_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True)
+        output = self.forward(batch, masking=True, epoch='Global')
 
         if self.calc_gp_loss:
             loss_base = super().compute_gp_loss(batch, output)
@@ -1027,6 +1067,82 @@ class gpGlobal(gpBase):
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         return reconstruction_loss
+
+
+class gpGlobalLoRA(gpGlobal):
+    def __init__(self, lora_config_args, stage='train', **kwargs):
+        # define global model
+        super().__init__(**kwargs)
+        self.modules_to_finetune = lora_config_args['modules_to_finetune']
+        self.lora_config_dict = {
+            k: v for k, v in lora_config_args.items() if k != 'modules_to_finetune'
+        }
+
+        self.setup_lora(stage=stage)
+
+    def setup_lora(self, stage):
+        gp_modules = []
+        for n, p in self.model.named_parameters():
+            if 'gf_wrapper' in self.modules_to_finetune:
+                if 'attention.self.query' in n or 'attention.self.key' in n:
+                    name = n.replace('.weight', '').replace('bias.', '')
+                    gp_modules.append(name)
+
+            if 'multi_gp_encoder' in self.modules_to_finetune:
+                if 'attn.qkv' in n:
+                    name = n.replace('.weight', '').replace('bias.', '')
+                    gp_modules.append(name)
+
+        lora_config = LoraConfig(
+            r=self.lora_config_dict['r'],
+            lora_alpha=self.lora_config_dict['lora_alpha'],
+            target_modules=gp_modules,
+            lora_dropout=self.lora_config_dict['lora_dropout'],
+        )
+
+        self.model = get_peft_model(self.model, lora_config)
+
+        if stage == 'train':
+            # Enable gradients global learner
+            for name, param in self.model.named_parameters():
+                if (
+                    name == 'theta'
+                    or 'cell_token_learner' in name
+                    or 'clf_head' in name
+                    or 'count_head' in name
+                ):
+                    param.requires_grad = True
+
+            if 'multi_gp_encoder' not in self.modules_to_finetune:
+                for n, p in self.model.named_parameters():
+                    if 'multi_gp_encoder' in n:
+                        p.requires_grad = False
+
+            self.model.print_trainable_parameters()
+
+    def state_dict(self):
+        """Save model and LoRA adapter parameters."""
+        base_state_dict = super().state_dict()
+        # Save LoRA adapter parameters separately
+        lora_state_dict = self.model.state_dict()  # Includes LoRA parameters
+        base_state_dict.update(lora_state_dict)  # Merge dictionaries
+
+        return base_state_dict
+
+    def load_state_dict(self, state_dict, strict=False):
+        """Load model and LoRA adapter parameters."""
+        # # Extract LoRA configuration and modules to finetune
+        # self.modules_to_finetune = state_dict['modules_to_finetune']
+        # self.lora_config_args = state_dict['lora_config_args']
+
+        # Separate LoRA adapter parameters
+        lora_state_dict = {k: v for k, v in state_dict.items() if 'lora' in k}
+        base_state_dict = {k: v for k, v in state_dict.items() if 'lora' not in k}
+
+        # Load base model parameters
+        super().load_state_dict(base_state_dict, strict=False)
+        # Load LoRA adapter parameters
+        self.model.load_state_dict(lora_state_dict, strict=False)
 
 
 # ------------------------------------------------------

@@ -23,165 +23,47 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange, repeat
-from flash_attn import flash_attn_func
+
+# from flash_attn import flash_attn_func
 from torch import Tensor
 
-try:
-    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-
-except ModuleNotFoundError:
-    print('flex_attention not available')
-
-
-from gplearner.Utils.utils import (
-    RMSNorm,
-    apply_rotary_emb,
+from ..Utils.utils import (
     drop_path,
     mlm_mask_generator,
     trunc_normal_,
 )
 
 ######################################################################
-# Flex attention
-######################################################################
-
-# Compile flex_attention function if available
-try:
-    flex_attention = torch.compile(
-        flex_attention, dynamic=False, mode='max-autotune-no-cudagraphs'
-    )
-except NameError:
-    pass
-
-######################################################################
-# Differential transformer
-# from https://github.com/microsoft/unilm/blob/master/
-# Diff-Transformer/multihead_flashdiff_2.py
-# Accessed 10/10/2024
+# Extra
 ######################################################################
 
 
-def init_method(tensor, **kwargs):
-    nn.init.kaiming_uniform_(tensor, a=math.sqrt(5))
-
-
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
-    bs, n_kv_heads, slen, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        x[:, :, None, :, :]
-        .expand(bs, n_kv_heads, n_rep, slen, head_dim)
-        .reshape(bs, n_kv_heads * n_rep, slen, head_dim)
-    )
-
-
-def lambda_init_fn(depth):
-    return 0.8 - 0.6 * math.exp(-0.3 * depth)
-
-
-class MultiheadFlashDiff2(nn.Module):
-    """
-    DiffAttn implemented with FlashAttention,
-    for packages that does not support different qk/v dimensions
-    e.g., flash-attention (https://github.com/Dao-AILab/flash-attention)
-    """
-
-    def __init__(
-        self,
-        embed_dim,
-        depth,
-        num_heads,
-        # args:
-        model_parallel_size,
-        decoder_kv_attention_heads,
-    ):
+class ReduceDim(nn.Module):
+    def __init__(self, dim_in, dim_out):
         super().__init__()
-        self.embed_dim = embed_dim
-        # num_heads set to half of Transformer's #heads
-        self.num_heads = num_heads // model_parallel_size
-        self.num_kv_heads = (
-            decoder_kv_attention_heads // model_parallel_size
-            if decoder_kv_attention_heads is not None
-            else num_heads // model_parallel_size
-        )
-        self.n_rep = self.num_heads // self.num_kv_heads
+        if dim_in == dim_out:
+            self.dim_red_layer = nn.Identity()
+        else:
+            self.dim_red_layer = nn.Sequential(
+                nn.Linear(dim_in, dim_out),
+                nn.GELU(),
+            )
 
-        self.head_dim = embed_dim // num_heads  # // 2 (otherwise cant reshape)
-        self.scaling = self.head_dim**-0.5
+        self.apply(self._init_weights)
 
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.k_proj = nn.Linear(embed_dim, embed_dim // self.n_rep, bias=False)
-        self.v_proj = nn.Linear(embed_dim, embed_dim // self.n_rep, bias=False)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=0.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
-        self.lambda_init = lambda_init_fn(depth)
-        self.lambda_q1 = nn.Parameter(
-            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
-        )
-        self.lambda_k1 = nn.Parameter(
-            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
-        )
-        self.lambda_q2 = nn.Parameter(
-            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
-        )
-        self.lambda_k2 = nn.Parameter(
-            torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0, std=0.1)
-        )
-
-        self.subln = RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=False)
-
-    def forward(
-        self,
-        x,
-        rel_pos,
-        attn_mask=None,
-    ):
-        bsz, tgt_len, embed_dim = x.size()
-        src_len = tgt_len
-
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
-
-        q = q.view(bsz, tgt_len, 2 * self.num_heads, self.head_dim)
-        k = k.view(bsz, src_len, 2 * self.num_kv_heads, self.head_dim)
-        v = v.view(bsz, src_len, self.num_kv_heads, 2, self.head_dim)
-
-        q = apply_rotary_emb(q, *rel_pos, interleaved=True)
-        k = apply_rotary_emb(k, *rel_pos, interleaved=True)
-
-        q = q.reshape(bsz, tgt_len, self.num_heads, 2, self.head_dim)
-        k = k.reshape(bsz, src_len, self.num_kv_heads, 2, self.head_dim)
-        q1, q2 = q[:, :, :, 0], q[:, :, :, 1]
-        k1, k2 = k[:, :, :, 0], k[:, :, :, 1]
-        v1, v2 = v[:, :, :, 0], v[:, :, :, 1]
-
-        attn11 = flash_attn_func(q1, k1, v1, causal=True)
-        attn12 = flash_attn_func(q1, k1, v2, causal=True)
-        attn1 = torch.cat([attn11, attn12], dim=-1)
-
-        attn21 = flash_attn_func(q2, k2, v1, causal=True)
-        attn22 = flash_attn_func(q2, k2, v2, causal=True)
-        attn2 = torch.cat([attn21, attn22], dim=-1)
-
-        lambda_1 = torch.exp(
-            torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()
-        ).type_as(q)
-        lambda_2 = torch.exp(
-            torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()
-        ).type_as(q)
-        lambda_full = lambda_1 - lambda_2 + self.lambda_init
-        attn = attn1 - lambda_full * attn2
-
-        attn = self.subln(attn)
-        attn = attn * (1 - self.lambda_init)
-        attn = attn.reshape(bsz, tgt_len, self.num_heads * 2 * self.head_dim)
-
-        attn = self.out_proj(attn)
-        return attn
+    def forward(self, x):
+        return self.dim_red_layer(x)
 
 
 ######################################################################
@@ -250,17 +132,13 @@ class Attention(nn.Module):
 
         self.qkv = nn.Linear(input_dim, input_dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
+        self.attn_drop_rate = attn_drop
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         self.use_flash = use_flash
         self.use_flex = use_flex
 
-    def forward(self, x, attn_mask, return_attention, block_mask):
-        if self.use_flash:
-            return_attention = False
-            # do masking here
-            x = x * attn_mask.unsqueeze(-1)
-
+    def forward(self, x, attn_mask, return_attention):
         # Attention mask is 0 for padding tokens (no attention)
         B, N, C = x.shape
 
@@ -272,30 +150,31 @@ class Attention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         if self.use_flash:
-            attn_out = flash_attn_func(q, k, v)  # (batch_size, seqlen, nheads, headdim)
+            # attn_out = flash_attn_func(q, k, v)
+            # # (batch_size, seqlen, nheads, headdim)
+            # x = attn_out.reshape(B, N, C)
 
-            # with torch.backends.cuda.sdp_kernel(enable_flash=True):
-            #     # from https://discuss.pytorch.org/t/flash-attention/174955/14
-            #     attn_out = F.scaled_dot_product_attention(
-            #         q,
-            #         k,
-            #         v,
-            #         # pytorch flash attention does not support mask
-            #         scale=self.scale,
-            #         dropout_p=0.0,
-            #     )
-            #     # if scale is None, default is 1/sqrt(dim)
+            with torch.backends.cuda.sdp_kernel(enable_flash=True):
+                # from https://discuss.pytorch.org/t/flash-attention/174955/14
+                mask = attn_mask.unsqueeze(1).unsqueeze(2)
+                mask = mask.expand(-1, self.num_heads, x.shape[1], x.shape[1])
 
-            x = attn_out.reshape(B, N, C)
+                # match x dtype
+                mask = mask.bool()
 
-        elif self.use_flex:
-            attn_out = flex_attention(
-                q,
-                k,
-                v,
-                # score_mod = score_mod,
-                block_mask=block_mask,
-            )
+                attn_out = F.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    # pytorch flash attention does not support mask
+                    scale=self.scale,
+                    dropout_p=self.attn_drop_rate,
+                    attn_mask=mask,
+                )  # if scale is None, default is 1/sqrt(dim)
+
+                # attn_out shape: (B, num_heads, seq_len, emb_size//num_heads)
+                # transpose so that it is (B, seq_len, num_heads, emb_size//num_heads)
+                x = attn_out.transpose(1, 2).reshape(B, N, C)
 
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -368,13 +247,13 @@ class Block(nn.Module):
             drop=drop,
         )
 
-    def forward(self, x, attn_mask, return_attention, block_mask):
+    def forward(self, x, attn_mask, return_attention):
         y, attn = self.attn(
             self.norm1(x),
             attn_mask=attn_mask,
             return_attention=return_attention,
-            block_mask=block_mask,
         )  # attn is None when using flash attention
+
         # y = self.attn(self.norm1(x), attn_mask=attn_mask)
 
         x = x + self.drop_path(y)
@@ -549,18 +428,20 @@ class gpTransformerEncoder(nn.Module):
         use_pos_emb='sin_cos',
         vocab_size=None,
         use_flash=False,
-        use_diffl=False,  # use differential transformer
         seq_len=2048,
-        use_flex=False,
+        use_l2_norm=False,
+        output_dim=None,
+        no_mask_tokens=[None],
+        condition_on_length=False,
+        sparsity=0.0,
     ):
         super().__init__()
         self.embed_dim = embed_dim
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.mask_emb = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.use_pos_emb = use_pos_emb
         self.pos_drop = nn.Dropout(p=drop_rate)
-        self.use_flex = use_flex
         self.num_heads = num_heads
+        self.use_l2_norm = use_l2_norm
+        self.condition_on_length = condition_on_length
 
         dpr = [
             x.item() for x in torch.linspace(0, drop_path_rate, depth)
@@ -573,79 +454,103 @@ class gpTransformerEncoder(nn.Module):
             masking_prob=mlm_masking_prob,
             randomize_prob=0.1,
             no_change_prob=0.1,
-            no_mask_tokens=[None],
+            no_mask_tokens=no_mask_tokens,
         )
 
-        self.use_diffl = use_diffl
-        if use_diffl:
-            if num_heads == 1:
-                raise ValueError('Differential transformer requires num_heads > 1')
-            self.blocks = nn.ModuleList(
-                [
-                    MultiheadFlashDiff2(
-                        embed_dim,
-                        depth,
-                        num_heads,
-                        model_parallel_size=2,
-                        decoder_kv_attention_heads=num_heads,
-                    )
-                ]
-            )
+        if output_dim is None:
+            output_dim = embed_dim
 
-        else:
-            self.blocks = nn.ModuleList(
-                [
-                    Block(
-                        dim=embed_dim,
-                        num_heads=num_heads,
-                        mlp_ratio=mlp_ratio,
-                        qkv_bias=qkv_bias,
-                        qk_scale=qk_scale,
-                        drop=drop_rate,
-                        attn_drop=attn_drop_rate,
-                        drop_path=dpr[i],
-                        norm_layer=norm_layer,
-                        use_flash=use_flash,
-                        use_flex=use_flex,
-                        seq_len=seq_len + 1,  # +1 for cls
-                    )
-                    for i in range(depth)
-                ]
-            )
+        if output_dim is not None and (output_dim != embed_dim):
+            self.dim_red = ReduceDim(embed_dim, output_dim)
 
-        self.norm = norm_layer(embed_dim)
-        trunc_normal_(self.cls_token, std=0.02)
-
-        # Decoder for masked language modelling
-        # self.decoder = nn.Linear(embed_dim, n_gp_tokens, bias=False)
-        self.vocab_size = vocab_size
-        if self.vocab_size is None:
-            self.decoder = nn.Linear(embed_dim, n_gp_tokens, bias=False)
-        else:
-            self.decoder = nn.Linear(embed_dim, self.vocab_size, bias=False)
-
-        self.decoder_bias = nn.Parameter(torch.zeros(n_gp_tokens))
-
-        self.apply(self._init_weights)
+        # Masking and cls is before appending lengths
+        # (if we are conditioning on lengths)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, output_dim))
+        self.mask_emb = nn.Parameter(torch.zeros(1, 1, output_dim))
 
         if self.use_pos_emb == 'sin_cos':
             self.pos_embed = PositionalEncoding(
-                d_model=embed_dim,
+                d_model=output_dim,
                 dropout=drop_rate,
                 max_len=seq_len + 1,  # 2048
             )
         elif self.use_pos_emb == 'learned':
             self.pos_embed = LearntPositionalEncoding(
-                d_model=embed_dim, max_seq_length=seq_len + 1
+                d_model=output_dim, max_seq_length=seq_len + 1
             )
+        elif self.use_pos_emb == 'absolute':
+            # following Bert
+            # https://github.com/huggingface/transformers/blob/main/src/
+            # transformers/models/bert/modeling_bert.py#L159
+            self.pos_embed = nn.Embedding(seq_len + 1, output_dim)
+            trunc_normal_(self.pos_embed.weight, std=0.02)
 
-        if self.use_diffl:
-            # Differential transformer uses rotatory embeddings
-            self.pos_embed = nn.Identity()
-            self.rope = RotaryPositionalEmbeddings(
-                dim=embed_dim // num_heads // 2,
-                max_seq_len=seq_len + 1,
-            )
+        if self.condition_on_length:
+            self.length_mask = nn.Parameter(torch.zeros(1, 1, output_dim))
+            output_dim += 1
+
+        self.output_dim = output_dim
+
+        self.blocks = nn.ModuleList(
+            [
+                Block(
+                    dim=self.output_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_scale=qk_scale,
+                    drop=drop_rate,
+                    attn_drop=attn_drop_rate,
+                    drop_path=dpr[i],
+                    norm_layer=norm_layer,
+                    use_flash=use_flash,
+                    seq_len=seq_len + 1,  # +1 for cls
+                )
+                for i in range(depth)
+            ]
+        )
+
+        self.norm = norm_layer(self.output_dim)
+        trunc_normal_(self.cls_token, std=0.02)
+
+        # Decoder for masked language modelling
+        self.vocab_size = vocab_size
+        decoder_in = self.output_dim
+        decoder_out = n_gp_tokens if self.vocab_size is None else self.vocab_size
+
+        self.decoder = nn.Linear(decoder_in, decoder_out, bias=False)
+        self.decoder_bias = nn.Parameter(torch.zeros(n_gp_tokens))
+
+        self.sparsity = sparsity
+        if self.sparsity > 0:
+            self.apply(self.sparse_init)
+
+        else:
+            self.apply(self._init_weights)
+
+    def sparse_init(self, m, std=0.01):
+        """
+        Initialize the tensor with sparsity and standard deviation for non-zero values.
+        Parameters:
+        tensor (torch.Tensor): The weight tensor to be initialized.
+        sparsity (float): Fraction of elements set to zero
+        std (float): Standard deviation of the non-zero elements.
+        """
+        if isinstance(m, nn.Linear):
+            with torch.no_grad():
+                mask = (
+                    torch.rand(m.weight.shape) > self.sparsity
+                )  # True for non-zero elements
+                values = torch.randn(m.weight.shape) * std  # Random normal values
+                m.weight.zero_()  # Set all elements to zero
+                m.weight[mask] = values[mask]  # Assign only to non-zero positions
+
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -698,7 +603,11 @@ class gpTransformerEncoder(nn.Module):
         gene_labels = torch.cat((cls_label, gene_labels), dim=1)
 
         # add positional encoding to each token
-        if self.use_pos_emb is not None:
+        if self.use_pos_emb == 'absolute':
+            pos = self.pos_embed(torch.arange(x.shape[1], device=x.device))
+            x = x + pos
+
+        elif self.use_pos_emb is not None:
             x = self.pos_embed(x)
 
         return self.pos_drop(x), gene_labels
@@ -711,7 +620,13 @@ class gpTransformerEncoder(nn.Module):
         attn_mask,
         return_attention,
         return_gene_embeddings=False,
+        return_mean_non_padding=False,
+        lengths=None,
     ):
+        # Optionally reduce dimensions
+        if hasattr(self, 'dim_red') and (self.output_dim != self.embed_dim):
+            x = self.dim_red(x)
+
         # Random masking:
         if masking:
             x, gene_labels = self.random_gene_masking(x, gene_labels)
@@ -719,57 +634,44 @@ class gpTransformerEncoder(nn.Module):
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
 
-        # Optionally prepare mask to be shared across heads and layers
-        if self.use_flex:
-            # B, H, Q_LEN, KV_LEN
-            # convert attention mask to bool
-            attn_mask = attn_mask.bool()
-            attn_mask = (
-                attn_mask.unsqueeze(1)
-                .unsqueeze(2)
-                .expand(x.shape[0], self.num_heads, x.shape[1], x.shape[1])
-            )
+        if hasattr(self, 'condition_on_length') and self.condition_on_length:
+            if len(lengths.shape) == 1:
+                lengths = lengths.unsqueeze(-1)
 
-            torch._dynamo.config.optimize_ddp = False
-            torch._dynamo.config.suppress_errors = True
+            # zero out lengths for masked tokens
+            true_emb = gene_labels == -100
+            lengths = lengths * true_emb
 
-            def padding(b, h, q_idx, kv_idx):
-                # print('q_idx', q_idx)
-                # return attn_mask #[b, q_idx]
-                return attn_mask[b, h, q_idx, kv_idx]
-
-            block_mask = create_block_mask(
-                padding,
-                B=x.shape[0],
-                H=self.num_heads,
-                Q_LEN=x.shape[1],
-                KV_LEN=x.shape[1],
-                BLOCK_SIZE=x.shape[1],
-                # _compile=True
-            )
-
-        else:
-            block_mask = None
+            lengths = lengths.expand(-1, x.shape[1]).unsqueeze(-1)
+            x = torch.cat([x, lengths], dim=-1)
 
         for blk in self.blocks:
-            if self.use_diffl:
-                x = blk(
-                    x,
-                    rel_pos=(self.rope.cache_cos, self.rope.cache_sin),
-                    attn_mask=attn_mask,
-                )
-                attn = None
-            else:
-                x, attn = blk(
-                    x,
-                    attn_mask=attn_mask,
-                    return_attention=return_attention,
-                    block_mask=block_mask,
-                )
+            x, attn = blk(
+                x,
+                attn_mask=attn_mask,
+                return_attention=return_attention,
+            )
 
-        x = self.norm(x)
+        if self.use_l2_norm:
+            x = F.normalize(x, p=2, dim=-1)  # following scimilarity
+        else:
+            x = self.norm(x)
 
-        token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
+        if hasattr(self, 'condition_on_length') and self.condition_on_length:
+            token = x[:, 0, :-1]
+        else:
+            token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
+
+        # instead of token, take mean of all gene embeddings
+        # token = x[:, 1:, :].mean(dim=1)
+        if return_mean_non_padding:
+            mask_non_padding = attn_mask[:, 1:]
+            x = x[:, 1:, :]
+            x = x * mask_non_padding.unsqueeze(-1)
+            token = x.sum(dim=1) / mask_non_padding.sum(dim=1).unsqueeze(-1)
+
+            # set to all 0 if no GP genes --> avoids nan values
+            token[mask_non_padding.sum(dim=1) == 0] = 0
 
         logits_lm = self.decoder(x)
 
@@ -780,7 +682,10 @@ class gpTransformerEncoder(nn.Module):
             output['attention'] = attn
 
         if return_gene_embeddings:
-            output['gene_embeddings'] = x[:, 1:, :]
+            if hasattr(self, 'condition_on_length') and self.condition_on_length:
+                output['gene_embeddings'] = x[:, 1:, :-1]
+            else:
+                output['gene_embeddings'] = x[:, 1:, :]
 
         return output
 
@@ -1016,7 +921,6 @@ if __name__ == '__main__':
         embed_dim=32,
         seq_len=16,
         num_heads=8,
-        use_flex=True,
     )
 
     # for n, p in model.named_parameters():

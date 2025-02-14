@@ -14,12 +14,14 @@ from datasets import load_from_disk
 from geneformer import TOKEN_DICTIONARY_FILE
 from geneformer.perturber_utils import pad_tensor_list
 from pytorch_lightning import LightningDataModule
+from sklearn.preprocessing import RobustScaler
 from torch.utils.data import (
     DataLoader,
     Dataset,
     WeightedRandomSampler,
     random_split,
 )
+from transformers.trainer_pt_utils import LengthGroupedSampler
 
 from ..Models.gp_model import gfWrapper
 from ..Utils.utils import build_gp_input_matrix, get_gp_tokens
@@ -316,19 +318,22 @@ class txDataModule(LightningDataModule):
         batch_size=3,
         num_workers=4,
         shuffle=False,
-        use_weighted_sampler=False,
+        sampler=None,
         label_key=None,
         return_tuple=False,
         filter_key=None,
         filter_value=None,
         frac_for_generation=1,
         fm_encoder_name='gf-6L-30M-i2048',
-        # development only:
-        frac_for_training=1,
-        data_split_to_pass_to_test_step='val',
+        condition_on_length=False,
+        length_scaler_path=None,
         seed=0,
         load_exp=False,
         model_input_size=None,
+        output_dir='./',
+        # development only:
+        frac_for_training=1,
+        data_split_to_pass_to_test_step='val',
     ):
         """Create a datamodule from a tokenized Geneformer dataset
 
@@ -371,7 +376,16 @@ class txDataModule(LightningDataModule):
             'Please ensure this matches your tokenization.'
         )
 
-        self.use_weighted_sampler = use_weighted_sampler
+        self.use_weighted_sampler = False
+        self.use_length_sampler = False
+        self.condition_on_length = condition_on_length
+        self.length_scaler_path = length_scaler_path
+        self.output_dir = output_dir
+
+        if sampler == 'weighted':
+            self.use_weighted_sampler = True
+        elif sampler == 'length':
+            self.use_length_sampler = True
 
     def prepare_data(self):
         # Check if the folder path exists
@@ -431,9 +445,9 @@ class txDataModule(LightningDataModule):
         )  # Remaining for test
 
         # # FOR DEBUGGING
-        # train_size = 128
-        # val_size = 128
-        # test_size = 128
+        # train_size = 1
+        # val_size = 1
+        # test_size = 1
 
         discard = dataset_size - train_size - val_size - test_size
 
@@ -444,6 +458,28 @@ class txDataModule(LightningDataModule):
             generator=torch.Generator().manual_seed(self.seed),  # (42),
         )
 
+        # Optionally store lengths for use with LengthGroupedSampler
+        if self.use_length_sampler:
+            print('\nLoading lengths for LengthGroupedSampler\n')
+            self.lengths = [d['tk']['length'] for d in self.train_dataset]
+
+        # Optionally fit scalar for lengths
+        if self.condition_on_length:
+            # self.length_scaler = pd.read_pickle(
+            # os.path.join(self.output_dir, 'length_scaler.pkl')
+            # )
+            if self.length_scaler_path is None:
+                print('\nFitting scaler for length normalization\n')
+                lengths = np.array([d['tk']['length'] for d in self.train_dataset])
+                self.length_scaler = RobustScaler()
+                self.length_scaler.fit(lengths.reshape(-1, 1))
+                pd.to_pickle(
+                    self.length_scaler,
+                    os.path.join(self.output_dir, 'length_scaler.pkl'),
+                )
+            else:
+                self.length_scaler = pd.read_pickle(self.length_scaler_path)
+
     def train_dataloader(self):
         if self.use_weighted_sampler:
             sampler = WeightedRandomSampler(
@@ -452,7 +488,26 @@ class txDataModule(LightningDataModule):
                 ),
                 num_samples=len(self.train_dataset),
                 replacement=True,
-                generator=torch.Generator().manual_seed(42),
+                generator=torch.Generator().manual_seed(self.seed),
+            )
+
+            dataloader = DataLoader(
+                self.train_dataset,
+                collate_fn=self.custom_collate,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                sampler=sampler,
+                pin_memory=True,
+                drop_last=True,
+            )
+
+        elif self.use_length_sampler:
+            sampler = LengthGroupedSampler(
+                dataset=self.train_dataset,
+                lengths=self.lengths,
+                batch_size=self.batch_size,
+                generator=torch.Generator().manual_seed(self.seed),
             )
 
             dataloader = DataLoader(
@@ -533,6 +588,14 @@ class txDataModule(LightningDataModule):
             'input_ids': input_batch_id.clone().detach(),
             'length': length.clone().detach(),
         }
+
+        if self.condition_on_length:
+            scaled_length = self.length_scaler.transform(length.numpy().reshape(-1, 1))
+            output_dict['scaled_length'] = torch.tensor(
+                scaled_length, dtype=torch.float32
+            )
+        else:
+            output_dict['scaled_length'] = length
 
         if self.load_exp:
             norm_exp = [torch.tensor(d['norm_exp']) for d in tokenized_batch]
@@ -652,7 +715,7 @@ class iTxDataModule(txDataModule):
             num_genes_per_cell,
             attn_mask,
         ) = build_gp_input_matrix(
-            gf_emb,  # geneformer embeddings
+            gf_emb['gene_emb'],  # geneformer embeddings
             input_batch_id,
             self.gp_tokens,
         )

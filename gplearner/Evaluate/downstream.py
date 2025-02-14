@@ -51,14 +51,14 @@ from ..Trainers.trainer import (
     EmbEvaluator,
     gpBase,
     gpGlobal,
+    gpGlobalLoRA,
     gpPrototypes,
 )
 from ..Utils.geneformer_utils import get_gf_repo
-from ..Utils.utils import (
+from ..Utils.utils import (  # find_latest_file,
     MidpointNormalize,
     align_indices,
     build_token_to_gene_name_dict,
-    find_latest_file,
     remove_single_data_points,
     summarize_attributions,
     wrangle_classification_report,
@@ -156,18 +156,20 @@ class gpEval:
 
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
-            tag = (
-                model_type_in_checkpoint
-                if model_type_in_checkpoint is not None
-                else model_type
-            )
+            # tag = (
+            #     model_type_in_checkpoint
+            #     if model_type_in_checkpoint is not None
+            #     else model_type
+            # )
 
             if path_to_trained_model is None:
                 model_path = output_dir
             else:
                 model_path = path_to_trained_model
 
-            latest_ckpt = find_latest_file(model_path, tissue, tag)
+            # latest_ckpt = find_latest_file(model_path, tissue, tag)
+            latest_ckpt = os.path.join(model_path, 'checkpoints/last.ckpt')
+
             print('Latest .ckpt file:', latest_ckpt)
             self.checkpoint_path = os.path.join(model_path, latest_ckpt)
 
@@ -226,6 +228,7 @@ class gpEval:
         num_virtual_tokens=0,
         return_virtual_tokens=False,
         token_to_gene_to_keep_dict=None,
+        return_mean_non_padding=False,
     ):
         if self.model_type == 'Base':
             gp_transformer = gpBase.load_from_checkpoint(
@@ -234,6 +237,11 @@ class gpEval:
 
         elif self.model_type == 'Global':
             gp_transformer = gpGlobal.load_from_checkpoint(
+                self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
+            )
+
+        elif self.model_type == 'Global_LoRA':
+            gp_transformer = gpGlobalLoRA.load_from_checkpoint(
                 self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
             )
 
@@ -269,6 +277,7 @@ class gpEval:
         gp_transformer.save_emb = save_emb
         gp_transformer.split_label = split_label
         gp_transformer.return_virtual_tokens = return_virtual_tokens
+        gp_transformer.return_mean_non_padding = return_mean_non_padding
 
         gp_transformer.model.multi_gp_encoder.num_virtual_tokens = num_virtual_tokens
         gp_transformer.model.cond_to_shift = self.cond_to_shift
@@ -292,7 +301,8 @@ class gpEval:
             )
         elif self.fm_encoder_pkg == 'from_scratch':
             self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
-            self.max_len = self.model.gf_wrapper.model.config.max_position_embeddings
+            # TO DO --> flexibly account for different model sizes
+            self.max_len = 4096
 
         # Disable flash for attention matrix generation
         if return_attention:
@@ -308,9 +318,17 @@ class gpEval:
                         j
                     ].attn.use_flash = False
 
+        # Freeze all parameters for LoRA model
+        if self.model_type == 'Global_LoRA':
+            print('\nFreezing parameters for LoRA model\n')
+            for param in self.model.parameters():
+                param.requires_grad = False
+
         return gp_transformer
 
-    def generate_embeddings(self, split='train', precision=32):
+    def generate_embeddings(
+        self, split='train', precision=32, return_mean_non_padding=False
+    ):
         '''
         Save embeddings as Dataset
         '''
@@ -320,6 +338,7 @@ class gpEval:
             split_label=split,
             hparam_save=self.hparam_save,
             num_virtual_tokens=self.num_virtual_tokens,
+            return_mean_non_padding=return_mean_non_padding,
         )
 
         txdata = txDataModule(
@@ -329,6 +348,10 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
         )
 
         trainer = pl.Trainer(
@@ -605,6 +628,10 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
         )
 
         trainer = pl.Trainer(
@@ -710,20 +737,24 @@ class gpEval:
             token_to_gene_to_keep_dict = None
 
         # Initialize trainer
-        txdata = txDataModule(
-            folder=self.dataset_path,
-            batch_size=self.batch_size,
-            data_split_to_pass_to_test_step=split,
-            fm_encoder_name=self.fm_encoder_name,
-            model_input_size=self.max_len,
-        )
-
         gp_transformer = self._init_trainer(
             return_attention=True,
             gp=gp,
             num_virtual_tokens=self.num_virtual_tokens,
             split_label=split,
             token_to_gene_to_keep_dict=token_to_gene_to_keep_dict,
+        )
+
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_test_step=split,
+            fm_encoder_name=self.fm_encoder_name,
+            model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
         )
 
         trainer = pl.Trainer(
@@ -750,6 +781,10 @@ class gpEval:
 
         print('Dataset path', self.dataset_path)
 
+        gp_transformer = self._init_trainer(
+            test_random_baseline=True, num_virtual_tokens=self.num_virtual_tokens
+        )
+
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
@@ -757,11 +792,12 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
         )
 
-        gp_transformer = self._init_trainer(
-            test_random_baseline=True, num_virtual_tokens=self.num_virtual_tokens
-        )
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
         trainer.test(gp_transformer, txdata)
 
@@ -772,6 +808,10 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(self.gp_transformer.model, 'condition_on_length')
+            and self.gp_transformer.model.condition_on_length
+            else None,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
@@ -795,6 +835,10 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)

@@ -66,7 +66,6 @@ def run_training_from_select_gps(
     strategy: str = 'ddp_find_unused_parameters_true',
     attn_dropout: float = 0.0,
     lr: float = 1e-3,
-    finetune_lr: float = 1e-5,
     gp_inputs_old: Optional[list] = None,
     gp_inputs_new: Optional[list] = None,
     frac_for_training: Optional[float] = 1.0,
@@ -86,12 +85,13 @@ def run_training_from_select_gps(
     adata_path: Optional[str] = None,
     use_flash: Optional[bool] = False,
     weight_decay: float = 0.0,
-    use_weighted_sampler: Optional[bool] = False,
+    sampler: Optional[str] = None,
     sample_by: Optional[str] = 'cell_type',
     fm_encoder_pkg: str = 'geneformer',
     fm_encoder_name: str = 'gf-6L-30M-i2048',
     peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
+    data_seed: Optional[int] = None,
     set_gpfinder_weight_decay: Optional[float] = None,
     calc_gp_loss: bool = True,
     use_go_similarity_loss: bool = False,
@@ -103,9 +103,7 @@ def run_training_from_select_gps(
     lambda_prototype_loss: float = 1e-2,
     use_gp_similarity_loss: bool = False,
     num_virtual_tokens: int = 0,
-    use_baseline_tk: bool = False,
-    tk_vocab_size: int = 0,
-    gene2vec: Optional[str] = None,
+    all_genes: Optional[list] = None,
     use_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: bool = False,
     vocab_gene_names: Optional[str] = None,
@@ -115,11 +113,10 @@ def run_training_from_select_gps(
     val_check_interval: float = 1.0,
     precision=32,  # 'bf16-mixed',
     bert_config: Dict = {},
-    use_diffl: Optional[bool] = False,
-    use_flex: Optional[bool] = False,
     use_gf_embeddings: Optional[bool] = False,
     load_cell_token_learner: bool = False,
     gp_of_interest: Optional[str] = None,
+    gp_latent_size: Optional[int] = None,
 ):
     """
     Wrapper function for training gpLearner model
@@ -223,6 +220,9 @@ def run_training_from_select_gps(
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+    if data_seed is None:
+        data_seed = seed
+
     args = locals()
 
     # wandb.login()
@@ -243,7 +243,7 @@ def run_training_from_select_gps(
 
     # Instantiate datamodule
     if fm_encoder_pkg == 'from_scratch':
-        model_input_size = bert_config['max_position_embeddings']
+        model_input_size = bert_config['tokenization_input_size']
     else:
         # Get Geneformer model config
         geneformer_repo_path = get_gf_repo()
@@ -260,9 +260,9 @@ def run_training_from_select_gps(
         batch_size=batch_size,
         frac_for_training=frac_for_training,
         adata_path=adata_path,
-        use_weighted_sampler=use_weighted_sampler,
+        sampler=sampler,
         label_key=sample_by,
-        seed=seed,
+        seed=data_seed,
         load_exp=use_onehot_wrapper is True,
         model_input_size=model_input_size,
     )
@@ -337,8 +337,8 @@ def run_training_from_select_gps(
     checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
     state_dict = checkpoint['state_dict']
 
+    model_state_dict = gp_transformer_v0.state_dict()
     if global_loss_old == 'reconstruction' and global_loss == 'supervised':
-        model_state_dict = gp_transformer_v0.state_dict()
         irrelevant_params = [
             'theta',
             'model.count_head.softmax_output.0.weight',
@@ -347,6 +347,9 @@ def run_training_from_select_gps(
         for param_name in state_dict:
             if param_name in irrelevant_params:
                 state_dict[param_name] = torch.zeros_like(model_state_dict[param_name])
+
+    # Remove params that are not in the new model
+    state_dict = {k: v for k, v in state_dict.items() if k in model_state_dict}
 
     gp_transformer_v0.load_state_dict(state_dict)
 
@@ -446,16 +449,14 @@ def configure_model_version(args, tag):
         'fm_encoder_pkg': args['fm_encoder_pkg'],
         'fm_encoder_name': args['fm_encoder_name'],
         'peft_config_path': args['peft_config_path'],
-        'use_baseline_tk': args['use_baseline_tk'],
-        'tk_vocab_size': args['tk_vocab_size'],
-        'gene2vec': args['gene2vec'],
         'use_pos_emb': args['use_pos_emb'],
         'use_onehot_wrapper': args['use_onehot_wrapper'],
         'vocab_gene_names': args['vocab_gene_names'],
         'do_ensembl_conversion': args['gene_format'] == 'symbol',
         'bert_config': args['bert_config'],
-        'use_diffl': args['use_diffl'],
-        'use_flex': args['use_flex'],
+        'all_genes': args['all_genes'],
+        'gp_latent_size': args['gp_latent_size'],
+        'use_gf_embeddings': args['use_gf_embeddings'],
     }
 
     global_params = {
@@ -512,8 +513,6 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
     common_params = {
         'model': model,
         'lr': args['lr'],
-        'finetune_lr': args['finetune_lr'],
-        'use_finetune_lr': 'finetune' in args['global_training'],
         'total_epochs': args['n_epochs'],
         'lr_scheduler': args['lr_scheduler'],
         'use_gp_similarity_loss': gp_similarity is not None,

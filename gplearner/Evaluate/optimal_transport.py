@@ -5,7 +5,11 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import seaborn as sns
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import (
+    ListedColormap,
+    to_hex,
+    to_rgb,
+)
 from ott.geometry import pointcloud
 from ott.problems.linear import linear_problem
 from ott.solvers.linear import sinkhorn
@@ -201,28 +205,33 @@ def compute_centroid_mapping(
     # ----------------------------------------------------------------------
 
     if cluster_algo == 'knn':
-        num_clusters = num_clusters
         kmeans_ref = KMeans(n_clusters=num_clusters, random_state=0).fit(X)
         kmeans_query = KMeans(n_clusters=num_clusters, random_state=0).fit(Y)
+
+        # Assign labels to cells as 'knn_cluster' in adata_ref and adata_target
+        # as type str to match leiden
+        adata_ref.obs['knn_cluster'] = kmeans_ref.labels_.astype(str)
+        adata_target.obs['knn_cluster'] = kmeans_query.labels_.astype(str)
+        clusters_ref = adata_ref.obs['knn_cluster'].unique()
+        clusters_target = adata_target.obs['knn_cluster'].unique()
+
+        cluster_col = 'knn_cluster'
 
         # Get cluster centroids
         centroids_ref = kmeans_ref.cluster_centers_
         centroids_query = kmeans_query.cluster_centers_
 
     elif cluster_algo == 'leiden':
-        # Leiden clustering for reference condition
-        sc.pp.neighbors(adata_ref, use_rep='X')  # use the existing data in .X
+        cluster_col = 'leiden'
+        sc.pp.neighbors(adata_ref, use_rep='X')
         sc.tl.leiden(adata_ref, resolution=resolution, key_added='leiden')
 
-        # Leiden clustering for target condition
-        sc.pp.neighbors(adata_target, use_rep='X')  # use the existing data in .X
+        sc.pp.neighbors(adata_target, use_rep='X')
         sc.tl.leiden(adata_target, resolution=resolution, key_added='leiden')
 
-        # Get unique cluster identifiers
         clusters_ref = adata_ref.obs['leiden'].astype(int).unique()
         clusters_target = adata_target.obs['leiden'].astype(int).unique()
 
-        # Calculate centroids for each cluster in the reference and target
         centroids_ref = np.array(
             [
                 X[adata_ref.obs['leiden'].astype(int) == cluster].mean(axis=0)
@@ -237,7 +246,6 @@ def compute_centroid_mapping(
         )
 
     elif cluster_algo == 'precomputed':
-        # Get unique cluster identifiers
         if cluster_col not in adata.obs.columns:
             raise ValueError(
                 'Please provide a `cluster_col` argument'
@@ -246,7 +254,6 @@ def compute_centroid_mapping(
         clusters_ref = adata_ref.obs[cluster_col].unique()
         clusters_target = adata_target.obs[cluster_col].unique()
 
-        # Calculate centroids for each cluster in the reference and target
         centroids_ref = np.array(
             [
                 X[adata_ref.obs[cluster_col] == cluster].mean(axis=0)
@@ -261,35 +268,40 @@ def compute_centroid_mapping(
         )
 
     if cluster_algo is not None:
-        # Find the actual points closest to centroids
-        closest_ref_idx = [
-            np.argmin(cdist(X, [centroid])) for centroid in centroids_ref
-        ]
-        closest_query_idx = [
-            np.argmin(cdist(Y, [centroid])) for centroid in centroids_query
-        ]
+        # Find the actual points closest to centroids,
+        # ensuring they belong to the respective clusters
+        closest_ref_idx = []
+        for i, centroid in enumerate(centroids_ref):
+            cluster_points = X[adata_ref.obs[cluster_col] == str(clusters_ref[i])]
+            cluster_indices = np.where(
+                adata_ref.obs[cluster_col] == str(clusters_ref[i])
+            )[0]
+            closest_point_idx = cluster_indices[
+                np.argmin(cdist(cluster_points, [centroid]))
+            ]
+            closest_ref_idx.append(closest_point_idx)
 
-        # Ensure indices are integers (avoid issues with .iloc)
+        closest_query_idx = []
+        for i, centroid in enumerate(centroids_query):
+            cluster_points = Y[adata_target.obs[cluster_col] == str(clusters_target[i])]
+            cluster_indices = np.where(
+                adata_target.obs[cluster_col] == str(clusters_target[i])
+            )[0]
+            closest_point_idx = cluster_indices[
+                np.argmin(cdist(cluster_points, [centroid]))
+            ]
+            closest_query_idx.append(closest_point_idx)
+
         closest_ref_idx = np.array(closest_ref_idx, dtype=int)
         closest_query_idx = np.array(closest_query_idx, dtype=int)
 
-        # Extract indices from the 'source' condition in the AnnData object
-        source_idx = (
-            adata.obs.loc[adata.obs[col] == ref, 'idx'].iloc[closest_ref_idx].values
-        )
+        source_idx = adata.obs.loc[adata.obs[col] == ref].index[closest_ref_idx].values
         target_idx = (
-            adata.obs.loc[adata.obs[col] == target, 'idx']
-            .iloc[closest_query_idx]
-            .values
+            adata.obs.loc[adata.obs[col] == target].index[closest_query_idx].values
         )
 
-        # Create a subset of the AnnData object containing these indices
         combined_indices = np.concatenate([source_idx, target_idx])
-        adata_centroid = adata[adata.obs['idx'].isin(combined_indices)].copy()
-
-    # ----------------------------------------------------------------------
-    # Match syntax for centroid-based analysis
-    # ----------------------------------------------------------------------
+        adata_centroid = adata[adata.obs.index.isin(combined_indices)].copy()
 
     else:
         adata_centroid = adata
@@ -306,14 +318,12 @@ def compute_centroid_mapping(
 
     print('Sinkhorn algorithm converged?', ot_out.converged)
 
-    # Extract UMAP coordinates
     ref_umap = adata_centroid[adata_centroid.obs[col] == ref].obsm['X_umap']
     target_umap = adata_centroid[adata_centroid.obs[col] == target].obsm['X_umap']
 
     ref_umap_jnp = jnp.array(ref_umap)
     target_umap_jnp = jnp.array(target_umap)
 
-    # Apply the modified mapping for point cloud alignment
     point_map_centroid, mapping_df = compute_point_cloud_mapping(
         ref_umap_jnp,
         target_umap_jnp,
@@ -323,7 +333,6 @@ def compute_centroid_mapping(
         threshold=threshold,
     )
 
-    # check dtype of output
     mapping_df['coupling'] = mapping_df['coupling'].astype(float)
 
     if return_mapping:
@@ -495,12 +504,290 @@ def plot_mapping_heatmap(
     plt.show()
 
 
+def plot_gp_assignment_heatmap(
+    leiden_to_pred: pd.DataFrame,
+    predefined_order_row: list,
+    predefined_order_column=None,
+    x_label='Leiden Clusters',
+    y_label='Reference cell types',
+    fig_size=(10, 8),
+    save_to=None,
+    show_unmapped=True,
+):
+    """
+    Plots a heatmap where columns are Leiden cluster indices,
+    rows are the assigned categories in a predefined order,
+    and the values of the heatmap are the number of embeddings where
+    Leiden cluster j is assigned to class i.
+
+    Parameters:
+    - leiden_to_pred: pd.DataFrame, where columns are embedding names,
+        values are assigned classes,
+        and the index are Leiden clusters.
+    - predefined_order_row: list of assigned categories
+        in the order you want them to appear on the y-axis.
+    - predefined_order_column: list of Leiden cluster indices
+        in the order you want them to appear on the x-axis.
+    - x_label: Label for the x-axis.
+    - y_label: Label for the y-axis.
+    - fig_size: Tuple defining the size of the figure.
+    - save_to: Path to save the resulting figure. If None, does not save.
+    - show_unmapped: Boolean indicating whether to include the 'Unmapped'
+        category in the plot.
+    """
+
+    # Ensure 'Unmapped' is included in the predefined order if show_unmapped is True
+    if show_unmapped and 'Unmapped' not in predefined_order_row:
+        predefined_order_row.append('Unmapped')
+
+    # Transpose DataFrame to ensure Leiden clusters are columns and embeddings are rows
+    transposed = leiden_to_pred.T
+
+    # Fill NaN values in the DataFrame with 'Unmapped'
+    transposed = transposed.fillna('Unmapped')
+
+    # Count the number of times each class appears for each Leiden cluster
+    category_counts = (
+        transposed.apply(lambda col: col.value_counts()).fillna(0).astype(int)
+    )
+
+    # Reindex to ensure the order of categories on the y-axis
+    category_counts = category_counts.reindex(predefined_order_row, axis=0).fillna(0)
+    category_counts = category_counts.astype(int)
+
+    # Optionally drop the 'Unmapped' category if show_unmapped is False
+    if not show_unmapped:
+        category_counts = category_counts.drop('Unmapped', axis=0, errors='ignore')
+
+    # Match predefined order
+    if predefined_order_column:
+        # Reindex the columns to match the predefined order
+        category_counts = category_counts.loc[:, predefined_order_column]
+    else:
+        # Optimize the order of the Leiden clusters to maximize the diagonal
+        num_rows, num_cols = category_counts.shape
+
+        # Pad the cost matrix with dummy rows if necessary
+        if num_cols > num_rows:
+            padding = np.zeros((num_cols - num_rows, num_cols))
+            padded_cost_matrix = np.vstack((-category_counts.values, padding))
+        else:
+            padded_cost_matrix = -category_counts.values
+
+        # Apply linear sum assignment
+        row_ind, col_ind = linear_sum_assignment(padded_cost_matrix)
+
+        # Reorder the columns of category_counts based on the optimal assignment
+        category_counts = category_counts.iloc[:, col_ind]
+
+    # Create the heatmap
+    plt.figure(figsize=fig_size)
+    sns.heatmap(
+        category_counts,
+        annot=True,
+        fmt='d',
+        cmap='viridis',
+        cbar=True,
+        linewidths=0.5,
+    )
+
+    # Set labels and title
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+    plt.title('Heatmap of Assigned Categories')
+
+    if save_to:
+        plt.savefig(save_to)
+
+    plt.show()
+
+
+# --------------------------------------------
+#  Assign class labels to clusters
+# --------------------------------------------
+
+
+def summarize_sinkhorn_mapping(
+    df, groupby, input_df, cluster_col_name='leiden', full_input_cluster_list=None
+):
+    '''
+
+    Inputs
+    - df: pd.DataFrame, with columns
+        ['idx1', 'source', 'idx2', 'target', 'coupling', 'normalized_strength', 'gp']
+        where 'gp' is the embedding name
+    - groupby: str, the column name for the index column = the group to summarize by
+        For example, if groupby = 'target',
+        then we group by the classes from the target distribtuion, and look for the
+        classes from the source distribution with the highest values
+    - input_df: pd.DataFrame, where the index is cell indices,
+        and the columns are the input clusters labels
+    - cluster_col_name: name of the column within input_df that has the labels
+        we are interested in
+    - full_input_cluster_list: list
+        list of all of the input clusters
+        this allows us to retrieve clusters that are not  mapped to any population
+        across any GP
+        Note this is a brute force approach, check the clusters were actually included
+        in the OT computation
+
+    Outputs
+    - cluster_to_pred: pd.DataFrame, where columns are embedding names,
+        values are assigned classes,
+
+    '''
+    cluster_to_pred = pd.DataFrame(
+        index=sorted(list(input_df[cluster_col_name].unique())),
+    )
+
+    # if we group by target, use the source column as a "prediction"
+    if groupby == 'target':
+        col_name = 'source'
+
+    # if we group by source, use the target column as a "prediction"
+    elif groupby == 'source':
+        col_name = 'target'
+
+    for gp in df['gp'].unique():
+        df1 = df[df['gp'] == gp]
+        topn = df1.loc[df1.groupby(groupby)['coupling'].idxmax()]
+        topn[groupby] = topn[groupby]  # .astype(int)
+
+        cluster_to_pred = cluster_to_pred.join(
+            topn[['source', 'target']]
+            .set_index(groupby)
+            .rename(columns={col_name: gp}),
+            how='left',
+        )
+
+    if full_input_cluster_list:
+        for cluster in full_input_cluster_list:
+            if cluster not in cluster_to_pred.index:
+                # Create a new row with NaN values
+                new_row = pd.DataFrame(
+                    [[np.nan] * len(cluster_to_pred.columns)],
+                    columns=cluster_to_pred.columns,
+                    index=[cluster],
+                )
+                # Append the new row to the dataframe
+                cluster_to_pred = pd.concat([cluster_to_pred, new_row])
+
+    return cluster_to_pred
+
+
+def get_largest_assignment_mapping(
+    leiden_to_pred: pd.DataFrame, unseen_threshold: int
+) -> dict:
+    """
+    Returns a dictionary mapping the indices (row labels eg leiden clusters)
+    to the value in the column where it has the largest assignment.
+    ** If the number of non-zero category counts for a cluster is less than
+    the unseen_threshold, the mapping for that cluster will be set to 'Unseen_{idx}'.
+
+    ** If the most common value is NaN, the mapping will be set to the second
+    most common value with the suffix 'like'.
+
+    ** If there are multiple columns tied for the maximum value, the mapping will be
+    set to the concatenated values of the tied columns.
+
+    Parameters:
+    - leiden_to_pred: pd.DataFrame, where columns are embedding names (eg GP),
+        values are assigned classes (eg cell types), and the index are input classes
+        (eg Leiden clusters)
+    - unseen_threshold: int, the minimum number of non-zero category counts
+        required for a cluster to be mapped to the column with the largest assignment.
+        IE if one cluster is mapped to no classes for > unseen_threshold embeddings,
+        it will be mapped to 'Unseen_{idx}'.
+
+    Returns:
+    - A dictionary where keys are the indices and values are the corresponding column
+        where the index has the largest assignment or 'Unseen_{idx}'
+    """
+
+    # Count the number of times each class appears for each Leiden cluster
+    df_leiden_col = leiden_to_pred.T
+
+    mapping = {}
+
+    for idx in df_leiden_col.columns:
+        value_counts = df_leiden_col[idx].value_counts(dropna=False)
+
+        # Count the number of non-zero, non-NaN entries in the column
+        non_zero_counts = (df_leiden_col[idx].notna() & (df_leiden_col[idx] != 0)).sum()
+
+        # If total number of non-zero,
+        # non-NaN values is less than threshold, assign 'Unseen_{idx}'
+        if non_zero_counts < unseen_threshold:
+            mapping[idx] = f'Unseen_{idx}'
+            continue
+
+        # If NaN is the most common value, assign 'Maybe_2nd most common value'
+        most_common_value, _ = value_counts.idxmax(), value_counts.max()
+        if pd.isna(most_common_value):  # Check if NaN is the most common
+            second_most_common_value = (
+                value_counts.index[1] if len(value_counts) > 1 else None
+            )
+            mapping[idx] = (
+                f'{second_most_common_value}_like'
+                if second_most_common_value is not None
+                else f'Unseen_{idx}'
+            )
+            continue
+
+        # Get all indices tied for the maximum count value
+        max_count = value_counts.max()
+        chosen_gp = value_counts[value_counts == max_count].index.tolist()
+
+        # If there are multiple columns tied for the maximum value, concatenate them
+        if len(chosen_gp) > 1:
+            chosen_gp = '_'.join(
+                map(str, chosen_gp)
+            )  # Convert each entry to string before concatenation
+
+        if isinstance(chosen_gp, list) and len(chosen_gp) == 1:
+            chosen_gp = chosen_gp[0]  # If it's a single item list, extract the item
+
+        mapping[idx] = chosen_gp
+
+    return mapping
+
+
 # --------------------------------------------
 #  Plotting
 # --------------------------------------------
 
 
-# Helper to encode colors
+def blend_colors(color1, color2):
+    """
+    Blend two colors to get the midpoint color.
+    Args:
+        color1 (str): Color name or hex code for the first color.
+        color2 (str): Color name or hex code for the second color.
+    Returns:
+        str: Hex code of the blended color.
+    """
+    rgb1 = to_rgb(color1)
+    rgb2 = to_rgb(color2)
+    blended_rgb = [(c1 + c2) / 2 for c1, c2 in zip(rgb1, rgb2)]
+    return to_hex(blended_rgb)
+
+
+def lighten_color(color, factor=0.5):
+    """
+    Lighten a color by blending it with white.
+    Args:
+        color (str): Color name or hex code for the color to lighten.
+        factor (float): A value between 0 and 1,
+        where 1 means no change and 0 means fully white.
+    Returns:
+        str: Hex code of the lightened color.
+    """
+    rgb = to_rgb(color)
+    white = (1, 1, 1)
+    lightened_rgb = [c * factor + (1 - factor) * w for c, w in zip(rgb, white)]
+    return to_hex(lightened_rgb)
+
+
 def encode_colors(data_obs, variable, colormap, custom_order=None):
     if variable is not None and variable in data_obs:
         if custom_order is not None:

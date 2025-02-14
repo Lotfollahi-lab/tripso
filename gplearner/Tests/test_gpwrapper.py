@@ -17,7 +17,9 @@ class TestGpWrapper(unittest.TestCase):
         self.database = pd.DataFrame(
             {
                 'A': ['TMPRSS2', 'CXCL8', 'BMP4', 'BCL2A1', 'HEY2'],
+                # 14988, 12365, 5573, 7842, 7004
                 'C': ['CXCL8', 'VEGFA', 'MMP10', 'OAS1', np.nan],
+                # 12365, 4064, 11709, 1811
             }
         )
 
@@ -53,14 +55,24 @@ class TestGpWrapper(unittest.TestCase):
             learn_new_gp=False,
             use_pos_emb='sin_cos',
             fm_model_input_size=4096,  # goes with dictionary files
-            use_flex=False,
-            use_diffl=False,
+            use_l2_norm=False,
         )
 
         # Mock inputs for the model
-        self.gf_emb = torch.randn(2, 5, 10)
+        self.gf_emb = {'gene_emb': torch.randn(2, 7, 10)}
         self.input_ids = torch.tensor(
-            [[14988, 7913, 5573, 1811, 12365], [14988, 4064, 12365, 7067, 7842]]
+            [
+                [
+                    14988,
+                    7913,
+                    5573,
+                    1811,
+                    12365,
+                    41,
+                    7004,
+                ],  # 3 GP A tokens, 2 GP C tokens
+                [14988, 4064, 12365, 7067, 7842, 39, 7003],
+            ]  # 2 GP A tokens, 2 GP C tokens
         )
 
         self.input_dataset = {'input_ids': self.input_ids}
@@ -69,7 +81,11 @@ class TestGpWrapper(unittest.TestCase):
         output = self.gp_wrapper(self.gf_emb, self.input_dataset, masking=True)
 
         # Check the output shape
+        # cls has shape (batch, num_gp, gp_latent_size)
         self.assertEqual(output['z'].shape, (2, len(self.gp_inputs), 10))
+
+        # for each logits has shape
+        # (batch, max num_tokens in batch + 1 (cls), num_tokens (num classes))
         self.assertEqual(
             output['logits_lm_list'][0].shape,
             (2, len(self.gpdb_tokens['A']) + 1, len(self.gpdb_tokens['A'])),
