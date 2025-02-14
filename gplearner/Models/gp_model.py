@@ -537,7 +537,7 @@ class gpWrapper(nn.Module):
 
         # Extract embeddings for the gene program of interest
         emb_pad, tokens_pad, _, attn_mask = build_gp_input_matrix(
-            gf_emb['gene_emb'],  # geneformer embeddings # MENTION TO MARIE
+            gf_emb['gene_emb'],  # geneformer embeddings
             input_dataset['input_ids'],
             gp_tokens,
         )
@@ -626,7 +626,7 @@ class gpWrapper(nn.Module):
 
         # Extract embeddings for the gene program of interest
         emb_pad, tokens_pad, _, attn_mask = build_gp_input_matrix(
-            gf_emb['gene_emb'],  # geneformer embeddings # MENTION TO MARIE
+            gf_emb['gene_emb'],  # geneformer embeddings
             input_dataset['input_ids'],
             gp_tokens,
         )
@@ -1239,8 +1239,8 @@ class gpTransformerBase(nn.Module):
 
         return output
 
-    def get_gene_gene_attn(self, input_dataset, gp_idx, masking):  # MENTION TO MARIE
-        gf_emb = self.gf_wrapper(input_dataset, masking=masking)  # MENTION TO MARIE
+    def get_gene_gene_attn(self, input_dataset, gp_idx, masking):
+        gf_emb = self.gf_wrapper(input_dataset, masking=masking)
 
         output = self.multi_gp_encoder.get_gene_gene_attn(
             gf_emb, input_dataset, gp_idx=gp_idx
@@ -1248,12 +1248,12 @@ class gpTransformerBase(nn.Module):
 
         return output
 
-    def get_cls_attn(self, input_dataset, gp, masking):  # MENTION TO MARIE
+    def get_cls_attn(self, input_dataset, gp, masking):
         # Get gp index
         gp_idx = self.gp_inputs.index(gp)
 
         # Get Geneformer embeddings
-        gf_emb = self.gf_wrapper(input_dataset, masking=masking)  # MENTION TO MARIE
+        gf_emb = self.gf_wrapper(input_dataset, masking=masking)
 
         output = self.multi_gp_encoder.get_cls_attn(
             gf_emb, input_dataset, gp_idx=gp_idx
@@ -1410,7 +1410,7 @@ class gpTransformerGlobal(gpTransformerBase):
 class gpTransformerGlobalLinear(gpTransformerGlobal):
     """Equivalent to gpTransformerGlobal, but with no cell token learner
     in the forward pass.
-
+    
     The cell token is simply taken to be the gp token of the first
     gp of interest.
     """
@@ -1632,7 +1632,7 @@ class gpWrapperWithPrompt(gpWrapper):
                     num_genes_per_cell,
                     attn_mask,
                 ) = build_gp_input_matrix(
-                    gf_emb['gene_emb'],  # geneformer embeddings # MENTION TO MARIE
+                    gf_emb['gene_emb'],  # geneformer embeddings
                     input_dataset['input_ids'],
                     getattr(self, f'gp{i}_tokens'),
                 )
