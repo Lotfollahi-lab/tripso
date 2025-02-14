@@ -65,7 +65,7 @@ class gpAverager(gpWrapper):
     def get_last_self_attn(self, gf_emb, input_dataset, gp_idx):
         # Extract embeddings for the gene program of interest
         emb_pad, tokens_pad, _, attn_mask = build_gp_input_matrix(
-            gf_emb,  # geneformer embeddings
+            gf_emb['gene_emb'],  # geneformer embeddings
             input_dataset['input_ids'],
             getattr(self, f'gp{gp_idx}_tokens'),
             gp_idx=gp_idx,

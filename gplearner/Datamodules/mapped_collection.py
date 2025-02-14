@@ -74,7 +74,7 @@ else:
     from anndata._core.sparse_dataset import (
         BaseCompressedSparseDataset as SparseDataset,
     )
-    from anndata._core.sparse_dataset import CSRDataset  # mypy: ignore[no-redef]
+    from anndata.abc import CSRDataset  # mypy: ignore[no-redef]
 
     def _check_group_format(*args):
         pass

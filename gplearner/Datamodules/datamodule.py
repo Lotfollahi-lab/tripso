@@ -715,7 +715,7 @@ class iTxDataModule(txDataModule):
             num_genes_per_cell,
             attn_mask,
         ) = build_gp_input_matrix(
-            gf_emb,  # geneformer embeddings
+            gf_emb['gene_emb'],  # geneformer embeddings
             input_batch_id,
             self.gp_tokens,
         )
