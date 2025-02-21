@@ -1915,8 +1915,9 @@ def visualize_cosine_similarity(
     query_top10 = all_gene_stats.nlargest(topn, 'mean_query')
 
     # Select top 10 genes with strongest effect size differences
-    top10_diff_ref = all_gene_stats.nlargest(topn, 'effect_size')  # ref > query
-    top10_diff_query = all_gene_stats.nsmallest(topn, 'effect_size')  # query > ref
+    # if effect_size > 0 : query > ref
+    top10_diff_ref = all_gene_stats.nsmallest(topn, 'effect_size')
+    top10_diff_query = all_gene_stats.nlargest(topn, 'effect_size')
 
     # Plotting
     fig, axs = plt.subplots(2, 2, figsize=(18, 14))
