@@ -74,7 +74,12 @@ else:
     from anndata._core.sparse_dataset import (
         BaseCompressedSparseDataset as SparseDataset,
     )
-    from anndata.abc import CSRDataset  # mypy: ignore[no-redef]
+
+    # TO DO -> proper fix ?
+    if anndata_version_parse == version.parse('0.10.9'):
+        from anndata._core.sparse_dataset import CSRDataset
+    else:
+        from anndata.abc import CSRDataset  # mypy: ignore[no-redef]
 
     def _check_group_format(*args):
         pass

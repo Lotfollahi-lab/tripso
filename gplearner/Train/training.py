@@ -728,8 +728,9 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif mode == 'sequential':
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        # latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+        # checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
         checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
