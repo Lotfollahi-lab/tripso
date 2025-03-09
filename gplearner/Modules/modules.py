@@ -246,6 +246,18 @@ class Block(nn.Module):
             act_layer=act_layer,
             drop=drop,
         )
+        
+        self.attn_kwargs = {
+            'dim': dim,
+            'input_dim': dim,
+            'num_heads': num_heads,
+            'qkv_bias': qkv_bias,
+            'qk_scale': qk_scale,
+            'attn_drop': attn_drop,
+            'proj_drop': drop,
+            'use_flash': use_flash,
+            'use_flex': use_flex,
+        }
 
     def forward(self, x, attn_mask, return_attention):
         y, attn = self.attn(
@@ -951,3 +963,86 @@ if __name__ == '__main__':
         print(k, v.shape)
 
     print(out['gene_labels'])
+
+####################################
+# GPFinder-specific modules
+####################################
+
+class MonotonicLinear(nn.Linear):
+    """Applies a LeakyRELU on the weights to enforce monotonicity."""
+    def forward(self, input: Tensor) -> Tensor:
+        weight_positive = F.leaky_relu(self.weight, negative_slope=1e-4)
+        return F.linear(input, weight_positive, self.bias)
+    
+class AttentionValueNorm(Attention):
+    """Projects the value vector to a unit hypersphere."""
+    def forward(self, x: Tensor, attn_mask: Tensor, return_attention: bool):
+        # Attention mask is 0 for padding tokens (no attention)
+        B, N, C = x.shape
+
+        # Get attention matrix
+        qkv: Tensor = self.qkv(x)  # (batch_size, seq_len, num_channels * 3)
+        qkv = qkv.reshape(
+            B, N, 3, self.num_heads, C // self.num_heads
+        )
+        qkv = qkv.permute(
+            2, 0, 3, 1, 4
+        )  # (3, batch_size, num_heads, seq_len, head_dim)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # (batch_size, num_heads, seq_len, head_dim)
+
+        if self.use_flash:
+            # attn_out = flash_attn_func(q, k, v)
+            # # (batch_size, seqlen, nheads, headdim)
+            # x = attn_out.reshape(B, N, C)
+
+            with torch.backends.cuda.sdp_kernel(enable_flash=True):
+                # from https://discuss.pytorch.org/t/flash-attention/174955/14
+                mask = attn_mask.unsqueeze(1).unsqueeze(2)
+                mask = mask.expand(-1, self.num_heads, x.shape[1], x.shape[1])
+
+                # match x dtype
+                mask = mask.bool()
+
+                attn_out = F.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    # pytorch flash attention does not support mask
+                    scale=self.scale,
+                    dropout_p=self.attn_drop_rate,
+                    attn_mask=mask,
+                )  # if scale is None, default is 1/sqrt(dim)
+
+                # attn_out shape: (B, num_heads, seq_len, emb_size//num_heads)
+                # transpose so that it is (B, seq_len, num_heads, emb_size//num_heads)
+                x = attn_out.transpose(1, 2).reshape(B, N, C)
+
+        else:
+            attn: Tensor = (q @ k.transpose(-2, -1)) * self.scale
+
+            mask = rearrange(attn_mask, 'b ... -> b (...)')
+            max_neg_value = -torch.finfo(attn.dtype).max
+
+            # Repeat the mask for each head
+            mask = repeat(mask, 'b j -> b h () j', h=self.num_heads)
+
+            # Apply the mask to the attention scores
+            attn.masked_fill_(mask == 0, max_neg_value)
+
+            # Apply softmax to get attention weights
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            
+            # Normalize value vectors
+            v = v / v.norm(dim=-1, keepdim=True)
+
+            # Calculate the weighted sum of values
+            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+
+        x = self.proj(x)
+        x = self.proj_drop(x)
+
+        if return_attention is False:
+            attn = None
+
+        return x, attn

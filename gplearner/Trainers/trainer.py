@@ -22,6 +22,8 @@ from sklearn.metrics import classification_report, roc_auc_score
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 
+from torch import Tensor
+
 from ..Models.gp_model import EmbEvaluatorHead, gpTransformerBase
 from ..Utils.losses import compute_count_loss, compute_gp_similarity_loss
 from ..Utils.utils import (
@@ -1067,7 +1069,60 @@ class gpGlobal(gpBase):
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         return reconstruction_loss
+    
+# def compute_supervised_loss(self, output, batch, stage):
+#         clf_loss_dict = {}
+#         loss = 0
 
+#         for t in self.model.supervised_tasks:
+#             clf_loss = F.cross_entropy(output[f'logits_{t}'], batch[t])
+#             clf_loss_dict[t] = clf_loss
+#             loss += self.lambda_clf_loss[t] * clf_loss
+
+#             # track for calculating accuracy
+#             getattr(self, f'{stage}_clf_pred')[t].append(
+#                 torch.argmax(output[f'logits_{t}'], dim=1)
+#             )
+#             getattr(self, f'{stage}_clf_true')[t].append(batch[t])
+
+#         clf_loss_dict['total_loss'] = loss
+
+#         return clf_loss_dict
+
+class gpGlobalGPFinder(gpGlobal):
+    
+    def __init__(self,
+        lambda_entropy_loss: float,
+        lambda_contrastive_loss: float,
+        eps_entropy_loss: float,
+        **kwargs,             
+    ):
+        super().__init__(**kwargs)
+        assert self.return_attention is True
+        self.lambda_entropy_loss = lambda_entropy_loss
+        self.lambda_contrastive_loss = lambda_contrastive_loss
+        self.eps_entropy_loss = eps_entropy_loss
+        
+    def compute_entropy_loss(self, attn: Tensor) -> Tensor:
+        """Compute entropy of attention from final CLS token.
+        
+        Encourages concentration of attention in a few tokens.
+        attn.shape = (batch_size, num_heads, seq_len, seq_len)
+        """
+        cls_attn = attn[:, :, 0, :]  # attention from CLS token; (B, num_heads, N)
+        attn_entropy = - (cls_attn * (cls_attn + self.eps_entropy_loss).log()).sum(-1) # (B, num_heads)
+        entropy_loss = attn_entropy.mean() # average over batch and heads
+        return entropy_loss
+    
+    def compute_contrastive_loss(self, attn: Tensor, batch: dict) -> Tensor:
+        """Compute the """
+        contrastive_loss_dict = {}
+        loss = 0
+        
+        
+        return None
+
+    # TODO: Update forward
 
 class gpGlobalLoRA(gpGlobal):
     def __init__(self, lora_config_args, stage='train', **kwargs):

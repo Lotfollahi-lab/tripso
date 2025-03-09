@@ -4,21 +4,25 @@
 
 import os
 import pickle
-from typing import Dict, Optional
+from typing import cast, Dict, Optional
 
 # imports
 import numpy as np
 import torch
 import torch.nn as nn
+
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from peft import PeftConfig, get_peft_model
 from transformers import BertConfig, BertForMaskedLM
 
 from ..Modules.modules import (
     Mlp,
+    Block,
     PromptEncoder,
     gpTransformerEncoder,
     gpTransformerEncoderWithPrompt,
+    MonotonicLinear,
+    AttentionValueNorm,
 )
 from ..Utils.geneformer_utils import EmbExtractor, get_gf_repo
 from ..Utils.utils import (
@@ -1288,7 +1292,7 @@ class gpTransformerGlobal(gpTransformerBase):
             **kwargs,
         )
         self.global_attn_heads = global_attn_heads
-
+        self.supervised_labels = supervised_labels
         self.global_loss = global_loss
 
         self.cell_token_learner = cellWrapper(
@@ -1409,16 +1413,32 @@ class gpTransformerGlobal(gpTransformerBase):
         return output
 
 
-class gpTransformerGlobalLinear(gpTransformerGlobal):
-    """Equivalent to gpTransformerGlobal, but with no cell token learner
-    in the forward pass.
-
-    The cell token is simply taken to be the gp token of the first
-    gp of interest.
+class gpTransformerGPFinder(gpTransformerGlobal):
+    """Equivalent to gpTransformerGlobal, but with a few modifications.
+    
+    - No cell token learner in the forward pass (cell token is the 
+    gp token of the first gp of interest).
+    - Monotonic classification head (linear layer).
+    - Value vector normalization in the attention block.
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        
+        # Modify clf head
+        self.clf_head = nn.ModuleList(
+            [
+                MonotonicLinear(self.gp_latent_size, getattr(self, f'{k}_n_class'))
+                for k in self.supervised_labels.keys()
+            ]
+        )
+        
+        # Modify attention blocks
+        for encoder in self.multi_gp_encoder.encoder:
+            encoder = cast(gpTransformerEncoder, encoder)
+            for block in encoder.blocks:
+                block = cast(Block, block)
+                block.attn = AttentionValueNorm(**block.attn_kwargs)     
 
     def base_output_to_cell_output(
         self,
