@@ -238,7 +238,7 @@ class gpBase(pl.LightningModule):
         self.token_dataset = None
         self.attn_adata_holder: List[ad.AnnData] = []
 
-    def forward(self, x, masking, epoch):
+    def forward(self, x, masking, epoch, **kwargs):
         out = self.model(
             x,
             masking=masking,
@@ -352,7 +352,9 @@ class gpBase(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         if self.save_emb:
-            output = self.forward(batch, masking=False, epoch='test')
+            output = self.forward(
+                batch, masking=False, epoch='test', masking_global=False
+            )
 
             emb_dict = {}
 
@@ -685,8 +687,28 @@ class gpGlobal(gpBase):
                 setattr(self, f'{stage}_true_counts_list', [])
                 setattr(self, f'{stage}_pred_counts_list', [])
 
+    def forward(self, x, masking, masking_global, **kwargs):
+        # epoch argument for compatibility with gpBase
+        out = self.model(
+            x,
+            masking=masking,
+            masking_global=masking_global,
+            return_gene_embeddings=self.return_gene_embeddings,
+            tokens_to_keep=self.tokens_to_keep,
+            gp_of_interest=self.gp,
+            return_attention=self.return_attention,
+            epoch='Global',
+            return_mean_non_padding=self.return_mean_non_padding,
+        )
+
+        return out
+
     def training_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True, epoch='Global')
+        output = self.forward(
+            batch,
+            masking=self.calc_gp_loss,
+            masking_global=self.global_loss == 'masking',
+        )
 
         if self.calc_gp_loss:
             loss_base = self.compute_gp_loss(batch, output)
@@ -809,7 +831,11 @@ class gpGlobal(gpBase):
         setattr(self, f'{stage}_loss', [])
 
     def validation_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=True, epoch='Global')
+        output = self.forward(
+            batch,
+            masking=self.calc_gp_loss,
+            masking_global=self.global_loss == 'masking',
+        )
 
         if self.calc_gp_loss:
             loss_base = super().compute_gp_loss(batch, output)
