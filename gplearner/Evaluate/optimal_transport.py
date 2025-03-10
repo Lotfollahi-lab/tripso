@@ -608,7 +608,12 @@ def plot_gp_assignment_heatmap(
 
 
 def summarize_sinkhorn_mapping(
-    df, groupby, input_df, cluster_col_name='leiden', full_input_cluster_list=None
+    df,
+    groupby,
+    input_df,
+    cluster_col_name='leiden',
+    full_input_cluster_list=None,
+    aggregate_by='coupling_strength',
 ):
     '''
 
@@ -650,8 +655,16 @@ def summarize_sinkhorn_mapping(
 
     for gp in df['gp'].unique():
         df1 = df[df['gp'] == gp]
-        topn = df1.loc[df1.groupby(groupby)['coupling'].idxmax()]
-        topn[groupby] = topn[groupby]  # .astype(int)
+
+        if aggregate_by == 'coupling_strength' and 'coupling' in df1.columns:
+            topn = df1.loc[df1.groupby(groupby)['coupling'].idxmax()]
+        elif aggregate_by == 'num_pairs':
+            topn = (
+                df1.groupby(['gp', 'source', 'target']).size().reset_index(name='count')
+            )
+            topn = topn.loc[topn.groupby(groupby)['count'].idxmax()]
+        else:
+            topn = df1.drop_duplicates(subset=[groupby, 'source', 'target'])
 
         cluster_to_pred = cluster_to_pred.join(
             topn[['source', 'target']]
@@ -1076,4 +1089,62 @@ def plot_umap_with_centroids(
 
     if save_path:
         plt.savefig(save_path)
+    plt.show()
+
+
+def plot_num_pairs_by_gp(df, col, value, sort_by=None, **kwargs):
+    '''
+    Make a heatmap that where rows are the source/target cell types,
+    columns are the GPs, and the values are the number of pairs of cells
+    that were mapped to each population for the `value` cell type.
+
+    if sort_by = 'sum',
+        the GP will be sorted based on the most total cells mapped
+    if sort_by = 'max',
+        the GP will be sorted based on the most cells mapped to a single population
+
+    **kwargs
+        args to pass to sns heatplot
+        eg cmap, annot, vmin, vmax
+
+    '''
+
+    count_pairs = df.groupby(['source', 'target', 'gp']).size().reset_index(name='n')
+
+    # Pivot the table to get 'source' as rows, 'gp' as columns, and 'n' as values
+    if col == 'target':
+        view_col = 'target'
+        index_col = 'source'
+    else:
+        view_col = 'source'
+        index_col = 'target'
+
+    heatmap_data = count_pairs[count_pairs[view_col] == value].pivot_table(
+        index=index_col, columns='gp', values='n', aggfunc='sum', fill_value=0
+    )
+
+    # Choose sorting method: "sum" or "max"
+    if sort_by == 'sum':
+        sorted_columns = heatmap_data.sum().sort_values(ascending=False).index
+    elif sort_by == 'max':
+        sorted_columns = heatmap_data.max().sort_values(ascending=False).index
+    else:
+        sorted_columns = heatmap_data.columns  # Default order
+
+    # Reorder the heatmap data
+    heatmap_data = heatmap_data[sorted_columns]
+
+    # Create the heatmap
+    plt.figure(figsize=(12, 8))
+
+    # args to play with
+    # cmap, annot, vmin, vmax
+    sns.heatmap(heatmap_data, cbar=True, linewidths=0.5, **kwargs)
+
+    # Labels and title
+    plt.xlabel('GP')
+    plt.ylabel('Mapped cell type')
+    plt.title(f'Number of {value} cells mapped to each population, by GP')
+
+    # Show the plot
     plt.show()

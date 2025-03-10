@@ -2,11 +2,15 @@ import math
 from functools import partial
 from typing import Optional
 
+import jax.numpy as jnp
 import numpy as np
 import ot
 import pandas as pd
 import torch
+from ott.geometry import pointcloud
+from ott.tools.sinkhorn_divergence import sinkhorn_divergence
 from scipy.sparse import issparse
+from scipy.spatial.distance import cdist
 from scipy.stats import wasserstein_distance
 from sklearn.metrics.pairwise import rbf_kernel
 from tqdm import tqdm
@@ -386,89 +390,62 @@ def compute_distribution_distances(pred: torch.Tensor, true: torch.Tensor, metho
     return dict(zip(names, to_return))
 
 
-# #############################################
-# # Concept alignment score
-# # from https://github.com/mateoespinosa/cem
-# #############################################
+# =============================================================================
 
 
-# def concept_alignment_score(
-#     c_vec,
-#     c_test,
-#     step,
-#     progress_bar=False,
-# ):
-#     """
-#     Computes the concept alignment score between learnt concepts and labels.
+def euclidean_kernel_matrix(X, Y, gamma=1.0):
+    """
+    Compute the Euclidean kernel matrix based on pairwise Euclidean distances.
 
-#     :param c_vec: predicted concept representations (can be concept embeddings)
-#     :param c_test: concept ground truth labels
-#     :param y_test: task ground truth labels
-#     :param step: number of integration steps
-#     :return: concept alignment AUC, task alignment AUC
+    Parameters:
+        X (ndarray): Samples from distribution P, shape (m, d).
+        Y (ndarray): Samples from distribution Q, shape (n, d).
+        gamma (float): Kernel scaling factor.
 
-#     adapted from https://github.com/mateoespinosa/cem/blob/main/cem/metrics/cas.py
-#     accessed 27.04.2024
+    Returns:
+        K_xx, K_yy, K_xy: Kernel matrices.
+    """
+    return (
+        np.exp(-gamma * cdist(X, X, 'euclidean')),
+        np.exp(-gamma * cdist(Y, Y, 'euclidean')),
+        np.exp(-gamma * cdist(X, Y, 'euclidean')),
+    )
 
-#     EDIT : removed option to force alignment
-#     """
 
-#     warnings.simplefilter('ignore', UserWarning)
+def compute_mmd(X, Y, gammas):
+    """
+    Compute the Maximum Mean Discrepancy (MMD) between two distributions.
 
-#     # First lets compute an alignment between concept
-#     # scores and ground truth concepts
-#     # compute the maximum value for the AUC
-#     n_clusters = np.linspace(
-#         2,
-#         c_vec.shape[0],
-#         step,
-#     ).astype(int)
+    Parameters:
+        X (ndarray): Samples from distribution P, shape (m, d).
+        Y (ndarray): Samples from distribution Q, shape (n, d).
+        gamma (float): Kernel scaling factor.
 
-#     max_auc = np.trapz(np.ones(len(n_clusters)))
+    Returns:
+        float: MMD value.
+    """
 
-#     # for each concept:
-#     #   1. find clusters
-#     #   2. compare cluster assignments with ground truth concept/task labels
-#     concept_auc = []
-#     if progress_bar:
-#         bar = tqdm(range(c_test.shape[1]))
-#     else:
-#         bar = range(c_test.shape[1])
-#     for concept_id in bar:
-#         concept_homogeneity = []
-#         for nc in n_clusters:
-#             kmedoids = KMedoids(n_clusters=nc, random_state=0)
-#             if c_vec.shape[1] != c_test.shape[1]:
-#                 c_cluster_labels = kmedoids.fit_predict(
-#                     np.hstack(
-#                         [
-#                             c_vec[:, concept_id][:, np.newaxis],
-#                             c_vec[:, c_test.shape[1] :],
-#                         ]
-#                     )
-#                 )
-#             elif c_vec.shape[1] == c_test.shape[1] and len(c_vec.shape) == 2:
-#                 c_cluster_labels = kmedoids.fit_predict(
-#                     c_vec[:, concept_id].reshape(-1, 1)
-#                 )
-#             else:
-#                 c_cluster_labels = kmedoids.fit_predict(c_vec[:, concept_id, :])
+    mmd = []
 
-#             # compute alignment with ground truth labels
-#             concept_homogeneity.append(
-#                 homogeneity_score(c_test[:, concept_id], c_cluster_labels)
-#             )
+    for g in gammas:
+        m, n = len(X), len(Y)
+        K_xx, K_yy, K_xy = euclidean_kernel_matrix(X, Y, g)
 
-#             # EDIT ---- here we only have one set of labels
-#             # task_homogeneity.append(
-#             #     homogeneity_score(y_test, c_cluster_labels)
-#             # )
+        # Compute MMD^2
+        mmd_squared = (
+            (K_xx.sum() / (m * m)) + (K_yy.sum() / (n * n)) - (2 * K_xy.sum() / (m * n))
+        )
 
-#         # compute the area under the curve
-#         concept_auc.append(np.trapz(np.array(concept_homogeneity)) / max_auc)
-#         # task_auc.append(np.trapz(np.array(task_homogeneity)) / max_auc)
+        mmd.append(np.sqrt(mmd_squared))
 
-#     # return the average alignment across all concepts
-#     concept_auc = np.mean(concept_auc)
+    return pd.DataFrame({'gamma': gammas, 'mmd': mmd})
 
-#     return concept_auc
+
+def compute_sinkhorn(adata1, adata2, epsilons):
+    """Compute Sinkhorn divergence between two datasets."""
+    x, y = jnp.array(adata1.X), jnp.array(adata2.X)
+    results = [
+        sinkhorn_divergence(pointcloud.PointCloud, x=x, y=y, epsilon=eps)[0]
+        for eps in epsilons
+    ]
+    return pd.DataFrame({'epsilon': epsilons, 'sinkhorn_divergence': results})

@@ -36,7 +36,19 @@ from sklearn.metrics import (
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.stats.multitest import multipletests
-from tqdm import tqdm
+
+try:
+    # Check if running in a Jupyter notebook
+    from IPython import get_ipython
+
+    if 'IPKernelApp' in get_ipython().config:
+        from tqdm.notebook import tqdm
+    else:
+        from tqdm import tqdm
+except (ImportError, AttributeError):
+    # Default to regular tqdm in case of any issues
+    from tqdm import tqdm
+
 
 from ..Datamodules.datamodule import (
     EmbDataModule,
@@ -1446,9 +1458,15 @@ def calculate_cell_token_attribution_scores(
     # Convert the list of dictionaries to a DataFrame
     attribution_df = pd.DataFrame(rows)
 
+    gradcam_output_dir = os.path.join(output_dir, 'gradcam_outputs')
+
+    if not os.path.exists(gradcam_output_dir):
+        os.makedirs(gradcam_output_dir)
+
     attribution_df.to_csv(
         os.path.join(
-            output_dir, f'cell_token_attribution_scores_{obs_value}_block_{block_n}.csv'
+            gradcam_output_dir,
+            f'cell_token_attribution_scores_{obs_value}_block_{block_n}.csv',
         ),
         index=False,
     )
@@ -1473,7 +1491,7 @@ def calculate_cell_token_attribution_scores(
 
         plt.savefig(
             os.path.join(
-                output_dir, f'cell_token_abs_attribution_scores_{obs_value}.pdf'
+                gradcam_output_dir, f'cell_token_abs_attribution_scores_{obs_value}.pdf'
             )
         )
         plt.close()
@@ -1494,7 +1512,9 @@ def calculate_cell_token_attribution_scores(
         plt.tight_layout()
 
         plt.savefig(
-            os.path.join(output_dir, f'cell_token_attribution_scores_{obs_value}.pdf')
+            os.path.join(
+                gradcam_output_dir, f'cell_token_attribution_scores_{obs_value}.pdf'
+            )
         )
         plt.close()
 
@@ -1772,11 +1792,12 @@ def calculate_gene_to_gp_cosine_similarity(
         ' (depending on the size of your data, this can take a few minutes)'
     )
     gene_idx = gene_data['idx']
-    gene_arrays = {
-        gene: np.asarray(gene_data[gene])
-        for gene in genes
-        if gene in gene_data.column_names
-    }
+
+    gene_arrays = {}
+
+    for gene in tqdm(genes, desc='Extracting genes', leave=False):
+        if gene in gene_data.column_names:
+            gene_arrays[gene] = np.asarray(gene_data[gene])
 
     # 3. Align indices
     print('Aligning indices')
@@ -1788,8 +1809,13 @@ def calculate_gene_to_gp_cosine_similarity(
     print('Calculating cosine similarity')
     cosim_df = pd.DataFrame(index=shared_indices, columns=gene_arrays.keys())
 
-    for gene, gene_arr in gene_arrays.items():
+    for gene, gene_arr in tqdm(gene_arrays.items(), leave=False):
         cosim_df[gene] = [1 - cosine(gp, g) for gp, g in zip(cell, gene_arr)]
+
+        # find indices where gene_arr is all 0
+        zero_indices = np.where(np.all(gene_arr == 0, axis=1))[0]
+        zero_labels = cosim_df.index[zero_indices]
+        cosim_df.loc[zero_labels, gene] = np.nan
 
     return cosim_df
 
@@ -1843,11 +1869,29 @@ def calculate_gene_significance(ref_data, query_data):
             t_stat, p_value = ttest_ind(ref_samples, query_samples, equal_var=True)
             mean_ref = ref_samples.mean()
             mean_query = query_samples.mean()
-            effect_size = mean_ref - mean_query
+
+            # effect_size = mean_ref - mean_query
+            effect_size = mean_query - mean_ref
+
             results.append(
                 {
                     'gene': gene,
                     'p_value': p_value,
+                    'mean_ref': mean_ref,
+                    'mean_query': mean_query,
+                    'effect_size': effect_size,
+                }
+            )
+
+        else:
+            mean_ref = ref_samples.mean()
+            mean_query = query_samples.mean()
+            effect_size = mean_query - mean_ref
+
+            results.append(
+                {
+                    'gene': gene,
+                    'p_value': np.nan,
                     'mean_ref': mean_ref,
                     'mean_query': mean_query,
                     'effect_size': effect_size,
@@ -1915,8 +1959,9 @@ def visualize_cosine_similarity(
     query_top10 = all_gene_stats.nlargest(topn, 'mean_query')
 
     # Select top 10 genes with strongest effect size differences
-    top10_diff_ref = all_gene_stats.nlargest(topn, 'effect_size')  # ref > query
-    top10_diff_query = all_gene_stats.nsmallest(topn, 'effect_size')  # query > ref
+    # if effect_size > 0 : query > ref
+    top10_diff_ref = all_gene_stats.nsmallest(topn, 'effect_size')
+    top10_diff_query = all_gene_stats.nlargest(topn, 'effect_size')
 
     # Plotting
     fig, axs = plt.subplots(2, 2, figsize=(18, 14))
@@ -2004,7 +2049,7 @@ def visualize_cosine_similarity(
     ):
         if significance:
             axs[1, 0].text(
-                effect + 0.0002,
+                effect - 0.0002,
                 i,
                 significance,
                 ha='left',
@@ -2052,7 +2097,7 @@ def visualize_cosine_similarity(
     ):
         if significance:
             axs[1, 1].text(
-                effect - 0.0002,
+                effect + 0.0002,
                 i,
                 significance,
                 ha='right',

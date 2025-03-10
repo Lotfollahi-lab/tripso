@@ -700,6 +700,8 @@ class cellWrapper(nn.Module):
         global_masking_rate,
         use_flash,
         use_l2_norm,
+        global_pos_emb,
+        global_attn_dropout,
     ):
         super().__init__()
 
@@ -719,6 +721,8 @@ class cellWrapper(nn.Module):
             no_mask_tokens=[
                 len(self.gp_inputs) + 1
             ],  # gp token labels are 0 to len(gp_inputs)-1
+            use_pos_emb=global_pos_emb,
+            attn_drop_rate=global_attn_dropout,
         )
 
     def build_input_matrix(self, z, num_genes_per_cell_list):
@@ -1279,6 +1283,8 @@ class gpTransformerGlobal(gpTransformerBase):
         use_flash=False,
         use_l2_norm=False,
         n_bins=10,
+        global_pos_emb='sin_cos',
+        global_attn_dropout=0.0,
         **kwargs,
     ):
         super().__init__(
@@ -1299,6 +1305,8 @@ class gpTransformerGlobal(gpTransformerBase):
             global_masking_rate=global_masking_rate,
             use_flash=use_flash,
             use_l2_norm=use_l2_norm,
+            global_pos_emb=global_pos_emb,
+            global_attn_dropout=global_attn_dropout,
         )
 
         if self.global_loss == 'supervised':
@@ -1367,6 +1375,7 @@ class gpTransformerGlobal(gpTransformerBase):
             return_gf_cell_emb,
             gp_of_interest=gp_of_interest,
             masking=masking,
+            epoch=epoch,  # hard set to 'Global' in trainer
         )
 
         if return_gene_embeddings:
