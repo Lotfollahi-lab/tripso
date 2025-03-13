@@ -1176,6 +1176,79 @@ class gpGlobalLoRA(gpGlobal):
 # ------------------------------------------------------
 
 
+class gpAblation(gpGlobal):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def build_perturbed_input_matrix(
+        self, z, num_genes_per_cell_list, gp_pert_index=None
+    ):
+        z, gp_labels, attn_mask = self.model.cell_token_learner.build_input_matrix(
+            z, num_genes_per_cell_list
+        )
+
+        # always mask the GP we are perturbing
+        # set attn_mask to 0 when gp_label == gpert
+        if gp_pert_index is not None:
+            # handle cls separately
+            attn_mask_cls = attn_mask[:, 0]
+            attn_mask_gp = attn_mask[:, 1:]
+            attn_mask_gp[gp_labels == gp_pert_index] = 0
+
+            attn_mask = torch.cat([attn_mask_cls.unsqueeze(1), attn_mask_gp], dim=1)
+
+            # and force the embedding to 0 just in case (?)
+            z[gp_labels == gp_pert_index] = 0
+
+        return z, gp_labels, attn_mask
+
+    def test_step(self, batch, batch_idx):
+        output = self.forward(batch, masking=False, masking_global=False)
+
+        emb_dict = {}
+        emb_dict['control'] = output['cell_token'].detach().cpu()
+
+        # Pertubations - zero out each GP
+        for i, gp in enumerate(self.model.gp_inputs):
+            z, gp_labels, attn_mask = self.build_perturbed_input_matrix(
+                z=output['z'],
+                num_genes_per_cell_list=output['num_genes_per_cell_list'],
+                gp_pert_index=i,
+            )
+
+            encoder_output = self.model.cell_token_learner.encoder(
+                z,
+                gene_labels=gp_labels,
+                attn_mask=attn_mask,
+                masking=False,
+                return_attention=False,
+            )
+
+            emb_dict[f'{gp}_perturb'] = encoder_output['cls'].detach().cpu()
+
+        # metadata
+        for k, v in batch.items():
+            if k != 'input_ids':
+                emb_dict[k] = v
+
+        emb = Dataset.from_dict(emb_dict)
+
+        if self.emb_dataset is None:
+            self.emb_dataset = emb
+        else:
+            self.emb_dataset = concatenate_datasets([self.emb_dataset, emb])
+
+        return None
+
+    def on_test_epoch_end(self):
+        output_path = os.path.join(self.output_dir, 'with_gp_ablation')
+        os.makedirs(output_path, exist_ok=True)
+        output_name = os.path.join(output_path, f'{self.split_label}_set')
+        self.emb_dataset.save_to_disk(output_name)
+        self.emb_dataset = None
+        return None
+
+
 class gpPrototypes(gpGlobal):
     def __init__(
         self,

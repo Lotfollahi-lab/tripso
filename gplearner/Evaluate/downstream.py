@@ -33,6 +33,7 @@ from sklearn.metrics import (
     mean_squared_error,
     r2_score,
 )
+from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.stats.multitest import multipletests
@@ -49,7 +50,6 @@ except (ImportError, AttributeError):
     # Default to regular tqdm in case of any issues
     from tqdm import tqdm
 
-
 from ..Datamodules.datamodule import (
     EmbDataModule,
     iEmbDataModule,
@@ -61,6 +61,7 @@ from ..Models.baselines import gfGlobal
 from ..Models.interpretability import iGlobalWrapper, iGpWrapper
 from ..Trainers.trainer import (
     EmbEvaluator,
+    gpAblation,
     gpBase,
     gpGlobal,
     gpGlobalLoRA,
@@ -856,6 +857,89 @@ class gpEval:
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
 
         trainer.validate(gp_transformer, txdata)
+
+
+class gpAblationEval(gpEval):
+    def __init__(self, main_ckpt_dir, *args, **kwargs):
+        self.main_ckpt_dir = os.path.join(main_ckpt_dir, 'checkpoints/last.ckpt')
+        super().__init__(*args, **kwargs)
+
+    def _init_trainer(self, split_label=None, **kwargs):
+        if self.model_type == 'Base':
+            raise ValueError('Ablation not implemented for Base model')
+
+        elif self.model_type == 'Global':
+            gp_transformer = gpAblation.load_from_checkpoint(
+                self.main_ckpt_dir, hparam_save='ignore_model', map_location='cpu'
+            )
+
+        # reset attributes overwritten by loading from checkpoint
+        gp_transformer.save_emb = True
+        gp_transformer.split_label = split_label
+        gp_transformer.output_dir = self.output_dir
+
+        # Extract model
+        self.model = gp_transformer.model
+        self.gp_inputs = gp_transformer.model.gp_inputs
+
+        # Extract pretrained encoder config
+        self.fm_encoder_pkg = gp_transformer.model.fm_encoder_pkg
+
+        if self.fm_encoder_pkg == 'geneformer':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_name
+            self.max_len = (
+                gp_transformer.model.gf_wrapper.gf.config.max_position_embeddings
+            )
+        elif self.fm_encoder_pkg == 'from_scratch':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
+            # TO DO --> flexibly account for different model sizes
+            self.max_len = 4096
+
+        return gp_transformer
+
+
+def calculate_perturbation_effect(embeddings, gp_list, meta_cols):
+    '''
+    Calculate the effect of perturbing a gene program on cell token
+
+    Inputs:
+    embeddings: huggingface dataset object with control cls and {GP}_perturb cls
+    gp_list: list of gene programs to evaluate
+    meta_cols: list of metadata columns to keep
+
+    Returns:
+    adata_similarity: anndata object with (1 - cosine similarity) between control
+    and perturbed embeddings for each cell
+
+    '''
+
+    control = sc.AnnData(
+        X=np.array(embeddings['control']),
+        obs=embeddings.select_columns(meta_cols).to_pandas(),
+    )
+
+    n_cells = control.n_obs
+    n_geps = len(gp_list)
+
+    # Create an empty matrix to store cosine similarities
+    similarity_matrix = np.zeros((n_cells, n_geps))
+
+    for j, gep_key in enumerate(gp_list):
+        gep = sc.AnnData(
+            X=np.array(embeddings[f'{gep_key}_perturb']),
+            obs=embeddings.select_columns(meta_cols).to_pandas(),
+        )
+
+        # take (1-) so that the bigger the number the bigger the effect
+        similarity_scores = 1 - np.diag(cosine_similarity(control.X, gep.X))
+        similarity_matrix[:, j] = similarity_scores
+
+    # Create the final AnnData object
+    adata_similarity = sc.AnnData(
+        X=similarity_matrix, obs=control.obs, var=pd.DataFrame(index=gp_list)
+    )
+
+    return adata_similarity
 
 
 ################################
