@@ -355,7 +355,9 @@ def poly_mmd2(f_of_X, f_of_Y, d=2, alpha=1.0, c=2.0):
     return K_XX_mean + K_YY_mean - K_XY_mean - K_YX_mean
 
 
-def compute_distribution_distances(pred: torch.Tensor, true: torch.Tensor, method=None):
+def compute_distribution_distances(
+    pred: torch.Tensor, true: torch.Tensor, method='sinkhorn'
+):
     """
     Computes distances between predicted and true distributions.
 

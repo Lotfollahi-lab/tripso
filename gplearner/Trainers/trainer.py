@@ -19,6 +19,7 @@ from datasets import Dataset, concatenate_datasets
 from peft import LoraConfig, get_peft_model
 from scipy.sparse import csr_matrix
 from sklearn.metrics import classification_report, roc_auc_score
+from sklearn.metrics.pairwise import cosine_similarity
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 
@@ -512,9 +513,7 @@ class gpBase(pl.LightningModule):
                 loss += loss_i
 
             else:
-                gp_loss_dict[self.model.gp_inputs[i]] = (
-                    torch.tensor(0).to(output['logits_lm_list'][i].device).float()
-                )
+                gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(self.device)
 
         # package outputs to return flexible number of objects
         holder = {
@@ -836,6 +835,9 @@ class gpGlobal(gpBase):
             masking=self.calc_gp_loss,
             masking_global=self.global_loss == 'masking',
         )
+
+        # track_tissue = pd.Series(batch['tissue'])
+        # print('Ground truth tissue', track_tissue.value_counts())
 
         if self.calc_gp_loss:
             loss_base = super().compute_gp_loss(batch, output)
@@ -1177,8 +1179,11 @@ class gpGlobalLoRA(gpGlobal):
 
 
 class gpAblation(gpGlobal):
-    def __init__(self, **kwargs):
+    def __init__(self, compute_cosine=False, **kwargs):
         super().__init__(**kwargs)
+        self.compute_cosine = compute_cosine
+        self.save_raw_embeddings = not compute_cosine
+        self.cosine_adata = None
 
     def build_perturbed_input_matrix(
         self, z, num_genes_per_cell_list, gp_pert_index=None
@@ -1208,6 +1213,10 @@ class gpAblation(gpGlobal):
         emb_dict = {}
         emb_dict['control'] = output['cell_token'].detach().cpu()
 
+        if self.compute_cosine:
+            cosine_dict = {}
+            control_array = emb_dict['control'].numpy()
+
         # Pertubations - zero out each GP
         for i, gp in enumerate(self.model.gp_inputs):
             z, gp_labels, attn_mask = self.build_perturbed_input_matrix(
@@ -1224,19 +1233,50 @@ class gpAblation(gpGlobal):
                 return_attention=False,
             )
 
-            emb_dict[f'{gp}_perturb'] = encoder_output['cls'].detach().cpu()
+            if self.compute_cosine:
+                # get (1 - cosine similarity) to control embedding
+                gp_array = encoder_output['cls'].detach().cpu().numpy()
+                cos_sim = 1 - np.diag(cosine_similarity(control_array, gp_array))
 
-        # metadata
-        for k, v in batch.items():
-            if k != 'input_ids':
-                emb_dict[k] = v
+                cosine_dict[gp] = cos_sim
 
-        emb = Dataset.from_dict(emb_dict)
+            else:
+                emb_dict[f'{gp}_perturb'] = encoder_output['cls'].detach().cpu()
 
-        if self.emb_dataset is None:
-            self.emb_dataset = emb
-        else:
-            self.emb_dataset = concatenate_datasets([self.emb_dataset, emb])
+        # for outputting raw embeddings
+        if self.save_raw_embeddings:
+            # metadata
+            for k, v in batch.items():
+                if k != 'input_ids':
+                    emb_dict[k] = v
+
+            emb = Dataset.from_dict(emb_dict)
+
+            if self.emb_dataset is None:
+                self.emb_dataset = emb
+            else:
+                self.emb_dataset = concatenate_datasets([self.emb_dataset, emb])
+
+        elif self.compute_cosine:
+            meta_dict = {}
+
+            for k, v in batch.items():
+                if k != 'input_ids':
+                    if isinstance(v, torch.Tensor):
+                        meta_dict[k] = v.cpu().numpy()
+                    else:
+                        meta_dict[k] = v
+
+            adata = sc.AnnData(
+                X=pd.DataFrame(cosine_dict).values,
+                obs=pd.DataFrame(meta_dict),
+                var=pd.DataFrame(index=cosine_dict.keys()),
+            )
+
+            if self.cosine_adata is None:
+                self.cosine_adata = adata
+            else:
+                self.cosine_adata = ad.concat([self.cosine_adata, adata])
 
         return None
 
@@ -1244,8 +1284,15 @@ class gpAblation(gpGlobal):
         output_path = os.path.join(self.output_dir, 'with_gp_ablation')
         os.makedirs(output_path, exist_ok=True)
         output_name = os.path.join(output_path, f'{self.split_label}_set')
-        self.emb_dataset.save_to_disk(output_name)
-        self.emb_dataset = None
+
+        if self.save_raw_embeddings:
+            self.emb_dataset.save_to_disk(output_name)
+            self.emb_dataset = None
+
+        else:
+            self.cosine_adata.write_h5ad(output_name + '.h5ad')
+            self.cosine_adata = None
+
         return None
 
 

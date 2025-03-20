@@ -860,8 +860,9 @@ class gpEval:
 
 
 class gpAblationEval(gpEval):
-    def __init__(self, main_ckpt_dir, *args, **kwargs):
+    def __init__(self, main_ckpt_dir, compute_cosine=False, *args, **kwargs):
         self.main_ckpt_dir = os.path.join(main_ckpt_dir, 'checkpoints/last.ckpt')
+        self.compute_cosine = compute_cosine
         super().__init__(*args, **kwargs)
 
     def _init_trainer(self, split_label=None, **kwargs):
@@ -877,6 +878,8 @@ class gpAblationEval(gpEval):
         gp_transformer.save_emb = True
         gp_transformer.split_label = split_label
         gp_transformer.output_dir = self.output_dir
+        gp_transformer.compute_cosine = self.compute_cosine
+        gp_transformer.save_raw_embeddings = not self.compute_cosine
 
         # Extract model
         self.model = gp_transformer.model
@@ -924,7 +927,9 @@ def calculate_perturbation_effect(embeddings, gp_list, meta_cols):
     # Create an empty matrix to store cosine similarities
     similarity_matrix = np.zeros((n_cells, n_geps))
 
-    for j, gep_key in enumerate(gp_list):
+    for j, gep_key in tqdm(
+        enumerate(gp_list), desc='Calculating GP perturbation effect'
+    ):
         gep = sc.AnnData(
             X=np.array(embeddings[f'{gep_key}_perturb']),
             obs=embeddings.select_columns(meta_cols).to_pandas(),
