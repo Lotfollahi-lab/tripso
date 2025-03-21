@@ -702,7 +702,10 @@ def load_from_ckpt(mode, pl_model, args):
     output_dir = args['output_dir']
     tissue = args['tissue']
     model_type = args['model_type']
-    path_to_base_model = args['path_to_base_model']
+    if args['path_to_base_model'] is None:
+        path_to_base_model = output_dir
+    else:
+        path_to_base_model = args['path_to_base_model']
 
     if mode == 'virtual_tokens':
         if args['path_to_base_model'] is not None:
@@ -731,7 +734,9 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif mode == 'resume_training':
-        latest_ckpt = find_latest_file(output_dir, tissue, model_type)
+        # latest_ckpt = find_latest_file(output_dir, tissue, model_type)
+        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
+
         if model_type == 'Global':
             pl_model = gpGlobal.load_from_checkpoint(latest_ckpt, map_location='cpu')
         else:
