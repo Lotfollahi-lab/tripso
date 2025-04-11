@@ -95,9 +95,10 @@ def rerank_genes(
     cluster_score_mean_scores = np.array(
         [scores[labels_score == c].mean() for c in np.unique(labels_score)]
     )
-    top_score_cluster = cluster_score_mean_scores[0]
+    top_score_cluster = np.argmax(cluster_score_mean_scores)
     
     # Cluster top score cluster based on score correlation
+    top_score_cluster_scores = scores[labels_score == top_score_cluster]
     top_score_cluster_genes = genes[labels_score == top_score_cluster]
     
     gene_value_list = []
@@ -117,7 +118,7 @@ def rerank_genes(
     labels_corr = cluster(similarity_corr)
     
     cluster_corr_mean_scores = np.array(
-        [scores[labels_corr == c].mean() for c in np.unique(labels_corr)]
+        [top_score_cluster_scores[labels_corr == c].mean() for c in np.unique(labels_corr)]
     )
     cluster_corr_order = np.argsort(cluster_corr_mean_scores)[::-1]
     
