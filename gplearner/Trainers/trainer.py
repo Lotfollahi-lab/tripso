@@ -972,7 +972,7 @@ class gpGlobal(gpBase):
                     else:
                         self.cell_metadata[k] = [v]
 
-            output = self.forward(batch, masking=False)
+            output = self.forward(batch, masking=False, masking_global=False)
 
             for t in self.model.supervised_tasks:
                 self.test_clf_pred[t].append(output[f'logits_{t}'])
@@ -1038,12 +1038,35 @@ class gpGlobal(gpBase):
                 meta_dict[f'{t}_pred_encoded'] = predicted_classes.cpu().numpy()
 
                 if self.return_classification_report:
-                    true_classes = np.array(self.cell_metadata[t])
+                    # flatten the batches and convert to numpy arrays
+                    true_classes = torch.cat(self.cell_metadata[t]).cpu().numpy()
+
                     predicted_classes = np.array(meta_dict[f'{t}_pred_encoded'])
                     report = classification_report(
                         true_classes, predicted_classes, output_dict=True
                     )
+
                     output_df = wrangle_classification_report(report)
+
+                    # convert encoded labels back to original labels
+                    id_dict = {}
+                    id_dict[t] = torch.cat(meta_dict[t]).cpu().numpy()
+                    id_dict[t.replace('_id', '')] = [
+                        item for l1 in meta_dict[t.replace('_id', '')] for item in l1
+                    ]
+                    meta_df = pd.DataFrame(id_dict)
+                    meta_df = meta_df[[t, t.replace('_id', '')]].drop_duplicates()
+                    label_mapping = {
+                        str(k): v
+                        for k, v in zip(
+                            meta_df[t].values, meta_df[t.replace('_id', '')].values
+                        )
+                    }
+
+                    output_df['label'] = (
+                        output_df['output_class'].astype(str).map(label_mapping)
+                    )
+
                     output_df.to_csv(
                         os.path.join(self.output_dir, f'{t}_classification_report.csv'),
                         index=False,

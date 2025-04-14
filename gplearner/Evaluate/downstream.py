@@ -814,7 +814,7 @@ class gpEval:
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
         trainer.test(gp_transformer, txdata)
 
-    def evaluate_supervised_model(self):
+    def evaluate_supervised_model(self, precision=32):
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
@@ -827,7 +827,9 @@ class gpEval:
             else None,
         )
 
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision=precision
+        )
         trainer.test(self.gp_transformer, txdata)
 
     def generate_virtual_tokens(self, split='test'):
