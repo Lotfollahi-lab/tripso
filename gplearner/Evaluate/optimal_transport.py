@@ -1092,21 +1092,20 @@ def plot_umap_with_centroids(
     plt.show()
 
 
-def plot_num_pairs_by_gp(df, col, value, sort_by=None, **kwargs):
+def plot_num_pairs_by_gp(df, col, value, sort_by=None, sort_by_row=None, **kwargs):
     '''
-    Make a heatmap that where rows are the source/target cell types,
-    columns are the GPs, and the values are the number of pairs of cells
-    that were mapped to each population for the `value` cell type.
+    Make a heatmap where rows are source/target cell types,
+    columns are GPs, and values are counts of pairs mapped to each population.
 
-    if sort_by = 'sum',
-        the GP will be sorted based on the most total cells mapped
-    if sort_by = 'max',
-        the GP will be sorted based on the most cells mapped to a single population
+    sort_by:
+        - 'sum': sort GP columns by total sum of mapped cells
+        - 'max': sort GP columns by maximum cells mapped to any single population
 
-    **kwargs
-        args to pass to sns heatplot
-        eg cmap, annot, vmin, vmax
+    sort_by_row:
+        - str: name of the row (mapped cell type) to sort GP columns by
 
+    **kwargs:
+        arguments passed to sns.heatmap (cmap, annot, vmin, vmax, etc.)
     '''
 
     count_pairs = df.groupby(['source', 'target', 'gp']).size().reset_index(name='n')
@@ -1123,11 +1122,18 @@ def plot_num_pairs_by_gp(df, col, value, sort_by=None, **kwargs):
         index=index_col, columns='gp', values='n', aggfunc='sum', fill_value=0
     )
 
-    # Choose sorting method: "sum" or "max"
+    # Choose sorting method
     if sort_by == 'sum':
         sorted_columns = heatmap_data.sum().sort_values(ascending=False).index
     elif sort_by == 'max':
         sorted_columns = heatmap_data.max().sort_values(ascending=False).index
+    elif sort_by_row:
+        if sort_by_row in heatmap_data.index:
+            sorted_columns = (
+                heatmap_data.loc[sort_by_row].sort_values(ascending=False).index
+            )
+        else:
+            raise ValueError(f"'{sort_by_row}' is not a valid row name.")
     else:
         sorted_columns = heatmap_data.columns  # Default order
 
@@ -1136,15 +1142,10 @@ def plot_num_pairs_by_gp(df, col, value, sort_by=None, **kwargs):
 
     # Create the heatmap
     plt.figure(figsize=(12, 8))
-
-    # args to play with
-    # cmap, annot, vmin, vmax
     sns.heatmap(heatmap_data, cbar=True, linewidths=0.5, **kwargs)
 
-    # Labels and title
     plt.xlabel('GP')
     plt.ylabel('Mapped cell type')
     plt.title(f'Number of {value} cells mapped to each population, by GP')
 
-    # Show the plot
     plt.show()
