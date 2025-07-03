@@ -1090,6 +1090,7 @@ def plot_umap_with_centroids(
     if save_path:
         plt.savefig(save_path)
     plt.show()
+    plt.close()
 
 
 def plot_num_pairs_by_gp(df, col, value, sort_by=None, sort_by_row=None, **kwargs):
