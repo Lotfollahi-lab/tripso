@@ -55,7 +55,7 @@ def get_gf_repo():
     # if geneformer_repo_path is None:
     #     raise ValueError('Geneformer not found in site-packages directories')
 
-    geneformer_repo_path = '/lustre/scratch126/cellgen/team361/mm58/Geneformer'
+    geneformer_repo_path = '/nfs/team361/mm58/Geneformer'
 
     return geneformer_repo_path
 

@@ -133,7 +133,7 @@ class GeneWrapper(nn.Module):
         # Set word embeddings to Geneformer embeddings
         if use_gf_embeddings == 'gf-12L-95M-i4096':
             geneformer = BertForMaskedLM.from_pretrained(
-                '/lustre/scratch126/cellgen/team361/mm58/Geneformer/gf-12L-95M-i4096'
+                '/nfs/team361/mm58/Geneformer/gf-12L-95M-i4096'
             )
             gene_emb_weight = geneformer.bert.embeddings.word_embeddings.weight.data
 

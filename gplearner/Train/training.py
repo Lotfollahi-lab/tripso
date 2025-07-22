@@ -117,6 +117,7 @@ def run_training(
     calc_gene_loss: Optional[bool] = True,
     lora_config_args: Optional[dict] = None,
     warmup: Optional[int] = 0,
+    accumulate_grad_batches: Optional[int] = 1,
 ):
     """
     Wrapper function for training gpLearner model
@@ -370,6 +371,7 @@ def run_training(
         limit_train_batches=limit_train_batches,
         limit_val_batches=limit_val_batches,
         val_check_interval=val_check_interval,
+        accumulate_grad_batches=accumulate_grad_batches,
     )
 
     # Train the model
@@ -514,6 +516,7 @@ def configure_logger(args):
             'sampling': 'random' if args['sampler'] is None else args['sampler'],
             'seed': args['seed'],
             'data_seed': args['data_seed'],
+            'accumulate_grad_batches': args['accumulate_grad_batches'],
         }
     )
 
