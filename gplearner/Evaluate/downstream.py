@@ -78,6 +78,7 @@ from ..Utils.utils import (  # find_latest_file,
 )
 
 # for exporting pdfs
+matplotlib.rcdefaults()
 matplotlib.rcParams['pdf.fonttype'] = 42
 # torch.set_float32_matmul_precision('medium')
 
@@ -2033,7 +2034,18 @@ def visualize_cosine_similarity(
     save_to=None,
     gp_to_color=None,  # {GP : color}
     gpdb=None,  # for gene membership
+    figsize=(18, 14),
+    show_significance=True,
+    color_scheme='default',  # 'default' or 'significance'
+    diff_cmap='Blues',  # colormap for significance mode
+    hspace=0.5,
+    wspace=0.5,
 ):
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.ticker import FuncFormatter
+    import numpy as np
     # Optionally fill in missing values
     if fillna:
         df_long = df_long.fillna(0)
@@ -2051,11 +2063,13 @@ def visualize_cosine_similarity(
 
     # Select top 10 genes with strongest effect size differences
     # if effect_size > 0 : query > ref
-    top10_diff_ref = all_gene_stats.nsmallest(topn, 'effect_size')
-    top10_diff_query = all_gene_stats.nlargest(topn, 'effect_size')
+    sig_diff_ref = all_gene_stats[ (all_gene_stats['effect_size'] < 0)] # (all_gene_stats['p_adjusted'] < 0.05) &
+    sig_diff_query = all_gene_stats[ (all_gene_stats['effect_size'] > 0)] # (all_gene_stats['p_adjusted'] < 0.05) &
+    top_diff_ref = sig_diff_ref.nsmallest(topn, 'effect_size')
+    top_diff_query = sig_diff_query.nlargest(topn, 'effect_size')
 
     # Plotting
-    fig, axs = plt.subplots(2, 2, figsize=(18, 14))
+    fig, axs = plt.subplots(2, 2, figsize=figsize)
     fig.set_facecolor('white')
 
     # 1. Top 10 genes with highest average cosine similarity in ref
@@ -2078,7 +2092,7 @@ def visualize_cosine_similarity(
         sns.barplot(data=ref_top10, x='mean_ref', y='gene', ax=axs[0, 0], errorbar=None)
 
     axs[0, 0].set_title(
-        f'Top 10 Genes with Highest Average Cosine Similarity ({obs_value_1})'
+        f'Top {topn} Genes with Highest Average Cosine Similarity \n({obs_value_1})'
     )
     axs[0, 0].set_xlabel('Cosine Similarity')
     axs[0, 0].set_ylabel('Gene')
@@ -2105,21 +2119,53 @@ def visualize_cosine_similarity(
         )
 
     axs[0, 1].set_title(
-        f'Top 10 Genes with Highest Average Cosine Similarity ({obs_value_2})'
+        f'Top {topn} Genes with Highest Average Cosine Similarity \n({obs_value_2})'
     )
     axs[0, 1].set_xlabel('Cosine Similarity')
     axs[0, 1].set_ylabel('Gene')
 
     # 3. Top 10 genes with strongest difference (ref > query)
-    if gp_to_color:
+    if color_scheme == 'significance':
+        # Color by -log10(p_adjusted)
+        vals = top_diff_ref['effect_size']
+        pvals_raw = top_diff_ref['p_adjusted']
+        min_nonzero = pvals_raw[pvals_raw > 0].min() if (pvals_raw > 0).any() else 1e-20
+        pvals = pvals_raw.replace(0, min_nonzero)
+        neglogp = -np.log10(pvals)
+        cmap = plt.get_cmap(diff_cmap)
+        norm = Normalize(vmin=neglogp.min(), vmax=neglogp.max())
+        colors = cmap(norm(neglogp))
+        bars = axs[1, 0].barh(
+            y=top_diff_ref['gene'],
+            width=vals,
+            color=colors,
+            edgecolor='black',
+        )
+        axs[1, 0].invert_yaxis()
+        # Colorbar (keep as -log10(p-value))
+        sm = ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=axs[1, 0])
+        cbar.set_label('-log10(Adjusted p-value)', rotation=270, labelpad=15)
+        # Set y-tick label color based on p_adj
+        yticklabels = axs[1, 0].get_yticklabels()
+        for label in yticklabels:
+            gene = label.get_text()
+            pval = top_diff_ref.set_index('gene').loc[gene, 'p_adjusted']
+            if pval >= 0.05:
+                label.set_color('gray')
+            else:
+                label.set_color('black')
+        axs[1, 0].set_yticklabels(yticklabels)
+    elif gp_to_color:
         palette = dict(
             zip(
-                top10_diff_ref['gene'],
-                assign_bar_colors(top10_diff_ref['gene'], gp_to_color, gpdb),
+                top_diff_ref['gene'],
+                assign_bar_colors(top_diff_ref['gene'], gp_to_color, gpdb),
             )
         )
         sns.barplot(
-            data=top10_diff_ref,
+            data=top_diff_ref,
             x='effect_size',
             y='gene',
             ax=axs[1, 0],
@@ -2128,42 +2174,72 @@ def visualize_cosine_similarity(
         )
     else:
         sns.barplot(
-            data=top10_diff_ref, x='effect_size', y='gene', ax=axs[1, 0], color='salmon'
+            data=top_diff_ref, x='effect_size', y='gene', ax=axs[1, 0], color='salmon'
         )
 
-    for i, (effect, gene, significance) in enumerate(
-        zip(
-            top10_diff_ref['effect_size'],
-            top10_diff_ref['gene'],
-            top10_diff_ref['significance'],
-        )
-    ):
-        if significance:
-            axs[1, 0].text(
-                effect - 0.0002,
-                i,
-                significance,
-                ha='left',
-                va='center',
-                fontsize=12,
-                color='darkred',
+    if show_significance:
+        for i, (effect, gene, significance) in enumerate(
+            zip(
+                top_diff_ref['effect_size'],
+                top_diff_ref['gene'],
+                top_diff_ref['significance'],
             )
+        ):
+            if significance:
+                axs[1, 0].text(
+                    effect - 0.0002,
+                    i,
+                    significance,
+                    ha='left',
+                    va='center',
+                    fontsize=12,
+                    color='darkred',
+                )
     axs[1, 0].set_title(
-        f'Top 10 Genes with Strongest Difference ({obs_value_1} > {obs_value_2})'
+        f'Top {topn} Genes with Strongest Difference \n({obs_value_1} > {obs_value_2})'
     )
     axs[1, 0].set_xlabel('Difference in Cosine Similarity')
     axs[1, 0].set_ylabel('Gene')
 
     # 4. Top 10 genes with strongest difference (query > ref)
-    if gp_to_color:
+    if color_scheme == 'significance':
+        vals = top_diff_query['effect_size']
+        pvals_raw = top_diff_query['p_adjusted']
+        min_nonzero = pvals_raw[pvals_raw > 0].min() if (pvals_raw > 0).any() else 1e-20
+        pvals = pvals_raw.replace(0, min_nonzero)
+        neglogp = -np.log10(pvals)
+        cmap = plt.get_cmap(diff_cmap)
+        norm = Normalize(vmin=neglogp.min(), vmax=neglogp.max())
+        colors = cmap(norm(neglogp))
+        bars = axs[1, 1].barh(
+            y=top_diff_query['gene'],
+            width=vals,
+            color=colors,
+            edgecolor='black',
+        )
+        axs[1, 1].invert_yaxis()
+        sm = ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=axs[1, 1])
+        cbar.set_label('-log10(Adjusted p-value)', rotation=270, labelpad=15)
+        yticklabels = axs[1, 1].get_yticklabels()
+        for label in yticklabels:
+            gene = label.get_text()
+            pval = top_diff_query.set_index('gene').loc[gene, 'p_adjusted']
+            if pval >= 0.05:
+                label.set_color('gray')
+            else:
+                label.set_color('black')
+        axs[1, 1].set_yticklabels(yticklabels)
+    elif gp_to_color:
         palette = dict(
             zip(
-                top10_diff_query['gene'],
-                assign_bar_colors(top10_diff_query['gene'], gp_to_color, gpdb),
+                top_diff_query['gene'],
+                assign_bar_colors(top_diff_query['gene'], gp_to_color, gpdb),
             )
         )
         sns.barplot(
-            data=top10_diff_query,
+            data=top_diff_query,
             x='effect_size',
             y='gene',
             ax=axs[1, 1],
@@ -2172,38 +2248,39 @@ def visualize_cosine_similarity(
         )
     else:
         sns.barplot(
-            data=top10_diff_query,
+            data=top_diff_query,
             x='effect_size',
             y='gene',
             ax=axs[1, 1],
             color='skyblue',
         )
 
-    for i, (effect, gene, significance) in enumerate(
-        zip(
-            top10_diff_query['effect_size'],
-            top10_diff_query['gene'],
-            top10_diff_query['significance'],
-        )
-    ):
-        if significance:
-            axs[1, 1].text(
-                effect + 0.0002,
-                i,
-                significance,
-                ha='right',
-                va='center',
-                fontsize=12,
-                color='navy',
+    if show_significance:
+        for i, (effect, gene, significance) in enumerate(
+            zip(
+                top_diff_query['effect_size'],
+                top_diff_query['gene'],
+                top_diff_query['significance'],
             )
+        ):
+            if significance:
+                axs[1, 1].text(
+                    effect + 0.0002,
+                    i,
+                    significance,
+                    ha='right',
+                    va='center',
+                    fontsize=12,
+                    color='navy',
+                )
     axs[1, 1].set_title(
-        f'Top 10 Genes with Strongest Difference ({obs_value_2} > {obs_value_1})'
+        f'Top {topn} Genes with Strongest Difference \n({obs_value_2} > {obs_value_1})'
     )
     axs[1, 1].set_xlabel('Difference in Cosine Similarity')
     axs[1, 1].set_ylabel('Gene')
 
     # Adjust layout to avoid squishing
-    plt.subplots_adjust(hspace=0.4, wspace=0.3)
+    plt.subplots_adjust(hspace=hspace, wspace=wspace)
 
     if save_to:
         plt.savefig(save_to)
