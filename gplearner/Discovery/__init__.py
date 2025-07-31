@@ -8,9 +8,16 @@ from .gene_ablation import (
     geneAblationEval,
 )
 
+from .gene_ablation_emd import (
+    GeneAblationEMD,
+    geneAblationEMDEval,
+)
+
 __all__ = [
     'cluster',
     'rerank_genes',
     'GeneAblation',
     'geneAblationEval',
+    'GeneAblationEMD',
+    'geneAblationEMDEval',
 ]
