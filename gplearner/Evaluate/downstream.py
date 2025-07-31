@@ -22,6 +22,7 @@ import torch
 from captum.attr import GuidedGradCam
 from datasets import load_from_disk
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
+from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from pytorch_lightning.loggers import CSVLogger
 from scipy.spatial.distance import cosine
 from scipy.stats import ttest_ind
@@ -2037,7 +2038,8 @@ def visualize_cosine_similarity(
     figsize=(18, 14),
     show_significance=True,
     color_scheme='default',  # 'default' or 'significance'
-    diff_cmap='Blues',  # colormap for significance mode
+    significance_palette = 'Blues',  # colormap for significance mode
+    palette_as_gradient = False, # if True, build custom color gradient
     hspace=0.5,
     wspace=0.5,
 ):
@@ -2132,7 +2134,13 @@ def visualize_cosine_similarity(
         min_nonzero = pvals_raw[pvals_raw > 0].min() if (pvals_raw > 0).any() else 1e-20
         pvals = pvals_raw.replace(0, min_nonzero)
         neglogp = -np.log10(pvals)
-        cmap = plt.get_cmap(diff_cmap)
+        
+        if palette_as_gradient:
+            base_color = to_rgba(significance_palette[0])
+            cmap = LinearSegmentedColormap.from_list('ref_cmap', [(1,1,1,1), base_color])
+        else:
+            cmap = plt.get_cmap(significance_palette)
+            
         norm = Normalize(vmin=neglogp.min(), vmax=neglogp.max())
         colors = cmap(norm(neglogp))
         bars = axs[1, 0].barh(
@@ -2208,7 +2216,13 @@ def visualize_cosine_similarity(
         min_nonzero = pvals_raw[pvals_raw > 0].min() if (pvals_raw > 0).any() else 1e-20
         pvals = pvals_raw.replace(0, min_nonzero)
         neglogp = -np.log10(pvals)
-        cmap = plt.get_cmap(diff_cmap)
+        
+        if palette_as_gradient:
+            base_color = to_rgba(significance_palette[1])
+            cmap = LinearSegmentedColormap.from_list('query_cmap', [(1,1,1,1), base_color])
+        else:
+            cmap = plt.get_cmap(significance_palette)
+        
         norm = Normalize(vmin=neglogp.min(), vmax=neglogp.max())
         colors = cmap(norm(neglogp))
         bars = axs[1, 1].barh(
