@@ -707,6 +707,7 @@ def generate_synthetic_sc_dataset(
     act_prog_cell_types=None,
     gp_overlap=0,
     diffexploc=2.5,
+    diffexpprob=0.01
 ):
     if dataset_dir is not None:
         results = []
@@ -775,7 +776,7 @@ def generate_synthetic_sc_dataset(
         expoutprob=0.01,
         expoutloc=5.27,
         expoutscale=0.73,
-        diffexpprob=0.01,  # reduced from 0.1 (affects GP size)
+        diffexpprob=diffexpprob,  # 0.01, reduced from 0.1 (affects GP size)
         diffexpdownprob=0.5,
         diffexploc=diffexploc,
         diffexpscale=0.5,
