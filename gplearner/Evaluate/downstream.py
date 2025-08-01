@@ -23,9 +23,12 @@ from captum.attr import GuidedGradCam
 from datasets import load_from_disk
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from matplotlib.colors import LinearSegmentedColormap, to_rgba
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 from pytorch_lightning.loggers import CSVLogger
 from scipy.spatial.distance import cosine
 from scipy.stats import ttest_ind
+from scipy.sparse import issparse
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -2365,3 +2368,168 @@ def plot_phate(
 
     # Show plot
     plt.show()
+
+
+# -------------------------------------------
+# GP importance score visualization
+# -------------------------------------------
+
+
+def plot_gp_score_fold_change(df,  title_ct, top_n=10,color_map = 'Blues', save_to = None):
+    """
+    Plots a horizontal bar plot with bars colored by -log10(pvals_adj).
+    The colorbar directly reflects -log10(pvals_adj) values.
+    
+    Parameters:
+    - df: pandas DataFrame with columns: names, scores, logfoldchanges, pvals, pvals_adj
+    - top_n: number of top entries by absolute log fold change
+    """
+    # Prepare data
+    df_sorted = df.reindex(df['logfoldchanges'].sort_values(ascending=False).index)
+    df_top = df_sorted.head(top_n).copy()
+    df_top['-log10(pvals_adj)'] = -np.log10(df_top['pvals_adj'].replace(0, np.nextafter(0, 1)))
+
+    # Color mapping
+    cmap = plt.get_cmap(color_map)
+    norm = Normalize(vmin=df_top['-log10(pvals_adj)'].min(), vmax=df_top['-log10(pvals_adj)'].max())
+    colors = cmap(norm(df_top['-log10(pvals_adj)']))
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(5, 0.15 * top_n + 2))
+    ax.barh(
+        y=df_top['names'],
+        width=df_top['logfoldchanges'],
+        color=colors,
+        edgecolor='black'
+    )
+    
+    ax.invert_yaxis()
+    ax.set_xlabel("Log Fold Change")
+    ax.set_ylabel("")
+    ax.set_title(f"Top {top_n} GP in {title_ct} \nby log fold change")
+
+    # Add colorbar reflecting -log10(pvals_adj)
+    sm = ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax)
+    cbar.set_label('-log10(Adjusted p-value)', rotation=270, labelpad=15)
+
+    plt.tight_layout()
+    
+    if save_to:
+        plt.savefig(save_to)
+    
+    plt.show()
+
+
+def plot_gp_scores_per_cell(
+    adata,
+    var_names,
+    groupby,
+    layer="Ms",
+    color_map="viridis",
+    n_convolve=20,
+    min_max_scale=None,
+    colorbar=None,
+    context=None,
+    font_scale=None,
+    figsize=(10, 4),
+    show=None,
+    save=None,
+    **kwargs,
+):
+    # Filter valid genes
+    var_names = [g for g in var_names if g in adata.var_names]
+    if not var_names:
+        raise ValueError("No valid var_names found in adata.")
+
+    group_vals = adata.obs[groupby].astype("category")
+    group_categories = group_vals.cat.categories
+
+    # Extract expression data
+    X = (
+        adata[:, var_names].layers[layer]
+        if layer in adata.layers
+        else adata[:, var_names].X
+    )
+    if issparse(X):
+        X = X.toarray()
+
+    df = pd.DataFrame(X, columns=var_names)
+    df["group"] = group_vals.values
+    
+    sorted_idx = []
+    for group in group_categories:
+        sub_df = df[df["group"] == group].drop("group", axis=1).copy()
+        if n_convolve:
+            weights = np.ones(n_convolve) / n_convolve
+            for gene in var_names:
+                try:
+                    sub_df[gene] = np.convolve(sub_df[gene].values, weights, mode="same")
+                except Exception as e:
+                    print(f"Skipping gene {gene} due to error: {e}")
+        sub_idx = sub_df.index[np.argsort(sub_df[var_names[0]].values)]
+        sorted_idx.extend(sub_idx)
+
+    df_sorted = df.loc[sorted_idx]
+    df_sorted_expr = df_sorted.drop("group", axis=1)
+
+    if min_max_scale == 0:
+        df_sorted_expr = (df_sorted_expr.T - df_sorted_expr.T.min()) / (df_sorted_expr.T.max() - df_sorted_expr.T.min())
+        df_sorted_expr = df_sorted_expr.T
+
+    elif min_max_scale == 1:
+        df_sorted_expr = (df_sorted_expr - df_sorted_expr.min()) / (df_sorted_expr.max() - df_sorted_expr.min())
+
+    df_sorted = pd.concat([df_sorted_expr, df_sorted["group"]], axis=1)
+
+    numeric_columns = df_sorted.select_dtypes(include=[np.number]).columns
+    if df_sorted[numeric_columns].isna().any().any():
+        print("Warning: NaN values found, replacing with 0.")
+        df_sorted[numeric_columns] = df_sorted[numeric_columns].fillna(0)
+    if np.isinf(df_sorted[numeric_columns].values).any():
+        print("Warning: Inf values found, replacing with 0.")
+        df_sorted[numeric_columns] = df_sorted[numeric_columns].replace([np.inf, -np.inf], 0)
+
+    heat_data = df_sorted.drop("group", axis=1).T.values.astype(float)
+
+    args = {}
+    if font_scale:
+        args = {"font_scale": font_scale}
+        context = context or "notebook"
+
+    with sns.plotting_context(context=context, **args):
+        fig, ax = plt.subplots(figsize=figsize)
+
+        cax = ax.imshow(heat_data, cmap=color_map, aspect='auto', interpolation='nearest')
+        if colorbar:
+            fig.colorbar(cax, ax=ax)
+
+        current_pos = 0
+        for i in range(len(df_sorted) - 1):
+            if df_sorted.iloc[i]["group"] != df_sorted.iloc[i + 1]["group"]:
+                ax.axvline(x=current_pos + 1, color='black', lw=1)
+            current_pos += 1
+
+        current_pos = 0
+        for group in group_categories:
+            group_cells = df[df["group"] == group]
+            group_len = len(group_cells)
+            mid_pos = current_pos + group_len // 2
+            ax.text(mid_pos, -0.75, group, ha='center', va='center', fontsize=10, color='black')
+            current_pos += group_len
+
+        ax.set_yticks(np.arange(len(var_names)))
+        ax.set_yticklabels(var_names, fontsize=8)
+        ax.set_xticks([])  # Remove bottom x-axis ticks
+        ax.set_ylabel("Genes")
+        ax.set_xlabel(groupby)
+        plt.tight_layout()
+
+    if save:
+        plt.savefig(save)
+    
+    if show or show is None:
+        plt.show()
+    
+    plt.close()
