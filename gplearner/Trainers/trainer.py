@@ -687,7 +687,7 @@ class gpGlobal(gpBase):
                 setattr(self, f'{stage}_pred_counts_list', [])
 
     def forward(self, x, masking, masking_global=False, **kwargs):
-        # masking_global is used to indicate 
+        # masking_global is used to indicate
         # whether to apply masking in global transformer
         # set to False by default because we use the gpBase test_step()
         # for saving embeddings

@@ -8,10 +8,6 @@ from typing import (
     Optional,
 )
 
-import matplotlib.pyplot as plt
-import numpy as np
-from matplotlib.cm import ScalarMappable
-from matplotlib.colors import Normalize
 import anndata as ad
 import matplotlib
 import matplotlib.pyplot as plt
@@ -2154,7 +2150,7 @@ def visualize_cosine_similarity(
 
         norm = Normalize(vmin=neglogp.min(), vmax=neglogp.max())
         colors = cmap(norm(neglogp))
-        bars = axs[1, 0].barh(
+        axs[1, 0].barh(
             y=top_diff_ref['gene'],
             width=vals,
             color=colors,
@@ -2238,7 +2234,7 @@ def visualize_cosine_similarity(
 
         norm = Normalize(vmin=neglogp.min(), vmax=neglogp.max())
         colors = cmap(norm(neglogp))
-        bars = axs[1, 1].barh(
+        axs[1, 1].barh(
             y=top_diff_query['gene'],
             width=vals,
             color=colors,
