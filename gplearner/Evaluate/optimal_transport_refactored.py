@@ -96,6 +96,7 @@ def wrangle_mapping(
 
     return mapping
 
+
 def compute_point_cloud_mapping(
     x: jnp.ndarray,
     y: jnp.ndarray,
@@ -115,7 +116,7 @@ def compute_point_cloud_mapping(
     # Only plot the lines with a cost above the threshold.
     u, v = jnp.where(matrix > threshold)
     c = matrix[jnp.where(matrix > threshold)]
-    
+
     if use_umap_coordinates:
         xy = jnp.concatenate([x[u], y[v]], axis=-1)
     else:
@@ -142,7 +143,7 @@ def compute_point_cloud_mapping(
 
         # Matplotlib's transparency is sensitive to numerical errors.
         alpha = np.clip(alpha, 0.0, 1.0)
-        
+
         # Add plotting data only if use_umap_coordinates is True
         if use_umap_coordinates and xy is not None:
             # from the ith row, first pick the elements at columns 0 and 2
@@ -156,7 +157,6 @@ def compute_point_cloud_mapping(
         # v = column coordinates of where matrix > threshold
         matrix_ref_idx = int(u[i])
         matrix_target_idx = int(v[i])
-        # print(f"Matrix mapping: matrix_ref_idx={matrix_ref_idx}, matrix_target_idx={matrix_target_idx}")
 
         # Handle index mapping based on whether we're using centroids or direct mapping
         if closest_ref_idx is not None and closest_query_idx is not None:
@@ -354,14 +354,14 @@ def compute_centroid_mapping(
         # Create dummy arrays for the function call (they won't be used for plotting)
         ref_umap_jnp = jnp.array([[0, 0]])  # Dummy array
         target_umap_jnp = jnp.array([[0, 0]])  # Dummy array
-    
+
     point_map_centroid, mapping_df = compute_point_cloud_mapping(
-        x = ref_umap_jnp,
-        y = target_umap_jnp,
-        matrix = ot_out.matrix,
-        adata_ref = adata[adata.obs[col] == ref],
-        adata_target = adata[adata.obs[col] == target],     
-        label_col = label_col,
+        x=ref_umap_jnp,
+        y=target_umap_jnp,
+        matrix=ot_out.matrix,
+        adata_ref=adata[adata.obs[col] == ref],
+        adata_target=adata[adata.obs[col] == target],
+        label_col=label_col,
         threshold=threshold,
         closest_ref_idx=closest_ref_idx,
         closest_query_idx=closest_query_idx,
@@ -881,7 +881,7 @@ def plot_point_connections(ax, point_map, set_alpha):
     """Plot connections between points using a point map."""
     if point_map is None:
         return  # Skip plotting if no point map data is available
-    
+
     for coords in point_map:
         start_i, end_i, _, alpha_i = coords
         ax.plot(
@@ -952,9 +952,9 @@ def plot_umap_with_transport(
 
     # Compute point map
     point_map, _ = compute_point_cloud_mapping(
-        x=jnp.array(ref_umap), 
-        y=jnp.array(target_umap), 
-        matrix=ot_out.matrix, 
+        x=jnp.array(ref_umap),
+        y=jnp.array(target_umap),
+        matrix=ot_out.matrix,
         adata_ref=ref_adata,
         adata_target=target_adata,
         label_col=ref_label,
