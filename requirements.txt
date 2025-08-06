@@ -10,10 +10,12 @@ joblib==1.4.2
 matplotlib==3.10.3
 numpy==1.25.0
 ott==0.1.15
+ott-jax==0.5.0
 packaging==25.0
 pandas==2.0.3
 peft==0.15.2
 phate==1.0.11
+pot==0.9.5
 pytorch_lightning==2.4.0
 Requests==2.32.3
 scanpy==1.10.3
@@ -30,5 +32,3 @@ transformers==4.45.1
 triton==3.3.0
 universal-pathlib==0.2.6
 wandb==0.19.11
-ott-jax==0.5.0
-pot==0.9.5

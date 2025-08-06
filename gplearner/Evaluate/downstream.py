@@ -22,7 +22,14 @@ import torch
 from captum.attr import GuidedGradCam
 from datasets import load_from_disk
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import (
+    LinearSegmentedColormap,
+    Normalize,
+    to_rgba,
+)
 from pytorch_lightning.loggers import CSVLogger
+from scipy.sparse import issparse
 from scipy.spatial.distance import cosine
 from scipy.stats import ttest_ind
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -78,6 +85,7 @@ from ..Utils.utils import (  # find_latest_file,
 )
 
 # for exporting pdfs
+matplotlib.rcdefaults()
 matplotlib.rcParams['pdf.fonttype'] = 42
 # torch.set_float32_matmul_precision('medium')
 
@@ -2033,6 +2041,13 @@ def visualize_cosine_similarity(
     save_to=None,
     gp_to_color=None,  # {GP : color}
     gpdb=None,  # for gene membership
+    figsize=(18, 14),
+    show_significance=True,
+    color_scheme='default',  # 'default' or 'significance'
+    significance_palette='Blues',  # colormap for significance mode
+    palette_as_gradient=False,  # if True, build custom color gradient
+    hspace=0.5,
+    wspace=0.5,
 ):
     # Optionally fill in missing values
     if fillna:
@@ -2051,11 +2066,17 @@ def visualize_cosine_similarity(
 
     # Select top 10 genes with strongest effect size differences
     # if effect_size > 0 : query > ref
-    top10_diff_ref = all_gene_stats.nsmallest(topn, 'effect_size')
-    top10_diff_query = all_gene_stats.nlargest(topn, 'effect_size')
+    sig_diff_ref = all_gene_stats[
+        (all_gene_stats['effect_size'] < 0)
+    ]  # (all_gene_stats['p_adjusted'] < 0.05) &
+    sig_diff_query = all_gene_stats[
+        (all_gene_stats['effect_size'] > 0)
+    ]  # (all_gene_stats['p_adjusted'] < 0.05) &
+    top_diff_ref = sig_diff_ref.nsmallest(topn, 'effect_size')
+    top_diff_query = sig_diff_query.nlargest(topn, 'effect_size')
 
     # Plotting
-    fig, axs = plt.subplots(2, 2, figsize=(18, 14))
+    fig, axs = plt.subplots(2, 2, figsize=figsize)
     fig.set_facecolor('white')
 
     # 1. Top 10 genes with highest average cosine similarity in ref
@@ -2078,7 +2099,7 @@ def visualize_cosine_similarity(
         sns.barplot(data=ref_top10, x='mean_ref', y='gene', ax=axs[0, 0], errorbar=None)
 
     axs[0, 0].set_title(
-        f'Top 10 Genes with Highest Average Cosine Similarity ({obs_value_1})'
+        f'Top {topn} Genes with Highest Average Cosine Similarity \n({obs_value_1})'
     )
     axs[0, 0].set_xlabel('Cosine Similarity')
     axs[0, 0].set_ylabel('Gene')
@@ -2105,21 +2126,61 @@ def visualize_cosine_similarity(
         )
 
     axs[0, 1].set_title(
-        f'Top 10 Genes with Highest Average Cosine Similarity ({obs_value_2})'
+        f'Top {topn} Genes with Highest Average Cosine Similarity \n({obs_value_2})'
     )
     axs[0, 1].set_xlabel('Cosine Similarity')
     axs[0, 1].set_ylabel('Gene')
 
     # 3. Top 10 genes with strongest difference (ref > query)
-    if gp_to_color:
+    if color_scheme == 'significance':
+        # Color by -log10(p_adjusted)
+        vals = top_diff_ref['effect_size']
+        pvals_raw = top_diff_ref['p_adjusted']
+        min_nonzero = pvals_raw[pvals_raw > 0].min() if (pvals_raw > 0).any() else 1e-20
+        pvals = pvals_raw.replace(0, min_nonzero)
+        neglogp = -np.log10(pvals)
+
+        if palette_as_gradient:
+            base_color = to_rgba(significance_palette[0])
+            cmap = LinearSegmentedColormap.from_list(
+                'ref_cmap', [(1, 1, 1, 1), base_color]
+            )
+        else:
+            cmap = plt.get_cmap(significance_palette)
+
+        norm = Normalize(vmin=neglogp.min(), vmax=neglogp.max())
+        colors = cmap(norm(neglogp))
+        axs[1, 0].barh(
+            y=top_diff_ref['gene'],
+            width=vals,
+            color=colors,
+            edgecolor='black',
+        )
+        axs[1, 0].invert_yaxis()
+        # Colorbar (keep as -log10(p-value))
+        sm = ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=axs[1, 0])
+        cbar.set_label('-log10(Adjusted p-value)', rotation=270, labelpad=15)
+        # Set y-tick label color based on p_adj
+        yticklabels = axs[1, 0].get_yticklabels()
+        for label in yticklabels:
+            gene = label.get_text()
+            pval = top_diff_ref.set_index('gene').loc[gene, 'p_adjusted']
+            if pval >= 0.05:
+                label.set_color('gray')
+            else:
+                label.set_color('black')
+        axs[1, 0].set_yticklabels(yticklabels)
+    elif gp_to_color:
         palette = dict(
             zip(
-                top10_diff_ref['gene'],
-                assign_bar_colors(top10_diff_ref['gene'], gp_to_color, gpdb),
+                top_diff_ref['gene'],
+                assign_bar_colors(top_diff_ref['gene'], gp_to_color, gpdb),
             )
         )
         sns.barplot(
-            data=top10_diff_ref,
+            data=top_diff_ref,
             x='effect_size',
             y='gene',
             ax=axs[1, 0],
@@ -2128,42 +2189,80 @@ def visualize_cosine_similarity(
         )
     else:
         sns.barplot(
-            data=top10_diff_ref, x='effect_size', y='gene', ax=axs[1, 0], color='salmon'
+            data=top_diff_ref, x='effect_size', y='gene', ax=axs[1, 0], color='salmon'
         )
 
-    for i, (effect, gene, significance) in enumerate(
-        zip(
-            top10_diff_ref['effect_size'],
-            top10_diff_ref['gene'],
-            top10_diff_ref['significance'],
-        )
-    ):
-        if significance:
-            axs[1, 0].text(
-                effect - 0.0002,
-                i,
-                significance,
-                ha='left',
-                va='center',
-                fontsize=12,
-                color='darkred',
+    if show_significance:
+        for i, (effect, gene, significance) in enumerate(
+            zip(
+                top_diff_ref['effect_size'],
+                top_diff_ref['gene'],
+                top_diff_ref['significance'],
             )
+        ):
+            if significance:
+                axs[1, 0].text(
+                    effect - 0.0002,
+                    i,
+                    significance,
+                    ha='left',
+                    va='center',
+                    fontsize=12,
+                    color='darkred',
+                )
     axs[1, 0].set_title(
-        f'Top 10 Genes with Strongest Difference ({obs_value_1} > {obs_value_2})'
+        f'Top {topn} Genes with Strongest Difference \n({obs_value_1} > {obs_value_2})'
     )
     axs[1, 0].set_xlabel('Difference in Cosine Similarity')
     axs[1, 0].set_ylabel('Gene')
 
     # 4. Top 10 genes with strongest difference (query > ref)
-    if gp_to_color:
+    if color_scheme == 'significance':
+        vals = top_diff_query['effect_size']
+        pvals_raw = top_diff_query['p_adjusted']
+        min_nonzero = pvals_raw[pvals_raw > 0].min() if (pvals_raw > 0).any() else 1e-20
+        pvals = pvals_raw.replace(0, min_nonzero)
+        neglogp = -np.log10(pvals)
+
+        if palette_as_gradient:
+            base_color = to_rgba(significance_palette[1])
+            cmap = LinearSegmentedColormap.from_list(
+                'query_cmap', [(1, 1, 1, 1), base_color]
+            )
+        else:
+            cmap = plt.get_cmap(significance_palette)
+
+        norm = Normalize(vmin=neglogp.min(), vmax=neglogp.max())
+        colors = cmap(norm(neglogp))
+        axs[1, 1].barh(
+            y=top_diff_query['gene'],
+            width=vals,
+            color=colors,
+            edgecolor='black',
+        )
+        axs[1, 1].invert_yaxis()
+        sm = ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=axs[1, 1])
+        cbar.set_label('-log10(Adjusted p-value)', rotation=270, labelpad=15)
+        yticklabels = axs[1, 1].get_yticklabels()
+        for label in yticklabels:
+            gene = label.get_text()
+            pval = top_diff_query.set_index('gene').loc[gene, 'p_adjusted']
+            if pval >= 0.05:
+                label.set_color('gray')
+            else:
+                label.set_color('black')
+        axs[1, 1].set_yticklabels(yticklabels)
+    elif gp_to_color:
         palette = dict(
             zip(
-                top10_diff_query['gene'],
-                assign_bar_colors(top10_diff_query['gene'], gp_to_color, gpdb),
+                top_diff_query['gene'],
+                assign_bar_colors(top_diff_query['gene'], gp_to_color, gpdb),
             )
         )
         sns.barplot(
-            data=top10_diff_query,
+            data=top_diff_query,
             x='effect_size',
             y='gene',
             ax=axs[1, 1],
@@ -2172,38 +2271,39 @@ def visualize_cosine_similarity(
         )
     else:
         sns.barplot(
-            data=top10_diff_query,
+            data=top_diff_query,
             x='effect_size',
             y='gene',
             ax=axs[1, 1],
             color='skyblue',
         )
 
-    for i, (effect, gene, significance) in enumerate(
-        zip(
-            top10_diff_query['effect_size'],
-            top10_diff_query['gene'],
-            top10_diff_query['significance'],
-        )
-    ):
-        if significance:
-            axs[1, 1].text(
-                effect + 0.0002,
-                i,
-                significance,
-                ha='right',
-                va='center',
-                fontsize=12,
-                color='navy',
+    if show_significance:
+        for i, (effect, gene, significance) in enumerate(
+            zip(
+                top_diff_query['effect_size'],
+                top_diff_query['gene'],
+                top_diff_query['significance'],
             )
+        ):
+            if significance:
+                axs[1, 1].text(
+                    effect + 0.0002,
+                    i,
+                    significance,
+                    ha='right',
+                    va='center',
+                    fontsize=12,
+                    color='navy',
+                )
     axs[1, 1].set_title(
-        f'Top 10 Genes with Strongest Difference ({obs_value_2} > {obs_value_1})'
+        f'Top {topn} Genes with Strongest Difference \n({obs_value_2} > {obs_value_1})'
     )
     axs[1, 1].set_xlabel('Difference in Cosine Similarity')
     axs[1, 1].set_ylabel('Gene')
 
     # Adjust layout to avoid squishing
-    plt.subplots_adjust(hspace=0.4, wspace=0.3)
+    plt.subplots_adjust(hspace=hspace, wspace=wspace)
 
     if save_to:
         plt.savefig(save_to)
@@ -2274,3 +2374,190 @@ def plot_phate(
 
     # Show plot
     plt.show()
+
+
+# -------------------------------------------
+# GP importance score visualization
+# -------------------------------------------
+
+
+def plot_gp_score_fold_change(df, title_ct, top_n=10, color_map='Blues', save_to=None):
+    """
+    Plots a horizontal bar plot with bars colored by -log10(pvals_adj).
+    The colorbar directly reflects -log10(pvals_adj) values.
+
+    Parameters:
+    - df: pandas DataFrame with columns: names, scores, logfoldchanges, pvals, pvals_adj
+    - top_n: number of top entries by absolute log fold change
+    """
+    # Prepare data
+    df_sorted = df.reindex(df['logfoldchanges'].sort_values(ascending=False).index)
+    df_top = df_sorted.head(top_n).copy()
+    df_top['-log10(pvals_adj)'] = -np.log10(
+        df_top['pvals_adj'].replace(0, np.nextafter(0, 1))
+    )
+
+    # Color mapping
+    cmap = plt.get_cmap(color_map)
+    norm = Normalize(
+        vmin=df_top['-log10(pvals_adj)'].min(), vmax=df_top['-log10(pvals_adj)'].max()
+    )
+    colors = cmap(norm(df_top['-log10(pvals_adj)']))
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(5, 0.15 * top_n + 2))
+    ax.barh(
+        y=df_top['names'],
+        width=df_top['logfoldchanges'],
+        color=colors,
+        edgecolor='black',
+    )
+
+    ax.invert_yaxis()
+    ax.set_xlabel('Log Fold Change')
+    ax.set_ylabel('')
+    ax.set_title(f'Top {top_n} GP in {title_ct} \nby log fold change')
+
+    # Add colorbar reflecting -log10(pvals_adj)
+    sm = ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax)
+    cbar.set_label('-log10(Adjusted p-value)', rotation=270, labelpad=15)
+
+    plt.tight_layout()
+
+    if save_to:
+        plt.savefig(save_to)
+
+    plt.show()
+
+
+def plot_gp_scores_per_cell(
+    adata,
+    var_names,
+    groupby,
+    layer='Ms',
+    color_map='viridis',
+    n_convolve=20,
+    min_max_scale=None,
+    colorbar=None,
+    context=None,
+    font_scale=None,
+    figsize=(10, 4),
+    show=None,
+    save=None,
+    **kwargs,
+):
+    # Filter valid genes
+    var_names = [g for g in var_names if g in adata.var_names]
+    if not var_names:
+        raise ValueError('No valid var_names found in adata.')
+
+    group_vals = adata.obs[groupby].astype('category')
+    group_categories = group_vals.cat.categories
+
+    # Extract expression data
+    X = (
+        adata[:, var_names].layers[layer]
+        if layer in adata.layers
+        else adata[:, var_names].X
+    )
+    if issparse(X):
+        X = X.toarray()
+
+    df = pd.DataFrame(X, columns=var_names)
+    df['group'] = group_vals.values
+
+    sorted_idx = []
+    for group in group_categories:
+        sub_df = df[df['group'] == group].drop('group', axis=1).copy()
+        if n_convolve:
+            weights = np.ones(n_convolve) / n_convolve
+            for gene in var_names:
+                try:
+                    sub_df[gene] = np.convolve(
+                        sub_df[gene].values, weights, mode='same'
+                    )
+                except Exception as e:
+                    print(f'Skipping gene {gene} due to error: {e}')
+        sub_idx = sub_df.index[np.argsort(sub_df[var_names[0]].values)]
+        sorted_idx.extend(sub_idx)
+
+    df_sorted = df.loc[sorted_idx]
+    df_sorted_expr = df_sorted.drop('group', axis=1)
+
+    if min_max_scale == 0:
+        df_sorted_expr = (df_sorted_expr.T - df_sorted_expr.T.min()) / (
+            df_sorted_expr.T.max() - df_sorted_expr.T.min()
+        )
+        df_sorted_expr = df_sorted_expr.T
+
+    elif min_max_scale == 1:
+        df_sorted_expr = (df_sorted_expr - df_sorted_expr.min()) / (
+            df_sorted_expr.max() - df_sorted_expr.min()
+        )
+
+    df_sorted = pd.concat([df_sorted_expr, df_sorted['group']], axis=1)
+
+    numeric_columns = df_sorted.select_dtypes(include=[np.number]).columns
+    if df_sorted[numeric_columns].isna().any().any():
+        print('Warning: NaN values found, replacing with 0.')
+        df_sorted[numeric_columns] = df_sorted[numeric_columns].fillna(0)
+    if np.isinf(df_sorted[numeric_columns].values).any():
+        print('Warning: Inf values found, replacing with 0.')
+        df_sorted[numeric_columns] = df_sorted[numeric_columns].replace(
+            [np.inf, -np.inf], 0
+        )
+
+    heat_data = df_sorted.drop('group', axis=1).T.values.astype(float)
+
+    args = {}
+    if font_scale:
+        args = {'font_scale': font_scale}
+        context = context or 'notebook'
+
+    with sns.plotting_context(context=context, **args):
+        fig, ax = plt.subplots(figsize=figsize)
+
+        cax = ax.imshow(
+            heat_data, cmap=color_map, aspect='auto', interpolation='nearest'
+        )
+        if colorbar:
+            fig.colorbar(cax, ax=ax)
+
+        current_pos = 0
+        for i in range(len(df_sorted) - 1):
+            if df_sorted.iloc[i]['group'] != df_sorted.iloc[i + 1]['group']:
+                ax.axvline(x=current_pos + 1, color='black', lw=1)
+            current_pos += 1
+
+        current_pos = 0
+        for group in group_categories:
+            group_cells = df[df['group'] == group]
+            group_len = len(group_cells)
+            mid_pos = current_pos + group_len // 2
+            ax.text(
+                mid_pos,
+                -0.75,
+                group,
+                ha='center',
+                va='center',
+                fontsize=10,
+                color='black',
+            )
+            current_pos += group_len
+
+        ax.set_yticks(np.arange(len(var_names)))
+        ax.set_yticklabels(var_names, fontsize=8)
+        ax.set_xticks([])  # Remove bottom x-axis ticks
+        ax.set_ylabel('Genes')
+        ax.set_xlabel(groupby)
+        plt.tight_layout()
+
+    if save:
+        plt.savefig(save)
+
+    if show or show is None:
+        plt.show()
+
+    plt.close()

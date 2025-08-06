@@ -101,21 +101,26 @@ def compute_point_cloud_mapping(
     x: jnp.ndarray,
     y: jnp.ndarray,
     matrix: jnp.ndarray,
-    adata: ad.AnnData,
+    adata_ref: ad.AnnData,
+    adata_target: ad.AnnData,
     label_col: str,
     threshold=1e-7,
+    closest_ref_idx=None,
+    closest_query_idx=None,
+    use_umap_coordinates=True,
 ):
     """
     Compute the lines representing the mapping between the 2 point clouds.
-    From
-    https://github.com/ott-jax/ott/blob/main/src/ott/tools/plot.py#L136
-
-    Modified to extract cell labels from AnnData object
+    Adapted from https://github.com/ott-jax/ott/blob/main/src/ott/tools/plot.py#L140
     """
     # Only plot the lines with a cost above the threshold.
     u, v = jnp.where(matrix > threshold)
     c = matrix[jnp.where(matrix > threshold)]
-    xy = jnp.concatenate([x[u], y[v]], axis=-1)
+
+    if use_umap_coordinates:
+        xy = jnp.concatenate([x[u], y[v]], axis=-1)
+    else:
+        xy = None
 
     # Check if we want to adjust transparency.
     scale_alpha_by_coupling = True
@@ -128,7 +133,7 @@ def compute_point_cloud_mapping(
     result = []
     mapping_output = []
 
-    for i in range(xy.shape[0]):
+    for i in range(len(u)):
         strength = jnp.max(jnp.array(matrix.shape)) * c[i]
         if scale_alpha_by_coupling:
             normalized_strength = (c[i] - min_matrix) / (max_matrix - min_matrix)
@@ -139,26 +144,44 @@ def compute_point_cloud_mapping(
         # Matplotlib's transparency is sensitive to numerical errors.
         alpha = np.clip(alpha, 0.0, 1.0)
 
-        start, end = xy[i, [0, 2]], xy[i, [1, 3]]
-        result.append((start, end, strength, alpha))
+        # Add plotting data only if use_umap_coordinates is True
+        if use_umap_coordinates and xy is not None:
+            # from the ith row, first pick the elements at columns 0 and 2
+            # then pick the elements at columns 1 and 3
+            # nb this is because matplotlib expects the coordinates of a line to be
+            # in the form ([x0, x1], [y0, y1])
+            start, end = xy[i, [0, 2]], xy[i, [1, 3]]
+            result.append((start, end, strength, alpha))
 
-        # Use adata UMAP coordinates to get labels
-        start_i = np.asarray(start)
-        end_i = np.asarray(end)
-        start_adata = adata[
-            (adata.obsm['X_umap'][:, 0] == start_i[0])
-            & (adata.obsm['X_umap'][:, 1] == end_i[0])
-        ]
-        end_adata = adata[
-            (adata.obsm['X_umap'][:, 0] == start_i[1])
-            & (adata.obsm['X_umap'][:, 1] == end_i[1])
-        ]
+        # u = row coordinates of where matrix > threshold
+        # v = column coordinates of where matrix > threshold
+        matrix_ref_idx = int(u[i])
+        matrix_target_idx = int(v[i])
 
-        ct1 = start_adata.obs[label_col].values[0]
-        ct2 = end_adata.obs[label_col].values[0]
+        # Handle index mapping based on whether we're using centroids or direct mapping
+        if closest_ref_idx is not None and closest_query_idx is not None:
+            # We're using centroids, so map matrix indices to actual cell indices
+            ref_idx = closest_ref_idx[matrix_ref_idx]
+            target_idx = closest_query_idx[matrix_target_idx]
+            # print(f"Centroid mapping: ref_idx={ref_idx}, target_idx={target_idx}")
+        else:
+            # Direct mapping - matrix indices correspond to cell indices
+            ref_idx = matrix_ref_idx
+            target_idx = matrix_target_idx
+            # print(f"Direct mapping: ref_idx={ref_idx}, target_idx={target_idx}")
 
-        idx1 = start_adata.obs['idx'].values[0]
-        idx2 = end_adata.obs['idx'].values[0]
+        # Get the global indices in adata_ref and adata_target
+        adata_ref_idx = adata_ref.obs.index[ref_idx]
+        adata_target_idx = adata_target.obs.index[target_idx]
+        # print(f"adata_ref_idx: {adata_ref_idx}, adata_target_idx: {adata_target_idx}")
+
+        ct1 = adata_ref.obs.iloc[ref_idx][label_col]
+        ct2 = adata_target.obs.iloc[target_idx][label_col]
+        # print(f"ct1: {ct1}, ct2: {ct2}")
+        # print('')
+
+        idx1 = adata_ref_idx
+        idx2 = adata_target_idx
 
         coupling = np.asarray(c[i])
         ns = np.asarray(normalized_strength)
@@ -192,6 +215,7 @@ def compute_centroid_mapping(
     return_mapping=False,
     cluster_algo=None,
     cluster_col=None,
+    use_umap_coordinates=True,
 ):
     # Data preparation
     X = adata[adata.obs[col] == ref].X
@@ -318,19 +342,30 @@ def compute_centroid_mapping(
 
     print('Sinkhorn algorithm converged?', ot_out.converged)
 
-    ref_umap = adata_centroid[adata_centroid.obs[col] == ref].obsm['X_umap']
-    target_umap = adata_centroid[adata_centroid.obs[col] == target].obsm['X_umap']
+    # Only compute UMAP coordinates if use_umap_coordinates is True
+    if use_umap_coordinates:
+        ref_umap = adata_centroid[adata_centroid.obs[col] == ref].obsm['X_umap']
+        target_umap = adata_centroid[adata_centroid.obs[col] == target].obsm['X_umap']
 
-    ref_umap_jnp = jnp.array(ref_umap)
-    target_umap_jnp = jnp.array(target_umap)
+        # Ensure they are numpy arrays of numbers
+        ref_umap_jnp = jnp.array(np.asarray(ref_umap))
+        target_umap_jnp = jnp.array(np.asarray(target_umap))
+    else:
+        # Create dummy arrays for the function call (they won't be used for plotting)
+        ref_umap_jnp = jnp.array([[0, 0]])  # Dummy array
+        target_umap_jnp = jnp.array([[0, 0]])  # Dummy array
 
     point_map_centroid, mapping_df = compute_point_cloud_mapping(
-        ref_umap_jnp,
-        target_umap_jnp,
-        ot_out.matrix,
-        adata,
-        label_col,
+        x=ref_umap_jnp,
+        y=target_umap_jnp,
+        matrix=ot_out.matrix,
+        adata_ref=adata[adata.obs[col] == ref],
+        adata_target=adata[adata.obs[col] == target],
+        label_col=label_col,
         threshold=threshold,
+        closest_ref_idx=closest_ref_idx,
+        closest_query_idx=closest_query_idx,
+        use_umap_coordinates=use_umap_coordinates,
     )
 
     mapping_df['coupling'] = mapping_df['coupling'].astype(float)
@@ -344,7 +379,7 @@ def compute_centroid_mapping(
             ot_out,
         )
     else:
-        point_map_centroid, closest_ref_idx, closest_query_idx, mapping_df
+        return point_map_centroid, closest_ref_idx, closest_query_idx, mapping_df
 
 
 # --------------------------------------------
@@ -844,6 +879,9 @@ def plot_umap_scatter(ax, umap_coords, colors, cmap, label, alpha=0.5, size=20):
 
 def plot_point_connections(ax, point_map, set_alpha):
     """Plot connections between points using a point map."""
+    if point_map is None:
+        return  # Skip plotting if no point map data is available
+
     for coords in point_map:
         start_i, end_i, _, alpha_i = coords
         ax.plot(
@@ -889,6 +927,7 @@ def plot_umap_with_transport(
     threshold=1e-7,
     set_alpha=True,
     save_path=None,
+    use_umap_coordinates=True,
 ):
     # Prepare data
     ref_adata = prepare_adata(adata, col, ref, ref_label, ref_label_order)
@@ -912,8 +951,17 @@ def plot_umap_with_transport(
     target_umap = target_adata.obsm['X_umap']
 
     # Compute point map
-    point_map = compute_point_cloud_mapping(
-        jnp.array(ref_umap), jnp.array(target_umap), ot_out.matrix, threshold
+    point_map, _ = compute_point_cloud_mapping(
+        x=jnp.array(ref_umap),
+        y=jnp.array(target_umap),
+        matrix=ot_out.matrix,
+        adata_ref=ref_adata,
+        adata_target=target_adata,
+        label_col=ref_label,
+        threshold=threshold,
+        closest_ref_idx=None,
+        closest_query_idx=None,
+        use_umap_coordinates=use_umap_coordinates,
     )
 
     # Plot
