@@ -119,6 +119,7 @@ def run_training_from_select_gps(
     load_cell_token_learner: bool = False,
     gp_of_interest: Optional[str] = None,
     gp_latent_size: Optional[int] = None,
+    accumulate_grad_batches: Optional[int] = 1,
 ):
     """
     Wrapper function for training gpLearner model
