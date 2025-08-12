@@ -180,8 +180,16 @@ def compute_point_cloud_mapping(
         # print(f"ct1: {ct1}, ct2: {ct2}")
         # print('')
 
-        idx1 = adata_ref_idx
-        idx2 = adata_target_idx
+        # Use the 'idx' column from obs if it exists, otherwise use the index
+        if 'idx' in adata_ref.obs.columns:
+            idx1 = adata_ref.obs.iloc[ref_idx]['idx']
+        else:
+            idx1 = adata_ref_idx
+
+        if 'idx' in adata_target.obs.columns:
+            idx2 = adata_target.obs.iloc[target_idx]['idx']
+        else:
+            idx2 = adata_target_idx
 
         coupling = np.asarray(c[i])
         ns = np.asarray(normalized_strength)
