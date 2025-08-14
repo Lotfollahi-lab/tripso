@@ -19,7 +19,6 @@ from datasets import Dataset, concatenate_datasets
 from peft import LoraConfig, get_peft_model
 from scipy.sparse import csr_matrix
 from sklearn.metrics import classification_report, roc_auc_score
-from sklearn.metrics.pairwise import cosine_similarity
 from torch import optim
 from torchmetrics import MeanSquaredError, PearsonCorrCoef
 
@@ -239,7 +238,7 @@ class gpBase(pl.LightningModule):
         self.token_dataset = None
         self.attn_adata_holder: List[ad.AnnData] = []
 
-    def forward(self, x, masking, epoch, **kwargs):
+    def forward(self, x, masking, epoch):
         out = self.model(
             x,
             masking=masking,
@@ -353,9 +352,7 @@ class gpBase(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         if self.save_emb:
-            output = self.forward(
-                batch, masking=False, epoch='test', masking_global=False
-            )
+            output = self.forward(batch, masking=False, epoch='test')
 
             emb_dict = {}
 
@@ -513,7 +510,9 @@ class gpBase(pl.LightningModule):
                 loss += loss_i
 
             else:
-                gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(self.device)
+                gp_loss_dict[self.model.gp_inputs[i]] = (
+                    torch.tensor(0).to(output['logits_lm_list'][i].device).float()
+                )
 
         # package outputs to return flexible number of objects
         holder = {
@@ -686,32 +685,8 @@ class gpGlobal(gpBase):
                 setattr(self, f'{stage}_true_counts_list', [])
                 setattr(self, f'{stage}_pred_counts_list', [])
 
-    def forward(self, x, masking, masking_global=False, **kwargs):
-        # masking_global is used to indicate
-        # whether to apply masking in global transformer
-        # set to False by default because we use the gpBase test_step()
-        # for saving embeddings
-        # epoch argument for compatibility with gpBase
-        out = self.model(
-            x,
-            masking=masking,
-            masking_global=masking_global,
-            return_gene_embeddings=self.return_gene_embeddings,
-            tokens_to_keep=self.tokens_to_keep,
-            gp_of_interest=self.gp,
-            return_attention=self.return_attention,
-            epoch='Global',
-            return_mean_non_padding=self.return_mean_non_padding,
-        )
-
-        return out
-
     def training_step(self, batch, batch_idx):
-        output = self.forward(
-            batch,
-            masking=self.calc_gp_loss,
-            masking_global=self.global_loss == 'masking',
-        )
+        output = self.forward(batch, masking=True, epoch='Global')
 
         if self.calc_gp_loss:
             loss_base = self.compute_gp_loss(batch, output)
@@ -834,14 +809,7 @@ class gpGlobal(gpBase):
         setattr(self, f'{stage}_loss', [])
 
     def validation_step(self, batch, batch_idx):
-        output = self.forward(
-            batch,
-            masking=self.calc_gp_loss,
-            masking_global=self.global_loss == 'masking',
-        )
-
-        # track_tissue = pd.Series(batch['tissue'])
-        # print('Ground truth tissue', track_tissue.value_counts())
+        output = self.forward(batch, masking=True, epoch='Global')
 
         if self.calc_gp_loss:
             loss_base = super().compute_gp_loss(batch, output)
@@ -976,7 +944,7 @@ class gpGlobal(gpBase):
                     else:
                         self.cell_metadata[k] = [v]
 
-            output = self.forward(batch, masking=False, masking_global=False)
+            output = self.forward(batch, masking=False)
 
             for t in self.model.supervised_tasks:
                 self.test_clf_pred[t].append(output[f'logits_{t}'])
@@ -1042,35 +1010,12 @@ class gpGlobal(gpBase):
                 meta_dict[f'{t}_pred_encoded'] = predicted_classes.cpu().numpy()
 
                 if self.return_classification_report:
-                    # flatten the batches and convert to numpy arrays
-                    true_classes = torch.cat(self.cell_metadata[t]).cpu().numpy()
-
+                    true_classes = np.array(self.cell_metadata[t])
                     predicted_classes = np.array(meta_dict[f'{t}_pred_encoded'])
                     report = classification_report(
                         true_classes, predicted_classes, output_dict=True
                     )
-
                     output_df = wrangle_classification_report(report)
-
-                    # convert encoded labels back to original labels
-                    id_dict = {}
-                    id_dict[t] = torch.cat(meta_dict[t]).cpu().numpy()
-                    id_dict[t.replace('_id', '')] = [
-                        item for l1 in meta_dict[t.replace('_id', '')] for item in l1
-                    ]
-                    meta_df = pd.DataFrame(id_dict)
-                    meta_df = meta_df[[t, t.replace('_id', '')]].drop_duplicates()
-                    label_mapping = {
-                        str(k): v
-                        for k, v in zip(
-                            meta_df[t].values, meta_df[t.replace('_id', '')].values
-                        )
-                    }
-
-                    output_df['label'] = (
-                        output_df['output_class'].astype(str).map(label_mapping)
-                    )
-
                     output_df.to_csv(
                         os.path.join(self.output_dir, f'{t}_classification_report.csv'),
                         index=False,
@@ -1203,124 +1148,6 @@ class gpGlobalLoRA(gpGlobal):
 # ------------------------------------------------------
 # Extra trainers
 # ------------------------------------------------------
-
-
-class gpAblation(gpGlobal):
-    def __init__(self, compute_cosine=False, **kwargs):
-        super().__init__(**kwargs)
-        self.compute_cosine = compute_cosine
-        self.save_raw_embeddings = not compute_cosine
-        self.cosine_adata = None
-
-    def build_perturbed_input_matrix(
-        self, z, num_genes_per_cell_list, gp_pert_index=None
-    ):
-        z, gp_labels, attn_mask = self.model.cell_token_learner.build_input_matrix(
-            z, num_genes_per_cell_list
-        )
-
-        # always mask the GP we are perturbing
-        # set attn_mask to 0 when gp_label == gpert
-        if gp_pert_index is not None:
-            # handle cls separately
-            attn_mask_cls = attn_mask[:, 0]
-            attn_mask_gp = attn_mask[:, 1:]
-            attn_mask_gp[gp_labels == gp_pert_index] = 0
-
-            attn_mask = torch.cat([attn_mask_cls.unsqueeze(1), attn_mask_gp], dim=1)
-
-            # and force the embedding to 0 just in case (?)
-            z[gp_labels == gp_pert_index] = 0
-
-        return z, gp_labels, attn_mask
-
-    def test_step(self, batch, batch_idx):
-        output = self.forward(batch, masking=False, masking_global=False)
-
-        emb_dict = {}
-        emb_dict['control'] = output['cell_token'].detach().cpu()
-
-        if self.compute_cosine:
-            cosine_dict = {}
-            control_array = emb_dict['control'].numpy()
-
-        # Pertubations - zero out each GP
-        for i, gp in enumerate(self.model.gp_inputs):
-            z, gp_labels, attn_mask = self.build_perturbed_input_matrix(
-                z=output['z'],
-                num_genes_per_cell_list=output['num_genes_per_cell_list'],
-                gp_pert_index=i,
-            )
-
-            encoder_output = self.model.cell_token_learner.encoder(
-                z,
-                gene_labels=gp_labels,
-                attn_mask=attn_mask,
-                masking=False,
-                return_attention=False,
-            )
-
-            if self.compute_cosine:
-                # get (1 - cosine similarity) to control embedding
-                gp_array = encoder_output['cls'].detach().cpu().numpy()
-                cos_sim = 1 - np.diag(cosine_similarity(control_array, gp_array))
-
-                cosine_dict[gp] = cos_sim
-
-            else:
-                emb_dict[f'{gp}_perturb'] = encoder_output['cls'].detach().cpu()
-
-        # for outputting raw embeddings
-        if self.save_raw_embeddings:
-            # metadata
-            for k, v in batch.items():
-                if k != 'input_ids':
-                    emb_dict[k] = v
-
-            emb = Dataset.from_dict(emb_dict)
-
-            if self.emb_dataset is None:
-                self.emb_dataset = emb
-            else:
-                self.emb_dataset = concatenate_datasets([self.emb_dataset, emb])
-
-        elif self.compute_cosine:
-            meta_dict = {}
-
-            for k, v in batch.items():
-                if k != 'input_ids':
-                    if isinstance(v, torch.Tensor):
-                        meta_dict[k] = v.cpu().numpy()
-                    else:
-                        meta_dict[k] = v
-
-            adata = sc.AnnData(
-                X=pd.DataFrame(cosine_dict).values,
-                obs=pd.DataFrame(meta_dict),
-                var=pd.DataFrame(index=cosine_dict.keys()),
-            )
-
-            if self.cosine_adata is None:
-                self.cosine_adata = adata
-            else:
-                self.cosine_adata = ad.concat([self.cosine_adata, adata])
-
-        return None
-
-    def on_test_epoch_end(self):
-        output_path = os.path.join(self.output_dir, 'with_gp_ablation')
-        os.makedirs(output_path, exist_ok=True)
-        output_name = os.path.join(output_path, f'{self.split_label}_set')
-
-        if self.save_raw_embeddings:
-            self.emb_dataset.save_to_disk(output_name)
-            self.emb_dataset = None
-
-        else:
-            self.cosine_adata.write_h5ad(output_name + '.h5ad')
-            self.cosine_adata = None
-
-        return None
 
 
 class gpPrototypes(gpGlobal):
