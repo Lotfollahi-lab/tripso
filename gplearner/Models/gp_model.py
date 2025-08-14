@@ -700,8 +700,6 @@ class cellWrapper(nn.Module):
         global_masking_rate,
         use_flash,
         use_l2_norm,
-        global_pos_emb,
-        global_attn_dropout,
     ):
         super().__init__()
 
@@ -721,8 +719,6 @@ class cellWrapper(nn.Module):
             no_mask_tokens=[
                 len(self.gp_inputs) + 1
             ],  # gp token labels are 0 to len(gp_inputs)-1
-            use_pos_emb=global_pos_emb,
-            attn_drop_rate=global_attn_dropout,
         )
 
     def build_input_matrix(self, z, num_genes_per_cell_list):
@@ -1283,8 +1279,6 @@ class gpTransformerGlobal(gpTransformerBase):
         use_flash=False,
         use_l2_norm=False,
         n_bins=10,
-        global_pos_emb='sin_cos',
-        global_attn_dropout=0.0,
         **kwargs,
     ):
         super().__init__(
@@ -1305,8 +1299,6 @@ class gpTransformerGlobal(gpTransformerBase):
             global_masking_rate=global_masking_rate,
             use_flash=use_flash,
             use_l2_norm=use_l2_norm,
-            global_pos_emb=global_pos_emb,
-            global_attn_dropout=global_attn_dropout,
         )
 
         if self.global_loss == 'supervised':
@@ -1375,7 +1367,6 @@ class gpTransformerGlobal(gpTransformerBase):
             return_gf_cell_emb,
             gp_of_interest=gp_of_interest,
             masking=masking,
-            epoch=epoch,  # hard set to 'Global' in trainer
         )
 
         if return_gene_embeddings:
@@ -1421,7 +1412,7 @@ class gpTransformerGlobal(gpTransformerBase):
 class gpTransformerGlobalLinear(gpTransformerGlobal):
     """Equivalent to gpTransformerGlobal, but with no cell token learner
     in the forward pass.
-
+    
     The cell token is simply taken to be the gp token of the first
     gp of interest.
     """
@@ -1443,6 +1434,94 @@ class gpTransformerGlobalLinear(gpTransformerGlobal):
 ####################################
 # Models with additional heads/losses
 ####################################
+
+
+# ----------------------------------
+# Condition on Geneformer mean embedding
+# ----------------------------------
+
+# class gpWrapperCondMean(gpWrapper):
+#     def __init__(self, mean_emb_dict, **kwargs):
+#         super().__init__(**kwargs)
+
+#         self.mean_emb_dict = mean_emb_dict
+#         if self.mean_emb_dict is not None:
+#             # Load precomputed GP gene embeddings from the pickle file
+#             with open(mean_emb_dict, 'rb') as f:
+#                 z_mean = pickle.load(f)
+
+#             # Convert strings to integers
+#             z_mean = {int(k): v for k, v in z_mean.items()}
+
+#             # Convert z_mean dictionary to a tensor for efficient indexing
+#             max_token_id = max(z_mean.keys())
+#             z_mean_tensor = torch.zeros(
+#                 (max_token_id + 1, next(iter(z_mean.values())).shape[0])
+#             )
+
+#             for token_id, embedding in z_mean.items():
+#                 z_mean_tensor[token_id] = torch.tensor(embedding)
+
+#             self.register_buffer('z_mean', z_mean_tensor)
+
+#     def build_input_matrix(self, gf, input_ids, gp_tokens, crop_to_gp_len=True):
+
+#         # condition on mean gene representation from geneformer
+#         # Use input_ids to index into z_mean_tensor and get embeddings
+#         # in masked_labels, temporarily convert to 0 (padding token)
+#         masked_labels_output[masked_labels_output == -100] = 0
+
+#         z_mean_embeddings = self.z_mean[masked_labels_output]  # Shape: (b, e, e2)
+
+#         result_matrix = torch.cat([result_matrix, z_mean_embeddings], dim=-1)
+
+#         # Convert back
+#         masked_labels_output[masked_labels_output == 0] = -100
+
+#         return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
+
+
+# class gpTransformerCondMean(gpTransformerGlobal):
+#     # mean_emb_dict=None,
+#             # If using PRBM, set up the buffers on GPU
+#         if prbm is not None:
+#             self.use_prbm = True
+#             prbm = prbm[self.gp_inputs]
+#             prbm_tensor = torch.tensor(prbm.values.T).to(torch.float32)
+#             self.register_buffer('prbm', prbm_tensor)
+#         else:
+#             self.use_prbm = False
+
+#         self.cond_to_shift = cond_to_shift
+
+
+#     def forward(self):
+
+#         # for each GP, optionally sum the reference mean embedding tensor
+#         if self.use_prbm:
+#             if self.cond_to_shift is not None:
+#                 # cond_to_shift is of form {'name' : ['value']}
+#                 condition_key = list(self.cond_to_shift.keys())[0]
+#                 condition_values = self.cond_to_shift[condition_key]
+
+#                 mask = torch.tensor(
+#                     [name in condition_values
+#                           for name in input_dataset[condition_key]],
+#                     dtype=torch.bool,
+#                 )
+#                 mask = (
+#                     mask.unsqueeze(-1).unsqueeze(-1).to(base_output['z'].device)
+#                 )  # Ensure correct broadcasting
+#                 prbm_expanded = self.prbm.unsqueeze(0).expand_as(base_output['z'])
+
+#                 base_output['z'] = torch.where(
+#                     mask,
+#                     base_output['z'] + (base_output['z'] - prbm_expanded),
+#                     base_output['z'],
+#                 )
+#             else:
+#                 base_output['z'] = base_output['z']
+#                       + (base_output['z'] - prbm_expanded)
 
 
 # ----------------------------------
