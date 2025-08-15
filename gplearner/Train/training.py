@@ -70,7 +70,6 @@ def run_training(
     global_attn_heads: Optional[int] = 8,
     supervised_labels: Optional[dict] = None,
     global_masking_rate: Optional[float] = 0.15,
-    global_attn_dropout: Optional[float] = 0.0,
     global_training: str = 'simultaneous',
     path_to_base_model: Optional[str] = None,  # 'path/to/pretrained/model',
     learn_new_gp: Optional[bool] = False,
@@ -107,7 +106,6 @@ def run_training(
     val_check_interval: Optional[float] = 1.0,
     mean_emb_dict: Optional[str] = None,
     use_pos_emb: Optional[str] = 'sin_cos',
-    global_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: Optional[bool] = False,
     vocab_gene_names: Optional[list] = None,
     precision=32,  # 'bf16-mixed',
@@ -117,7 +115,6 @@ def run_training(
     calc_gene_loss: Optional[bool] = True,
     lora_config_args: Optional[dict] = None,
     warmup: Optional[int] = 0,
-    accumulate_grad_batches: Optional[int] = 1,
 ):
     """
     Wrapper function for training gpLearner model
@@ -371,7 +368,6 @@ def run_training(
         limit_train_batches=limit_train_batches,
         limit_val_batches=limit_val_batches,
         val_check_interval=val_check_interval,
-        accumulate_grad_batches=accumulate_grad_batches,
     )
 
     # Train the model
@@ -436,17 +432,11 @@ def configure_callbacks(save_id, args):
                 patience=3,
                 mode='max',
             )
-        elif global_loss == 'reconstruction':
+        else:
             early_stopping_callback = EarlyStopping(
                 monitor='val/pearson',
                 patience=3,
                 mode='max',
-            )
-        elif global_loss == 'masking':
-            early_stopping_callback = EarlyStopping(
-                monitor='val/loss',
-                patience=3,
-                mode='min',
             )
     elif model_type == 'Base':
         early_stopping_callback = EarlyStopping(
@@ -516,7 +506,6 @@ def configure_logger(args):
             'sampling': 'random' if args['sampler'] is None else args['sampler'],
             'seed': args['seed'],
             'data_seed': args['data_seed'],
-            'accumulate_grad_batches': args['accumulate_grad_batches'],
         }
     )
 
@@ -527,8 +516,6 @@ def configure_logger(args):
                 'global_loss': args['global_loss'],
                 'global_training': args['global_training'],
                 'global_n_blocks': args['global_n_blocks'],
-                'global_pos_emb': args['global_pos_emb'],
-                'global_attn_dropout': args['global_attn_dropout'],
             }
         )
 
@@ -604,8 +591,6 @@ def configure_model(args):
         'global_n_blocks': args['global_n_blocks'],
         'reconstruction_loss': args['reconstruction_loss'],
         'total_n_genes': args['total_n_genes'],
-        'global_pos_emb': args['global_pos_emb'],
-        'global_attn_dropout': args['global_attn_dropout'],
     }
 
     if args['num_virtual_tokens'] > 0:
@@ -705,10 +690,7 @@ def load_from_ckpt(mode, pl_model, args):
     output_dir = args['output_dir']
     tissue = args['tissue']
     model_type = args['model_type']
-    if args['path_to_base_model'] is None:
-        path_to_base_model = output_dir
-    else:
-        path_to_base_model = args['path_to_base_model']
+    path_to_base_model = args['path_to_base_model']
 
     if mode == 'virtual_tokens':
         if args['path_to_base_model'] is not None:
@@ -737,9 +719,7 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif mode == 'resume_training':
-        # latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
-
+        latest_ckpt = find_latest_file(output_dir, tissue, model_type)
         if model_type == 'Global':
             pl_model = gpGlobal.load_from_checkpoint(latest_ckpt, map_location='cpu')
         else:
@@ -748,9 +728,8 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif mode == 'sequential':
-        # latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-        # checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
+        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
         checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
