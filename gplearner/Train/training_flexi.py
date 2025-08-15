@@ -77,8 +77,6 @@ def run_training_from_select_gps(
     supervised_labels: Optional[dict] = None,
     supervised_labels_old: Optional[dict] = None,
     global_masking_rate: Optional[float] = 0.15,
-    global_pos_emb: Optional[str] = 'sin_cos',
-    global_attn_dropout: Optional[float] = 0.0,
     global_training: str = 'simultaneous',
     path_to_base_model: str = 'path/to/pretrained/model',
     learn_new_gp: Optional[bool] = False,
@@ -119,7 +117,6 @@ def run_training_from_select_gps(
     load_cell_token_learner: bool = False,
     gp_of_interest: Optional[str] = None,
     gp_latent_size: Optional[int] = None,
-    accumulate_grad_batches: Optional[int] = 1,
 ):
     """
     Wrapper function for training gpLearner model
