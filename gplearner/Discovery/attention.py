@@ -13,8 +13,7 @@ def rank_genes_by_attn_diff(
     target_class: str,
     subset_obs_column: Optional[str] = None,
     subset_obs_values: Union[str, List[str], None] = None,
-    subset_adata_fn: Union[str, os.PathLike, None] = None,
-    save_subset_adata: bool = False,
+    save_fn: Union[str, os.PathLike, None] = None,
 ) -> pd.DataFrame:
 
     # subset the anndata
@@ -25,11 +24,8 @@ def rank_genes_by_attn_diff(
         
         attn_adata = attn_adata[attn_adata.obs[subset_obs_column].isin(subset_obs_values)]
         
-        if save_subset_adata:
-            if subset_adata_fn is None:
-                raise ValueError('subset_adata_fn must be specified to save the subset adata.')
-            
-            attn_adata.write_h5ad(subset_adata_fn)
+        if save_fn is not None:
+            attn_adata.write_h5ad(save_fn)
         
     # get attention diff
     attn_target_class = attn_adata[attn_adata.obs[target_label] == target_class]
