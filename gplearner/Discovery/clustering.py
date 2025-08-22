@@ -100,6 +100,7 @@ def rerank_genes(
     distance_score = np.abs(scores[:, None] - scores[None, :])
     similarity_score = 1 - distance_score
     labels_score = cluster(similarity_score)
+    score_df['labels_score'] = pd.Series(labels_score)
 
     cluster_score_mean_scores = np.array(
         [scores[labels_score == c].mean() for c in np.unique(labels_score)]
@@ -125,6 +126,7 @@ def rerank_genes(
     similarity_corr = np.abs(corr_matrix)
 
     labels_corr = cluster(similarity_corr)
+    score_df['labels_corr'] = pd.Series(labels_corr)
 
     cluster_corr_mean_scores = np.array(
         [
