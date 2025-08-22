@@ -717,7 +717,7 @@ def load_from_ckpt(mode, pl_model, args):
             except FileNotFoundError:
                 latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
             checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-            checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+            checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
 
             pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
@@ -751,7 +751,7 @@ def load_from_ckpt(mode, pl_model, args):
         # latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
         # checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
         latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
-        checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
+        checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'), weights_only=False)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
         # freeze base model
@@ -773,7 +773,7 @@ def load_from_ckpt(mode, pl_model, args):
         # checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
         latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
 
-        checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
+        checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'), weights_only=False)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
         # freeze base model
@@ -806,14 +806,14 @@ def load_from_ckpt(mode, pl_model, args):
 
         latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
 
-        checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'))
+        checkpoint = torch.load(latest_ckpt, map_location=torch.device('cpu'), weights_only=False)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
         return pl_model
 
     elif mode == 'learn_new_gp':
         checkpoint_path = find_latest_file(path_to_base_model, tissue, model_type)
-        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
         pl_model.output_dir = output_dir
 

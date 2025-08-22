@@ -337,7 +337,7 @@ def run_training_from_select_gps(
 
     latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type_old)
     checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
     state_dict = checkpoint['state_dict']
 
     model_state_dict = gp_transformer_v0.state_dict()
