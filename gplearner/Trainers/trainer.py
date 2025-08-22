@@ -591,7 +591,6 @@ class gpBase(pl.LightningModule):
                 optimizer,
                 patience=2,  # default 10
                 factor=0.1,  # default
-                verbose=False,
                 min_lr=1e-6,  # from dino,
                 threshold=0.01,  # default 1e-4
             )
