@@ -118,6 +118,7 @@ def run_training_from_select_gps(
     use_gf_embeddings: Optional[bool] = False,
     load_cell_token_learner: bool = False,
     gp_of_interest: Optional[str] = None,
+    gp_for_downstream: Optional[str] = None,
     gp_latent_size: Optional[int] = None,
     accumulate_grad_batches: Optional[int] = 1,
 ):
@@ -205,6 +206,8 @@ def run_training_from_select_gps(
         whether to load the cell token learner from previous global training
     gp_of_interest
         Sole GP to use in forward pass
+    gp_for_downstream
+        GP for downstream calculation of attention etc.
     """
     ##########################################
     # Setup
@@ -337,7 +340,7 @@ def run_training_from_select_gps(
 
     latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type_old)
     checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
     state_dict = checkpoint['state_dict']
 
     model_state_dict = gp_transformer_v0.state_dict()
@@ -499,9 +502,7 @@ def configure_model_version(args, tag):
         return model
 
     if model_type == 'Global':
-        if (args['global_loss'] == 'supervised') and (
-            args['gp_of_interest'] is not None
-        ):
+        if args['gp_of_interest'] is not None:
             model = gpTransformerGlobalLinear(**common_params, **global_params)
         else:
             model = gpTransformerGlobal(**common_params, **global_params)
@@ -529,6 +530,7 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
         # if args['strategy'].startswith('deepspeed')
         # else
         'gp': args['gp_of_interest'],
+        'gp_for_downstream': args['gp_for_downstream'],
         'calc_gp_loss': args['calc_gp_loss'],
     }
 

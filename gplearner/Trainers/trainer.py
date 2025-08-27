@@ -124,6 +124,7 @@ class gpBase(pl.LightningModule):
         return_attention: bool = False,
         return_mean_non_padding: bool = False,
         gp: Optional[str] = None,
+        gp_for_downstream: Optional[str] = None,
         save_emb: bool = False,
         split_label: str = 'train',
         hparam_save: str = 'all',
@@ -232,6 +233,7 @@ class gpBase(pl.LightningModule):
         self.gene_dir_tag = gene_dir_tag
         self.return_attention = return_attention
         self.gp = gp
+        self.gp_for_downstream = gp_for_downstream
 
         # for saving embeddings
         self.emb_dataset = None
@@ -412,8 +414,8 @@ class gpBase(pl.LightningModule):
 
         if self.return_attention:
             # returns a dictionary where each gene is a key
-            if self.gp != 'cell_token':
-                output = self.model.get_cls_attn(batch, self.gp, masking=False)
+            if self.gp_for_downstream != 'cell_token':
+                output = self.model.get_cls_attn(batch, self.gp_for_downstream, masking=False)
 
                 token_names = list(output.keys())
 
@@ -472,7 +474,7 @@ class gpBase(pl.LightningModule):
             adata = ad.concat(self.attn_adata_holder)
             adata.write_h5ad(
                 os.path.join(
-                    output_path, f'{self.gp}_attention_{self.split_label}_set.h5ad'
+                    output_path, f'{self.gp_for_downstream}_attention_{self.split_label}_set.h5ad'
                 )
             )
 
@@ -591,7 +593,6 @@ class gpBase(pl.LightningModule):
                 optimizer,
                 patience=2,  # default 10
                 factor=0.1,  # default
-                verbose=False,
                 min_lr=1e-6,  # from dino,
                 threshold=0.01,  # default 1e-4
             )
@@ -928,13 +929,13 @@ class gpGlobal(gpBase):
         if self.global_loss == 'reconstruction':
             # return Pearson correlation coefficient
             true_counts = torch.cat(self.val_true_counts_list).float()
-            pred_counts = torch.cat(self.val_pred_counts_list)
+            pred_counts = torch.cat(self.val_pred_counts_list) # (B, n_genes)
 
             # Pearson correlation coefficient
             self.metric['pearson_val'] = PearsonCorrCoef(
                 num_outputs=true_counts.shape[0]
             ).to(true_counts.device)
-
+            
             pearson = self.metric['pearson_val'](pred_counts.T, true_counts.T)
             mean_pearson = torch.mean(pearson)
             self.log(
@@ -1116,9 +1117,17 @@ class gpGlobal(gpBase):
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         if self.model.reconstruction_loss in ['nb', 'zinb']:
-            getattr(self, f'{stage}_pred_counts_list').append(
-                output['count_output']['count_mean']
+            
+            # get re-scaled predictions
+            pred_counts = output['count_output']['count_mean']
+            batch_size_factor = torch.tensor(batch['size_factor']).to(pred_counts.device)
+            dec_mean_gamma = output['count_output']['count_mean']
+            size_factor_view = batch_size_factor.unsqueeze(1).expand(
+                dec_mean_gamma.size(0), dec_mean_gamma.size(1)
             )
+            dec_mean = dec_mean_gamma * size_factor_view
+            
+            getattr(self, f'{stage}_pred_counts_list').append(dec_mean)
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         return reconstruction_loss
