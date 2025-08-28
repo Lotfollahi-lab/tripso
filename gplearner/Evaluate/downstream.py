@@ -236,6 +236,7 @@ class gpEval:
     def _init_trainer(
         self,
         return_gene_embeddings=False,
+        return_gene_cosim=None,
         tokens_to_keep=None,
         genes_to_keep=None,
         gene_dir_tag=None,
@@ -286,6 +287,7 @@ class gpEval:
 
         # reset attributes overwritten by loading from checkpoint
         gp_transformer.return_gene_embeddings = return_gene_embeddings
+        gp_transformer.return_gene_cosim = return_gene_cosim
         gp_transformer.tokens_to_keep = tokens_to_keep
         gp_transformer.genes_to_keep = genes_to_keep
         gp_transformer.token_to_gene_to_keep_dict = token_to_gene_to_keep_dict
@@ -582,6 +584,7 @@ class gpEval:
         output_tag=None,
         do_ensembl_conversion=True,
         precision=32,
+        return_gene_cosim=None,
     ):
         """
         Save gene embeddings as Dataset
@@ -601,6 +604,10 @@ class gpEval:
         genes_to_keep : list
             Genes to generate embeddings for
             if None --> all genes
+        return_gene_cosim:
+            if None, get gene embeddings
+            if gene_to_gp: anndata with (gene, GP) cosine similarity
+            if gene_to_gene: matrix of mean (gene, gene) cosine similarity
 
 
         Use find_genes_in_multiple_gp or get_genes_in_single_gp from Utils.utils
@@ -630,6 +637,7 @@ class gpEval:
 
         gp_transformer = self._init_trainer(
             return_gene_embeddings=True,
+            return_gene_cosim=return_gene_cosim,
             gene_dir_tag=gene_dir_tag,
             tokens_to_keep=tokens_to_keep,
             genes_to_keep=tokens_to_keep,

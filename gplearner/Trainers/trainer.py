@@ -117,6 +117,7 @@ class gpBase(pl.LightningModule):
         lr_scheduler='ReduceLROnPlateau',
         total_epochs: int = 100,
         return_gene_embeddings: bool = False,
+        return_gene_cosim: Optional[str] = None,
         tokens_to_keep: Optional[List] = None,
         genes_to_keep: Optional[List] = None,
         token_to_gene_to_keep_dict: Optional[Dict] = None,
@@ -224,6 +225,7 @@ class gpBase(pl.LightningModule):
 
         # for test step
         self.return_gene_embeddings = return_gene_embeddings
+        self.return_gene_cosim = return_gene_cosim
         self.tokens_to_keep = tokens_to_keep
         self.token_to_gene_to_keep_dict = token_to_gene_to_keep_dict
         self.genes_to_keep = genes_to_keep
@@ -238,6 +240,9 @@ class gpBase(pl.LightningModule):
         self.gene_dataset = None
         self.token_dataset = None
         self.attn_adata_holder: List[ad.AnnData] = []
+        self.gene_to_gp_cosim = None
+        self.gene_meta_dict = None
+        self.gene_to_gene_cosim: Dict[tuple, torch.Tensor] = {}
 
     def forward(self, x, masking, epoch, **kwargs):
         out = self.model(
@@ -390,23 +395,82 @@ class gpBase(pl.LightningModule):
 
             emb_dict = {}
 
-            # Get embeddings of the relevant genes
-            for i, gene in enumerate(self.tokens_to_keep):
-                gene_name = self.token_to_gene_to_keep_dict[gene]
-                emb_dict[gene_name] = output[gene].detach().cpu()
-                emb_dict[f'{gene_name}_rank'] = output[f'{gene}_rank'].detach().cpu()
+            # Option 1: save the embeddings directly
+            if self.return_gene_cosim is None:
+                # Get embeddings of the relevant genes
+                for i, gene in enumerate(self.tokens_to_keep):
+                    gene_name = self.token_to_gene_to_keep_dict[gene]
+                    emb_dict[gene_name] = output[gene].detach().cpu()
+                    emb_dict[f'{gene_name}_rank'] = (
+                        output[f'{gene}_rank'].detach().cpu()
+                    )
 
-            # metadata
-            for k, v in batch.items():
-                if k != 'input_ids':
-                    emb_dict[k] = v
+                # metadata
+                for k, v in batch.items():
+                    if k != 'input_ids':
+                        emb_dict[k] = v
 
-            emb = Dataset.from_dict(emb_dict)
+                emb = Dataset.from_dict(emb_dict)
 
-            if self.gene_dataset is None:
-                self.gene_dataset = emb
-            else:
-                self.gene_dataset = concatenate_datasets([self.gene_dataset, emb])
+                if self.gene_dataset is None:
+                    self.gene_dataset = emb
+                else:
+                    self.gene_dataset = concatenate_datasets([self.gene_dataset, emb])
+
+                return None
+
+            # Option 2: calculate (gene, GP) cosine similarity
+            if self.return_gene_cosim == 'gene_to_gp':
+                gp = output['z'].detach().cpu()
+                for i, gene in enumerate(self.tokens_to_keep):
+                    gene_name = self.token_to_gene_to_keep_dict[gene]
+                    gene_emb = output[gene].detach().cpu()
+                    cos_sim = F.cosine_similarity(gene_emb, gp)
+                    cos_sim = cos_sim.numpy()
+
+                    if self.gene_to_gp_cosim is None:
+                        self.gene_to_gp_cosim[gene_name] = cos_sim
+                    else:
+                        self.gene_to_gp_cosim[gene_name] = np.column_stack(
+                            [self.gene_to_gp_cosim[gene_name], cos_sim]
+                        )
+
+                        # For both, track metadata
+                        meta_dict = {}
+                        for k, v in batch.items():
+                            if k != 'input_ids':
+                                meta_dict[k] = v
+
+                        if self.gene_meta_dict is None:
+                            self.gene_meta_dict = meta_dict
+                        else:
+                            self.gene_meta_dict = {
+                                k: torch.cat([self.gene_meta_dict[k], v])
+                                for k, v in meta_dict.items()
+                            }
+
+            # Option 3: calculate (gene, gene) cosine similarity
+            if self.return_gene_cosim == 'gene_to_gene':
+                for i, gene1 in enumerate(self.tokens_to_keep):
+                    gene1_name = self.token_to_gene_to_keep_dict[gene1]
+                    gene1_emb = output[gene1].detach().cpu()
+                    for j, gene2 in enumerate(self.tokens_to_keep):
+                        gene2_name = self.token_to_gene_to_keep_dict[gene2]
+                        gene2_emb = output[gene2].detach().cpu()
+                        cos_sim = F.cosine_similarity(gene1_emb, gene2_emb)
+
+                        if (gene1_name, gene2_name) not in self.gene_to_gene_cosim:
+                            self.gene_to_gene_cosim[(gene1_name, gene2_name)] = cos_sim
+
+                        else:
+                            self.gene_to_gene_cosim[
+                                (gene1_name, gene2_name)
+                            ] = torch.cat(
+                                [
+                                    self.gene_to_gene_cosim[(gene1_name, gene2_name)],
+                                    cos_sim,
+                                ]
+                            )
 
             return None
 
@@ -462,9 +526,60 @@ class gpBase(pl.LightningModule):
             output_path = os.path.join(self.output_dir, self.gene_dir_tag)
             os.makedirs(output_path, exist_ok=True)
             output_name = os.path.join(output_path, f'{self.split_label}_set')
-            self.gene_dataset.save_to_disk(output_name)
-            self.gene_dataset = None
-            return None
+
+            if self.return_gene_cosim is None:
+                self.gene_dataset.save_to_disk(output_name)
+                self.gene_dataset = None
+
+            if self.return_gene_cosim == 'gene_to_gp':
+                # Save as dataframe
+                # gene_to_gp_cosim is a dict where gene names are keys
+                cosim = pd.DataFrame(self.gene_to_gp_cosim)  # (cell, gene)
+
+                obs = pd.DataFrame(self.gene_meta_dict)
+
+                output_adata = sc.AnnData(
+                    X=cosim.values, obs=obs, var=pd.DataFrame(index=cosim.columns)
+                )
+
+                filename = (
+                    f'gene_to_{self.gp}_cosine_similarity_{self.split_label}_set.h5ad'
+                )
+                filepath = os.path.join(output_path, filename)
+                output_adata.write_h5ad(filepath)
+
+                self.gene_to_gp_cosim = None
+                self.gene_meta_dict = None
+
+            if self.return_gene_cosim == 'gene_to_gene':
+                # gene_to_gene_cosim is a dictionary where keys are gene tuples
+                # values are cosine similarities
+                # output a dataframe of shape (gene,gene)
+                # with genes appropriately labelled
+                # where x[i,j] is the mean cosine similarity
+                gene_names = sorted(
+                    set(
+                        [k[0] for k in self.gene_to_gene_cosim.keys()]
+                        + [k[1] for k in self.gene_to_gene_cosim.keys()]
+                    )
+                )
+                cosim_matrix = pd.DataFrame(
+                    index=gene_names, columns=gene_names, dtype=float
+                )
+                for (gene1, gene2), sims in self.gene_to_gene_cosim.items():
+                    mean_sim = (
+                        sims.mean().item() if hasattr(sims, 'mean') else np.mean(sims)
+                    )
+                    cosim_matrix.loc[gene1, gene2] = mean_sim
+                output_path = os.path.join(self.output_dir, self.gene_dir_tag)
+                os.makedirs(output_path, exist_ok=True)
+                output_name = os.path.join(
+                    output_path,
+                    f'gene_to_gene_cosine_similarity_{self.split_label}_set.csv',
+                )
+                cosim_matrix.to_csv(output_name)
+                self.gene_to_gene_cosim = {}
+                return None
 
         if self.return_attention:
             output_path = os.path.join(self.output_dir, 'attention')
