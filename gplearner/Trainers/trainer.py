@@ -125,6 +125,7 @@ class gpBase(pl.LightningModule):
         return_attention: bool = False,
         return_mean_non_padding: bool = False,
         gp: Optional[str] = None,
+        gp_for_downstream: Optional[str] = None,
         save_emb: bool = False,
         split_label: str = 'train',
         hparam_save: str = 'all',
@@ -234,13 +235,14 @@ class gpBase(pl.LightningModule):
         self.gene_dir_tag = gene_dir_tag
         self.return_attention = return_attention
         self.gp = gp
+        self.gp_for_downstream = gp_for_downstream
 
         # for saving embeddings
         self.emb_dataset = None
         self.gene_dataset = None
         self.token_dataset = None
         self.attn_adata_holder: List[ad.AnnData] = []
-        self.gene_to_gp_cosim = None
+        self.gene_to_gp_cosim: Dict[str, np.ndarray] = {}
         self.gene_meta_dict = None
         self.gene_to_gene_cosim: Dict[tuple, torch.Tensor] = {}
 
@@ -421,63 +423,75 @@ class gpBase(pl.LightningModule):
 
             # Option 2: calculate (gene, GP) cosine similarity
             if self.return_gene_cosim == 'gene_to_gp':
-                gp = output['z'].detach().cpu()
+                gp = output['z'][:, 0, :].squeeze().detach()
                 for i, gene in enumerate(self.tokens_to_keep):
                     gene_name = self.token_to_gene_to_keep_dict[gene]
-                    gene_emb = output[gene].detach().cpu()
-                    cos_sim = F.cosine_similarity(gene_emb, gp)
-                    cos_sim = cos_sim.numpy()
+                    gene_emb = output[gene].detach()
 
-                    if self.gene_to_gp_cosim is None:
+                    cos_sim = F.cosine_similarity(gp, gene_emb)
+                    cos_sim = cos_sim.cpu().numpy().squeeze()
+
+                    if gene_name not in self.gene_to_gp_cosim:
                         self.gene_to_gp_cosim[gene_name] = cos_sim
                     else:
-                        self.gene_to_gp_cosim[gene_name] = np.column_stack(
+                        self.gene_to_gp_cosim[gene_name] = np.concatenate(
                             [self.gene_to_gp_cosim[gene_name], cos_sim]
                         )
 
-                        # For both, track metadata
-                        meta_dict = {}
-                        for k, v in batch.items():
-                            if k != 'input_ids':
-                                meta_dict[k] = v
+                # Track metadata
+                meta_dict = {}
+                for k, v in batch.items():
+                    if k != 'input_ids':
+                        # if tensor, move to cpu
+                        if isinstance(v, torch.Tensor):
+                            v = v.cpu().numpy()
+                        meta_dict[k] = v
 
-                        if self.gene_meta_dict is None:
-                            self.gene_meta_dict = meta_dict
-                        else:
-                            self.gene_meta_dict = {
-                                k: torch.cat([self.gene_meta_dict[k], v])
-                                for k, v in meta_dict.items()
-                            }
+                if self.gene_meta_dict is None:
+                    self.gene_meta_dict = meta_dict
+                else:
+                    self.gene_meta_dict = {
+                        k: np.concatenate([self.gene_meta_dict[k], v])
+                        if isinstance(v, np.ndarray)
+                        else self.gene_meta_dict[k] + v
+                        for k, v in meta_dict.items()
+                    }
 
-            # Option 3: calculate (gene, gene) cosine similarity
-            if self.return_gene_cosim == 'gene_to_gene':
-                for i, gene1 in enumerate(self.tokens_to_keep):
-                    gene1_name = self.token_to_gene_to_keep_dict[gene1]
-                    gene1_emb = output[gene1].detach().cpu()
-                    for j, gene2 in enumerate(self.tokens_to_keep):
-                        gene2_name = self.token_to_gene_to_keep_dict[gene2]
-                        gene2_emb = output[gene2].detach().cpu()
-                        cos_sim = F.cosine_similarity(gene1_emb, gene2_emb)
+                # Option 3: calculate (gene, gene) cosine similarity
+                if self.return_gene_cosim == 'gene_to_gene':
+                    # Vectorized computation for gene-to-gene cosine similarity
+                    gene_embs = torch.stack(
+                        [output[gene].detach() for gene in self.tokens_to_keep]
+                    )  # (num_genes, emb_dim)
+                    gene_names = [
+                        self.token_to_gene_to_keep_dict[gene]
+                        for gene in self.tokens_to_keep
+                    ]
+                    gene_embs_norm = F.normalize(gene_embs, p=2, dim=1)
+                    cos_sim_matrix = (
+                        gene_embs_norm @ gene_embs_norm.T
+                    )  # (num_genes, num_genes)
+                    cos_sim_matrix_np = cos_sim_matrix.cpu().numpy()
 
-                        if (gene1_name, gene2_name) not in self.gene_to_gene_cosim:
-                            self.gene_to_gene_cosim[(gene1_name, gene2_name)] = cos_sim
-
-                        else:
-                            self.gene_to_gene_cosim[
-                                (gene1_name, gene2_name)
-                            ] = torch.cat(
-                                [
-                                    self.gene_to_gene_cosim[(gene1_name, gene2_name)],
-                                    cos_sim,
-                                ]
-                            )
+                    for i, gene1_name in enumerate(gene_names):
+                        for j, gene2_name in enumerate(gene_names):
+                            key = (gene1_name, gene2_name)
+                            value = cos_sim_matrix_np[i, j]
+                            if key not in self.gene_to_gene_cosim:
+                                self.gene_to_gene_cosim[key] = np.array([value])
+                            else:
+                                self.gene_to_gene_cosim[key] = np.concatenate(
+                                    [self.gene_to_gene_cosim[key], np.array([value])]
+                                )
 
             return None
 
         if self.return_attention:
             # returns a dictionary where each gene is a key
-            if self.gp != 'cell_token':
-                output = self.model.get_cls_attn(batch, self.gp, masking=False)
+            if self.gp_for_downstream != 'cell_token':
+                output = self.model.get_cls_attn(
+                    batch, self.gp_for_downstream, masking=False
+                )
 
                 token_names = list(output.keys())
 
@@ -587,7 +601,8 @@ class gpBase(pl.LightningModule):
             adata = ad.concat(self.attn_adata_holder)
             adata.write_h5ad(
                 os.path.join(
-                    output_path, f'{self.gp}_attention_{self.split_label}_set.h5ad'
+                    output_path,
+                    f'{self.gp_for_downstream}_attention_{self.split_label}_set.h5ad',
                 )
             )
 
@@ -1042,7 +1057,7 @@ class gpGlobal(gpBase):
         if self.global_loss == 'reconstruction':
             # return Pearson correlation coefficient
             true_counts = torch.cat(self.val_true_counts_list).float()
-            pred_counts = torch.cat(self.val_pred_counts_list)
+            pred_counts = torch.cat(self.val_pred_counts_list)  # (B, n_genes)
 
             # Pearson correlation coefficient
             self.metric['pearson_val'] = PearsonCorrCoef(
@@ -1230,9 +1245,18 @@ class gpGlobal(gpBase):
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         if self.model.reconstruction_loss in ['nb', 'zinb']:
-            getattr(self, f'{stage}_pred_counts_list').append(
-                output['count_output']['count_mean']
+            # get re-scaled predictions
+            pred_counts = output['count_output']['count_mean']
+            batch_size_factor = torch.tensor(batch['size_factor']).to(
+                pred_counts.device
             )
+            dec_mean_gamma = output['count_output']['count_mean']
+            size_factor_view = batch_size_factor.unsqueeze(1).expand(
+                dec_mean_gamma.size(0), dec_mean_gamma.size(1)
+            )
+            dec_mean = dec_mean_gamma * size_factor_view
+
+            getattr(self, f'{stage}_pred_counts_list').append(dec_mean)
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         return reconstruction_loss

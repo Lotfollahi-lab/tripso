@@ -242,6 +242,7 @@ class gpEval:
         gene_dir_tag=None,
         return_attention=False,
         gp=None,
+        gp_for_downstream=None,
         return_classification_report=False,
         test_random_baseline=False,
         save_emb=False,
@@ -294,6 +295,7 @@ class gpEval:
         gp_transformer.gene_dir_tag = gene_dir_tag
         gp_transformer.return_attention = return_attention
         gp_transformer.gp = gp
+        gp_transformer.gp_for_downstream = gp_for_downstream
         gp_transformer.return_classification_report = return_classification_report
         gp_transformer.output_dir = self.output_dir
         gp_transformer.test_random_baseline = test_random_baseline
@@ -741,7 +743,8 @@ class gpEval:
 
     def generate_attention_matrix(
         self,
-        gp,
+        gp_for_forward,
+        gp_for_downstream,
         genes_to_keep=None,
         do_ensembl_conversion=True,
         split='test',
@@ -752,10 +755,14 @@ class gpEval:
         """
         os.chdir(self.output_dir)
 
-        if (gp != 'cell_token') and (gp not in self.gp_inputs):
-            raise ValueError(f'{gp} must be one of "cell_token" or {self.gp_inputs}')
+        if (gp_for_downstream != 'cell_token') and (
+            gp_for_downstream not in self.gp_inputs
+        ):
+            raise ValueError(
+                f'{gp_for_downstream} must be one of "cell_token" or {self.gp_inputs}'
+            )
 
-        if gp != 'cell_token':
+        if gp_for_downstream != 'cell_token':
             _, token_to_gene_to_keep_dict = build_token_to_gene_name_dict(
                 self.gp_transformer.model.gene_name_path,
                 self.gp_transformer.model.gene_token_path,
@@ -768,7 +775,8 @@ class gpEval:
         # Initialize trainer
         gp_transformer = self._init_trainer(
             return_attention=True,
-            gp=gp,
+            gp=gp_for_forward,
+            gp_for_downstream=gp_for_downstream,
             num_virtual_tokens=self.num_virtual_tokens,
             split_label=split,
             token_to_gene_to_keep_dict=token_to_gene_to_keep_dict,
