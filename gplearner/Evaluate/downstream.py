@@ -16,6 +16,7 @@ import pandas as pd
 import phate
 import pytorch_lightning as pl
 import scanpy as sc
+import scipy.sparse as sp
 import scprep
 import seaborn as sns
 import torch
@@ -43,7 +44,6 @@ from sklearn.metrics import (
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.preprocessing import MinMaxScaler
-from statsmodels.stats.multitest import multipletests
 
 try:
     # Check if running in a Jupyter notebook
@@ -77,7 +77,12 @@ from ..Trainers.trainer import (
 from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import (  # find_latest_file,
     MidpointNormalize,
+    _bh_with_nans,
+    _resolve_sig_colors,
+    _stars,
+    _t_equal_var_sparse,
     align_indices,
+    assign_bar_colors,
     build_token_to_gene_name_dict,
     remove_single_data_points,
     summarize_attributions,
@@ -1973,138 +1978,169 @@ def pivot_cosine_similarity_data_longer(
     return df_long
 
 
-def calculate_gene_significance(ref_data, query_data):
-    """Calculate p-values and significance levels for all genes."""
-    all_genes = ref_data['gene'].unique()
-    results = []
-    for gene in all_genes:
-        ref_samples = ref_data[ref_data['gene'] == gene]['cosine_sim']
-        query_samples = query_data[query_data['gene'] == gene]['cosine_sim']
-        if len(ref_samples) > 1 and len(query_samples) > 1:
-            t_stat, p_value = ttest_ind(ref_samples, query_samples, equal_var=True)
-            mean_ref = ref_samples.mean()
-            mean_query = query_samples.mean()
-
-            # effect_size = mean_ref - mean_query
-            effect_size = mean_query - mean_ref
-
-            results.append(
-                {
-                    'gene': gene,
-                    'p_value': p_value,
-                    'mean_ref': mean_ref,
-                    'mean_query': mean_query,
-                    'effect_size': effect_size,
-                }
-            )
-
-        else:
-            mean_ref = ref_samples.mean()
-            mean_query = query_samples.mean()
-            effect_size = mean_query - mean_ref
-
-            results.append(
-                {
-                    'gene': gene,
-                    'p_value': np.nan,
-                    'mean_ref': mean_ref,
-                    'mean_query': mean_query,
-                    'effect_size': effect_size,
-                }
-            )
-
-            # Create DataFrame for all genes
-    results_df = pd.DataFrame(results)
-
-    # Apply Benjamini-Hochberg correction
-    results_df['p_adjusted'] = multipletests(
-        results_df['p_value'], alpha=0.05, method='fdr_bh'
-    )[1]
-
-    # Add significance stars
-    results_df['significance'] = ''
-    for i, p_value in enumerate(results_df['p_adjusted']):
-        if not np.isnan(p_value):
-            if p_value < 0.001:
-                results_df.loc[i, 'significance'] = '***'
-            elif p_value < 0.01:
-                results_df.loc[i, 'significance'] = '**'
-            elif p_value < 0.05:
-                results_df.loc[i, 'significance'] = '*'
-
-    return results_df
+# ===================================
+# Gene, GP cosine similarity
+# ===================================
 
 
-def assign_bar_colors(genes, gp_to_color, gpdb):
-    colors = []  # List to store colors for each gene
-    for gene in genes:
-        color_assigned = 'gray'  # Default color if gene is not found
-        for gp, color in gp_to_color.items():
-            if gene in gpdb[gp].values:
-                color_assigned = color
-                break
-        colors.append(color_assigned)
-    return colors
-
-
-def visualize_cosine_similarity(
-    df_long,
-    obs_col,
-    obs_value_1,
-    obs_value_2,
+def calculate_gene_significance(
+    input_data,
+    obs_col=None,
+    obs_value_ref=None,
+    obs_value_query=None,
+    adata_gene_threshold=0.9,
     fillna=False,
+):
+    """
+    Vectorized, sparse-safe per-gene stats with BH correction.
+
+    input_data:
+      - AnnData: uses .X (sparse OK), .obs[obs_col], .var_names
+      - DataFrame (long): must contain ['gene','cosine_sim', obs_col]
+    obs_col / obs_value_ref / obs_value_query:
+      - group variable and the two levels to compare
+    adata_gene_threshold:
+      - drop genes that are zero in > threshold fraction of cells (0..1)
+    fillna:
+      - if DataFrame path, fill NaNs in cosine_sim with 0 (treat missing as zero)
+    """
+    # ---- DataFrame path (backwards compatible) ----
+    if isinstance(input_data, pd.DataFrame):
+        if obs_col is None or obs_value_ref is None or obs_value_query is None:
+            raise ValueError(
+                'For DataFrame input, provide obs_col, obs_value_ref, obs_value_query.'
+            )
+        df = input_data.copy()
+        for col in ['gene', 'cosine_sim', obs_col]:
+            if col not in df.columns:
+                raise KeyError(f'DataFrame missing column {col!r}')
+        if fillna:
+            df['cosine_sim'] = df['cosine_sim'].fillna(0.0)
+
+        ref = df[df[obs_col] == obs_value_ref]
+        query = df[df[obs_col] == obs_value_query]
+        genes = pd.Index(sorted(set(ref['gene']).union(set(query['gene']))))
+
+        out = []
+
+        for g in genes:
+            r = ref.loc[ref['gene'] == g, 'cosine_sim'].to_numpy()
+            q = query.loc[query['gene'] == g, 'cosine_sim'].to_numpy()
+            mR = np.nanmean(r) if r.size else np.nan
+            mQ = np.nanmean(q) if q.size else np.nan
+            if r.size > 1 and q.size > 1:
+                _, p = ttest_ind(r, q, equal_var=True, nan_policy='omit')
+            else:
+                p = np.nan
+            out.append(
+                dict(gene=g, p_value=p, mean_ref=mR, mean_query=mQ, effect_size=mQ - mR)
+            )
+
+        res = pd.DataFrame(out)
+        res['p_adjusted'] = _bh_with_nans(res['p_value'])
+        res['significance'] = [_stars(p) for p in res['p_adjusted']]
+        return res
+
+    # ---- AnnData path (sparse native) ----
+    if (ad is not None) and isinstance(input_data, ad.AnnData):
+        adata = input_data
+        if obs_col is None or obs_value_ref is None or obs_value_query is None:
+            raise ValueError(
+                'For AnnData input, provide obs_col, obs_value_ref, obs_value_query.'
+            )
+        if obs_col not in adata.obs.columns:
+            raise KeyError(f'{obs_col!r} not found in adata.obs')
+
+        X = adata.X
+        n_cells = X.shape[0]
+
+        # filter genes by nonzero fraction (works for sparse/dense)
+        if sp.issparse(X):
+            Xc = X if sp.isspmatrix_csc(X) else X.tocsc(copy=False)
+            nnz_per_gene = np.asarray(Xc.getnnz(axis=0)).ravel()
+        else:
+            nnz_per_gene = np.count_nonzero(X, axis=0)
+        zero_frac = 1.0 - (nnz_per_gene / max(n_cells, 1))
+        keep = zero_frac <= adata_gene_threshold
+        if not np.any(keep):
+            raise ValueError("All genes filtered out by 'adata_gene_threshold'.")
+
+        genes_kept = adata.var_names[keep].to_numpy()
+        Xg = X[:, keep]
+
+        labels = adata.obs[obs_col].to_numpy()
+        mask_ref = labels == obs_value_ref
+        mask_query = labels == obs_value_query
+        if not mask_ref.any():
+            raise ValueError(f'No cells found for obs_value_ref={obs_value_ref!r}')
+        if not mask_query.any():
+            raise ValueError(f'No cells found for obs_value_query={obs_value_query!r}')
+
+        stats = _t_equal_var_sparse(Xg[mask_ref, :], Xg[mask_query, :])
+
+        res = pd.DataFrame(
+            {
+                'gene': genes_kept,
+                'p_value': stats['p_value'],
+                'mean_ref': stats['mean_ref'],
+                'mean_query': stats['mean_query'],
+                'effect_size': stats['effect'],
+            }
+        )
+        res['p_adjusted'] = _bh_with_nans(res['p_value'])
+        res['significance'] = [_stars(p) for p in res['p_adjusted']]
+        return res
+
+    raise ValueError('input_data must be AnnData or a long-format DataFrame.')
+
+
+def plot_top_genes(
+    stats_df,
+    obs_value_ref=None,
+    obs_value_query=None,
+    gp_to_color=None,
+    gpdb=None,
     topn=10,
-    save_to=None,
-    gp_to_color=None,  # {GP : color}
-    gpdb=None,  # for gene membership
     figsize=(18, 14),
     show_significance=True,
     color_scheme='default',  # 'default' or 'significance'
-    significance_palette='Blues',  # colormap for significance mode
-    palette_as_gradient=False,  # if True, build custom color gradient
+    significance_palette='Blues',  # cmap name OR [ref_color, query_color]
+    palette_as_gradient=False,  # if True, build gradient(s) from provided colors
     hspace=0.5,
     wspace=0.5,
+    save_to=None,
 ):
-    # Optionally fill in missing values
-    if fillna:
-        df_long = df_long.fillna(0)
+    """
+    Plot like your snippet, using the columns from calculate_gene_significance(...):
+      ['gene','mean_ref','mean_query','effect_size','p_adjusted','significance'].
+    """
+    # defensive copy & ordering
+    df = stats_df.copy()
 
-    # Filter data for ref and query lineages
-    ref = df_long[df_long[obs_col] == obs_value_1]
-    query = df_long[df_long[obs_col] == obs_value_2]
+    # Top-N by means
+    ref_top = df.nlargest(topn, 'mean_ref')
+    query_top = df.nlargest(topn, 'mean_query')
 
-    # Calculate significance for all genes
-    all_gene_stats = calculate_gene_significance(ref, query)
-
-    # Select top 10 genes with highest average cosine similarity in ref and query
-    ref_top10 = all_gene_stats.nlargest(topn, 'mean_ref')
-    query_top10 = all_gene_stats.nlargest(topn, 'mean_query')
-
-    # Select top 10 genes with strongest effect size differences
-    # if effect_size > 0 : query > ref
-    sig_diff_ref = all_gene_stats[
-        (all_gene_stats['effect_size'] < 0)
-    ]  # (all_gene_stats['p_adjusted'] < 0.05) &
-    sig_diff_query = all_gene_stats[
-        (all_gene_stats['effect_size'] > 0)
-    ]  # (all_gene_stats['p_adjusted'] < 0.05) &
+    # Top-N by effect size (signed)
+    sig_diff_ref = df[df['effect_size'] < 0]
+    sig_diff_query = df[df['effect_size'] > 0]
     top_diff_ref = sig_diff_ref.nsmallest(topn, 'effect_size')
     top_diff_query = sig_diff_query.nlargest(topn, 'effect_size')
 
-    # Plotting
+    # Resolve significance colors/palette
+    is_listlike, ref_col, qry_col, cmap_name = _resolve_sig_colors(significance_palette)
+
+    # ---------------- Plotting (your layout) ----------------
     fig, axs = plt.subplots(2, 2, figsize=figsize)
     fig.set_facecolor('white')
 
-    # 1. Top 10 genes with highest average cosine similarity in ref
+    # 1) Top mean (ref)
     if gp_to_color:
         palette = dict(
-            zip(
-                ref_top10['gene'],
-                assign_bar_colors(ref_top10['gene'], gp_to_color, gpdb),
-            )
+            zip(ref_top['gene'], assign_bar_colors(ref_top['gene'], gp_to_color, gpdb))
         )
         sns.barplot(
-            data=ref_top10,
+            data=ref_top,
             x='mean_ref',
             y='gene',
             ax=axs[0, 0],
@@ -2112,24 +2148,24 @@ def visualize_cosine_similarity(
             palette=palette,
         )
     else:
-        sns.barplot(data=ref_top10, x='mean_ref', y='gene', ax=axs[0, 0], errorbar=None)
-
+        sns.barplot(data=ref_top, x='mean_ref', y='gene', ax=axs[0, 0], errorbar=None)
+    title_ref = f'({obs_value_ref})' if obs_value_ref is not None else '(ref)'
     axs[0, 0].set_title(
-        f'Top {topn} Genes with Highest Average Cosine Similarity \n({obs_value_1})'
+        f'Top {topn} Genes: Highest Mean Cosine Similarity\n{title_ref}'
     )
     axs[0, 0].set_xlabel('Cosine Similarity')
     axs[0, 0].set_ylabel('Gene')
 
-    # 2. Top 10 genes with highest average cosine similarity in query
+    # 2) Top mean (query)
     if gp_to_color:
         palette = dict(
             zip(
-                query_top10['gene'],
-                assign_bar_colors(query_top10['gene'], gp_to_color, gpdb),
+                query_top['gene'],
+                assign_bar_colors(query_top['gene'], gp_to_color, gpdb),
             )
         )
         sns.barplot(
-            data=query_top10,
+            data=query_top,
             x='mean_query',
             y='gene',
             ax=axs[0, 1],
@@ -2138,18 +2174,17 @@ def visualize_cosine_similarity(
         )
     else:
         sns.barplot(
-            data=query_top10, x='mean_query', y='gene', ax=axs[0, 1], errorbar=None
+            data=query_top, x='mean_query', y='gene', ax=axs[0, 1], errorbar=None
         )
-
+    title_qry = f'({obs_value_query})' if obs_value_query is not None else '(query)'
     axs[0, 1].set_title(
-        f'Top {topn} Genes with Highest Average Cosine Similarity \n({obs_value_2})'
+        f'Top {topn} Genes: Highest Mean Cosine Similarity\n{title_qry}'
     )
     axs[0, 1].set_xlabel('Cosine Similarity')
     axs[0, 1].set_ylabel('Gene')
 
-    # 3. Top 10 genes with strongest difference (ref > query)
+    # 3) Strongest difference (ref > query)   -> negative effect_size
     if color_scheme == 'significance':
-        # Color by -log10(p_adjusted)
         vals = top_diff_ref['effect_size']
         pvals_raw = top_diff_ref['p_adjusted']
         min_nonzero = pvals_raw[pvals_raw > 0].min() if (pvals_raw > 0).any() else 1e-20
@@ -2157,82 +2192,83 @@ def visualize_cosine_similarity(
         neglogp = -np.log10(pvals)
 
         if palette_as_gradient:
-            base_color = to_rgba(significance_palette[0])
+            base_color = to_rgba(ref_col if is_listlike else 'tab:red')
             cmap = LinearSegmentedColormap.from_list(
                 'ref_cmap', [(1, 1, 1, 1), base_color]
             )
         else:
-            cmap = plt.get_cmap(significance_palette)
+            cmap = plt.get_cmap(cmap_name)
 
-        norm = Normalize(vmin=neglogp.min(), vmax=neglogp.max())
-        colors = cmap(norm(neglogp))
+        norm = Normalize(
+            vmin=neglogp.min() if len(neglogp) else 0,
+            vmax=neglogp.max() if len(neglogp) else 1,
+        )
+        colors = cmap(norm(neglogp)) if len(neglogp) else None
         axs[1, 0].barh(
-            y=top_diff_ref['gene'],
-            width=vals,
-            color=colors,
-            edgecolor='black',
+            y=top_diff_ref['gene'], width=vals, color=colors, edgecolor='black'
         )
         axs[1, 0].invert_yaxis()
-        # Colorbar (keep as -log10(p-value))
         sm = ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=axs[1, 0])
         cbar.set_label('-log10(Adjusted p-value)', rotation=270, labelpad=15)
-        # Set y-tick label color based on p_adj
+
+        # gray-out non-significant labels
         yticklabels = axs[1, 0].get_yticklabels()
-        for label in yticklabels:
-            gene = label.get_text()
-            pval = top_diff_ref.set_index('gene').loc[gene, 'p_adjusted']
-            if pval >= 0.05:
-                label.set_color('gray')
-            else:
-                label.set_color('black')
+        idx = top_diff_ref.set_index('gene')['p_adjusted']
+        for lab in yticklabels:
+            g = lab.get_text()
+            if pd.notna(idx.get(g, np.nan)) and idx[g] >= 0.05:
+                lab.set_color('gray')
         axs[1, 0].set_yticklabels(yticklabels)
-    elif gp_to_color:
-        palette = dict(
-            zip(
-                top_diff_ref['gene'],
-                assign_bar_colors(top_diff_ref['gene'], gp_to_color, gpdb),
-            )
-        )
-        sns.barplot(
-            data=top_diff_ref,
-            x='effect_size',
-            y='gene',
-            ax=axs[1, 0],
-            errorbar=None,
-            palette=palette,
-        )
     else:
-        sns.barplot(
-            data=top_diff_ref, x='effect_size', y='gene', ax=axs[1, 0], color='salmon'
-        )
+        if gp_to_color:
+            palette = dict(
+                zip(
+                    top_diff_ref['gene'],
+                    assign_bar_colors(top_diff_ref['gene'], gp_to_color, gpdb),
+                )
+            )
+            sns.barplot(
+                data=top_diff_ref,
+                x='effect_size',
+                y='gene',
+                ax=axs[1, 0],
+                errorbar=None,
+                palette=palette,
+            )
+        else:
+            sns.barplot(
+                data=top_diff_ref,
+                x='effect_size',
+                y='gene',
+                ax=axs[1, 0],
+                color='salmon',
+            )
 
     if show_significance:
-        for i, (effect, gene, significance) in enumerate(
-            zip(
-                top_diff_ref['effect_size'],
-                top_diff_ref['gene'],
-                top_diff_ref['significance'],
-            )
+        for i, (effect, star) in enumerate(
+            zip(top_diff_ref['effect_size'], top_diff_ref['significance'])
         ):
-            if significance:
+            if star:
                 axs[1, 0].text(
-                    effect - 0.0002,
+                    effect - 1e-4,
                     i,
-                    significance,
+                    star,
                     ha='left',
                     va='center',
                     fontsize=12,
                     color='darkred',
                 )
+
     axs[1, 0].set_title(
-        f'Top {topn} Genes with Strongest Difference \n({obs_value_1} > {obs_value_2})'
+        f'Top {topn} Genes: Strongest Difference\n({obs_value_ref or "ref"}'
+        f'> {obs_value_query or "query"})'
     )
     axs[1, 0].set_xlabel('Difference in Cosine Similarity')
     axs[1, 0].set_ylabel('Gene')
 
-    # 4. Top 10 genes with strongest difference (query > ref)
+    # 4) Strongest difference (query > ref)   -> positive effect_size
     if color_scheme == 'significance':
         vals = top_diff_query['effect_size']
         pvals_raw = top_diff_query['p_adjusted']
@@ -2241,89 +2277,86 @@ def visualize_cosine_similarity(
         neglogp = -np.log10(pvals)
 
         if palette_as_gradient:
-            base_color = to_rgba(significance_palette[1])
+            base_color = to_rgba(qry_col if is_listlike else 'tab:blue')
             cmap = LinearSegmentedColormap.from_list(
                 'query_cmap', [(1, 1, 1, 1), base_color]
             )
         else:
-            cmap = plt.get_cmap(significance_palette)
+            cmap = plt.get_cmap(cmap_name)
 
-        norm = Normalize(vmin=neglogp.min(), vmax=neglogp.max())
-        colors = cmap(norm(neglogp))
+        norm = Normalize(
+            vmin=neglogp.min() if len(neglogp) else 0,
+            vmax=neglogp.max() if len(neglogp) else 1,
+        )
+        colors = cmap(norm(neglogp)) if len(neglogp) else None
         axs[1, 1].barh(
-            y=top_diff_query['gene'],
-            width=vals,
-            color=colors,
-            edgecolor='black',
+            y=top_diff_query['gene'], width=vals, color=colors, edgecolor='black'
         )
         axs[1, 1].invert_yaxis()
         sm = ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=axs[1, 1])
         cbar.set_label('-log10(Adjusted p-value)', rotation=270, labelpad=15)
+
+        # gray-out non-significant labels
         yticklabels = axs[1, 1].get_yticklabels()
-        for label in yticklabels:
-            gene = label.get_text()
-            pval = top_diff_query.set_index('gene').loc[gene, 'p_adjusted']
-            if pval >= 0.05:
-                label.set_color('gray')
-            else:
-                label.set_color('black')
+        idx = top_diff_query.set_index('gene')['p_adjusted']
+        for lab in yticklabels:
+            g = lab.get_text()
+            if pd.notna(idx.get(g, np.nan)) and idx[g] >= 0.05:
+                lab.set_color('gray')
         axs[1, 1].set_yticklabels(yticklabels)
-    elif gp_to_color:
-        palette = dict(
-            zip(
-                top_diff_query['gene'],
-                assign_bar_colors(top_diff_query['gene'], gp_to_color, gpdb),
-            )
-        )
-        sns.barplot(
-            data=top_diff_query,
-            x='effect_size',
-            y='gene',
-            ax=axs[1, 1],
-            errorbar=None,
-            palette=palette,
-        )
     else:
-        sns.barplot(
-            data=top_diff_query,
-            x='effect_size',
-            y='gene',
-            ax=axs[1, 1],
-            color='skyblue',
-        )
+        if gp_to_color:
+            palette = dict(
+                zip(
+                    top_diff_query['gene'],
+                    assign_bar_colors(top_diff_query['gene'], gp_to_color, gpdb),
+                )
+            )
+            sns.barplot(
+                data=top_diff_query,
+                x='effect_size',
+                y='gene',
+                ax=axs[1, 1],
+                errorbar=None,
+                palette=palette,
+            )
+        else:
+            sns.barplot(
+                data=top_diff_query,
+                x='effect_size',
+                y='gene',
+                ax=axs[1, 1],
+                color='skyblue',
+            )
 
     if show_significance:
-        for i, (effect, gene, significance) in enumerate(
-            zip(
-                top_diff_query['effect_size'],
-                top_diff_query['gene'],
-                top_diff_query['significance'],
-            )
+        for i, (effect, star) in enumerate(
+            zip(top_diff_query['effect_size'], top_diff_query['significance'])
         ):
-            if significance:
+            if star:
                 axs[1, 1].text(
-                    effect + 0.0002,
+                    effect + 1e-4,
                     i,
-                    significance,
+                    star,
                     ha='right',
                     va='center',
                     fontsize=12,
                     color='navy',
                 )
+
     axs[1, 1].set_title(
-        f'Top {topn} Genes with Strongest Difference \n({obs_value_2} > {obs_value_1})'
+        f'Top {topn} Genes: Strongest Difference\n({obs_value_query or "query"}'
+        f'> {obs_value_ref or "ref"})'
     )
     axs[1, 1].set_xlabel('Difference in Cosine Similarity')
     axs[1, 1].set_ylabel('Gene')
 
-    # Adjust layout to avoid squishing
+    # layout & save
     plt.subplots_adjust(hspace=hspace, wspace=wspace)
-
     if save_to:
-        plt.savefig(save_to)
-
+        plt.savefig(save_to, bbox_inches='tight')
     plt.show()
 
 

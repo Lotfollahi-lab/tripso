@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
 from peft import LoraConfig, get_peft_model
+from scipy import sparse
 from scipy.sparse import csr_matrix
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.metrics.pairwise import cosine_similarity
@@ -431,10 +432,14 @@ class gpBase(pl.LightningModule):
                     cos_sim = F.cosine_similarity(gp, gene_emb)
                     cos_sim = cos_sim.cpu().numpy().squeeze()
 
+                    # make sparse for memory efficiency
+                    cos_sim = sparse.csr_matrix(cos_sim).T  # (1, batch) --> (batch, 1)
+
                     if gene_name not in self.gene_to_gp_cosim:
                         self.gene_to_gp_cosim[gene_name] = cos_sim
                     else:
-                        self.gene_to_gp_cosim[gene_name] = np.concatenate(
+                        # Use scipy.sparse.vstack to concatenate csr_matrices
+                        self.gene_to_gp_cosim[gene_name] = sparse.vstack(
                             [self.gene_to_gp_cosim[gene_name], cos_sim]
                         )
 
@@ -457,32 +462,32 @@ class gpBase(pl.LightningModule):
                         for k, v in meta_dict.items()
                     }
 
-                # Option 3: calculate (gene, gene) cosine similarity
-                if self.return_gene_cosim == 'gene_to_gene':
-                    # Vectorized computation for gene-to-gene cosine similarity
-                    gene_embs = torch.stack(
-                        [output[gene].detach() for gene in self.tokens_to_keep]
-                    )  # (num_genes, emb_dim)
-                    gene_names = [
-                        self.token_to_gene_to_keep_dict[gene]
-                        for gene in self.tokens_to_keep
-                    ]
-                    gene_embs_norm = F.normalize(gene_embs, p=2, dim=1)
-                    cos_sim_matrix = (
-                        gene_embs_norm @ gene_embs_norm.T
-                    )  # (num_genes, num_genes)
-                    cos_sim_matrix_np = cos_sim_matrix.cpu().numpy()
+            # Option 3: calculate (gene, gene) cosine similarity
+            if self.return_gene_cosim == 'gene_to_gene':
+                # Vectorized computation for gene-to-gene cosine similarity
+                gene_embs = torch.stack(
+                    [output[gene].detach() for gene in self.tokens_to_keep]
+                )  # (num_genes, emb_dim)
+                gene_names = [
+                    self.token_to_gene_to_keep_dict[gene]
+                    for gene in self.tokens_to_keep
+                ]
+                gene_embs_norm = F.normalize(gene_embs, p=2, dim=1)
+                cos_sim_matrix = (
+                    gene_embs_norm @ gene_embs_norm.T
+                )  # (num_genes, num_genes)
+                cos_sim_matrix_np = cos_sim_matrix.cpu().numpy()
 
-                    for i, gene1_name in enumerate(gene_names):
-                        for j, gene2_name in enumerate(gene_names):
-                            key = (gene1_name, gene2_name)
-                            value = cos_sim_matrix_np[i, j]
-                            if key not in self.gene_to_gene_cosim:
-                                self.gene_to_gene_cosim[key] = np.array([value])
-                            else:
-                                self.gene_to_gene_cosim[key] = np.concatenate(
-                                    [self.gene_to_gene_cosim[key], np.array([value])]
-                                )
+                for i, gene1_name in enumerate(gene_names):
+                    for j, gene2_name in enumerate(gene_names):
+                        key = (gene1_name, gene2_name)
+                        value = cos_sim_matrix_np[i, j]
+                        if key not in self.gene_to_gene_cosim:
+                            self.gene_to_gene_cosim[key] = np.array([value])
+                        else:
+                            self.gene_to_gene_cosim[key] = np.concatenate(
+                                [self.gene_to_gene_cosim[key], np.array([value])]
+                            )
 
             return None
 
@@ -546,14 +551,19 @@ class gpBase(pl.LightningModule):
                 self.gene_dataset = None
 
             if self.return_gene_cosim == 'gene_to_gp':
-                # Save as dataframe
-                # gene_to_gp_cosim is a dict where gene names are keys
-                cosim = pd.DataFrame(self.gene_to_gp_cosim)  # (cell, gene)
+                # gene_to_gp_cosim is a dict where gene names are keys,
+                # values are sparse matrices (n_cells, 1)
+                # Stack all sparse matrices horizontally to get (n_cells, n_genes)
+                gene_names = list(self.gene_to_gp_cosim.keys())
+                cosim_matrix = sparse.hstack(
+                    [self.gene_to_gp_cosim[gene] for gene in gene_names]
+                )
 
                 obs = pd.DataFrame(self.gene_meta_dict)
 
+                # Pass sparse matrix directly to AnnData, set var_names
                 output_adata = sc.AnnData(
-                    X=cosim.values, obs=obs, var=pd.DataFrame(index=cosim.columns)
+                    X=cosim_matrix, obs=obs, var=pd.DataFrame(index=gene_names)
                 )
 
                 filename = (

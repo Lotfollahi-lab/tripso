@@ -14,6 +14,12 @@ from .losses import (  # noqa: F401
 from .utils import (  # noqa: F401
     CosineLRwithWarmUp,
     MidpointNormalize,
+    _bh_with_nans,
+    _resolve_sig_colors,
+    _stars,
+    _t_equal_var_sparse,
+    _to_csc,
+    assign_bar_colors,
     bool_flag,
     dataset_pivot_longer,
     dataverse_download,
@@ -71,4 +77,10 @@ __all___ = [
     'make_GO',
     'get_GO_edge_list',
     'get_similarity_network',
+    '_bh_with_nans',
+    '_stars',
+    '_to_csc',
+    '_t_equal_var_sparse',
+    'assign_bar_colors',
+    '_resolve_sig_colors',
 ]
