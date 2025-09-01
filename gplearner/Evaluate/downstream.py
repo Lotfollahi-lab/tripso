@@ -1076,6 +1076,7 @@ def calculate_gp_attribution_scores(
     fm_encoder_name='gf-6L-30M-i2048',
     output_file_name=None,
     model_input_size: int = 2048,
+    supervised_labels: Optional[Dict[str, int]] = None,
 ):
     '''
     Calculate attribution scores for each gene program
@@ -1215,38 +1216,52 @@ def calculate_gp_attribution_scores(
 
     # Load classification layer
     # or train if not available
-    ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
-    clf_ckpt = f"{y_label.replace('_id', '')}_{gp}_{task}"
+    if gp_transformer.model.global_loss == 'supervised':
+        if supervised_labels is None:
+            task_index = 0
+        else:
+            tasks = list(supervised_labels.keys())
+            if not obs_key.endswith('_id'):
+                task_tag = obs_key + '_id'
+            else:
+                task_tag = obs_key
+            task_index = tasks.index(task_tag)
 
-    if os.path.exists(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')):
-        clf_layer = EmbEvaluator.load_from_checkpoint(
-            os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
-        )
+        clf_layer = gp_transformer.model.clf_head[task_index]
 
     else:
-        if emb_dataset_path is None:
-            raise ValueError(
-                'Please provided path to embeddings for training linear layer'
-            )
-        gpEval.evaluate_embeddings(
-            y_label=y_label,
-            encode_covariate=True,
-            folder_path=emb_dataset_path,
-            output_dir=output_dir,
-            emb_label=gp,
-            task=task,
-            emb_dim=gp_latent_size,
-            lr=1e-3,
-            batch_size=128,
-            num_workers=1,
-            data_type='dataset',
-            n_epochs=3,
-            continuous_cov=[],
-        )
+        ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
+        clf_ckpt = f"{y_label.replace('_id', '')}_{gp}_{task}"
 
-        clf_layer = EmbEvaluator.load_from_checkpoint(
-            os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
-        )
+        if os.path.exists(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')):
+            clf_layer = EmbEvaluator.load_from_checkpoint(
+                os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
+            )
+
+        else:
+            if emb_dataset_path is None:
+                raise ValueError(
+                    'Please provided path to embeddings for training linear layer'
+                )
+            gpEval.evaluate_embeddings(
+                y_label=y_label,
+                encode_covariate=True,
+                folder_path=emb_dataset_path,
+                output_dir=output_dir,
+                emb_label=gp,
+                task=task,
+                emb_dim=gp_latent_size,
+                lr=1e-3,
+                batch_size=128,
+                num_workers=1,
+                data_type='dataset',
+                n_epochs=3,
+                continuous_cov=[],
+            )
+
+            clf_layer = EmbEvaluator.load_from_checkpoint(
+                os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
+            )
 
     imodel = iGpWrapper(
         gp_transformer,
