@@ -371,7 +371,7 @@ class gpWrapper(nn.Module):
             lookup_tensor[gp_tokens_tensor.long()] = indices
             self.register_buffer(f'gp{i}_tokens_lookup', lookup_tensor)
 
-        self.encoder: nn.ModuleList[gpTransformerEncoder] = nn.ModuleList(
+        self.encoder = nn.ModuleList(
             [
                 gpTransformerEncoder(
                     n_gp_tokens=len(getattr(self, f'gp{i}_tokens')),
