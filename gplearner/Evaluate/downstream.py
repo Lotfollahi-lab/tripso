@@ -97,6 +97,7 @@ matplotlib.rcParams['pdf.fonttype'] = 42
 class gpEval:
     """
     Main class for running downstream evaluation tasks on trained models
+
     Parameters
     ----------
     dataset_path : str
