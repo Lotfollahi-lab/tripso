@@ -8,7 +8,7 @@ Requirements:
 
 .. code-block:: shell-session
 
-   $ python3.11 -m venv .venv
+   $ python3.10 -m venv .venv
    $ source .venv/bin/activate
    $ pip install \
       git+https://huggingface.co/ctheodoris/Geneformer@18a2ca668c0f0239f37e58a34fd8de4ac15b5ed2 \
