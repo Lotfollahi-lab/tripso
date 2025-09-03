@@ -19,4 +19,9 @@ setup(
             "sphinx-rtd-theme~=3.0.2",
         ],
     },
+    entry_points={
+        "console_scripts": [
+            "tripso = gplearner.__main__:main",
+        ],
+    },
 )
