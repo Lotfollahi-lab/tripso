@@ -575,7 +575,8 @@ class gpEval:
 
     def generate_gene_embeddings(
         self,
-        pathway,
+        gp_for_forward: Optional[str],
+        gp_for_downstream: str,
         split='train',
         obs_key=None,
         obs_value=None,
@@ -598,7 +599,9 @@ class gpEval:
             Value in adata.obs to filter on
         data_frac : float
             Fraction of data to use for generating embeddings
-        pathway : str
+        gp_for_forward: str or None
+            Pathway to use for model forward pass
+        gp_for_downstream : str
             Pathway to use for generating embeddings
         genes_to_keep : list
             Genes to generate embeddings for
@@ -611,7 +614,7 @@ class gpEval:
         """
         os.chdir(self.output_dir)
 
-        gene_dir_tag = f'{pathway}_gene_embeddings'
+        gene_dir_tag = f'{gp_for_downstream}_gene_embeddings'
 
         if obs_value is not None:
             if isinstance(obs_value, str):
@@ -635,7 +638,8 @@ class gpEval:
             gene_dir_tag=gene_dir_tag,
             tokens_to_keep=tokens_to_keep,
             genes_to_keep=tokens_to_keep,
-            gp=pathway,
+            gp=gp_for_forward,
+            gp_for_downstream=gp_for_downstream,
             split_label=split,
             num_virtual_tokens=self.num_virtual_tokens,
             token_to_gene_to_keep_dict=token_to_gene_to_keep_dict,
