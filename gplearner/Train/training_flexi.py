@@ -88,7 +88,7 @@ def run_training_from_select_gps(
     use_flash: Optional[bool] = False,
     weight_decay: float = 0.0,
     sampler: Optional[str] = None,
-    sample_by: Optional[str] = 'cell_type',
+    sample_by: Optional[str] = None,
     fm_encoder_pkg: str = 'geneformer',
     fm_encoder_name: str = 'gf-6L-30M-i2048',
     peft_config_path: Optional[str] = None,
