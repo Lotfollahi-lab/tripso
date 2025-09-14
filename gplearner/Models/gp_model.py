@@ -620,7 +620,7 @@ class gpWrapper(nn.Module):
 
     def get_cls_attn(self, gf_emb, input_dataset, gp_idx):
         '''
-        If multilpe blocks, get attn matrix from last transformer block
+        If multiple blocks, get attn matrix from last transformer block
         '''
 
         gp_tokens = getattr(self, f'gp{gp_idx}_tokens')

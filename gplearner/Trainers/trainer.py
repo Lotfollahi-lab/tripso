@@ -615,6 +615,12 @@ class gpBase(pl.LightningModule):
                     f'{self.gp_for_downstream}_attention_{self.split_label}_set.h5ad',
                 )
             )
+            
+            print('Saved attention adata to path:', os.path.join(
+                    output_path,
+                    f'{self.gp_for_downstream}_attention_{self.split_label}_set.h5ad',
+                )
+                  )
 
             return None
 
