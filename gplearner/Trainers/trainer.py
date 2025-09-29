@@ -1075,7 +1075,8 @@ class gpGlobal(gpBase):
         if self.global_loss == 'reconstruction':
             # return Pearson correlation coefficient
             true_counts = torch.cat(self.val_true_counts_list).float()
-            pred_counts = torch.cat(self.val_pred_counts_list)  # (B, n_genes)
+            pred_counts = torch.cat(self.val_pred_counts_list) # (n_cells, n_genes)
+
 
             # Pearson correlation coefficient
             self.metric['pearson_val'] = PearsonCorrCoef(
