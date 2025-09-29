@@ -25,6 +25,7 @@ import pandas as pd
 import pytorch_lightning as pl
 import requests  # type: ignore
 import scanpy as sc
+import scipy.sparse as sp
 import seaborn as sns
 import torch
 import torch.nn as nn
@@ -35,6 +36,7 @@ from datasets import (
     concatenate_datasets,
     load_from_disk,
 )
+from scipy.stats import t as student_t
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     adjusted_rand_score,
@@ -46,6 +48,7 @@ from sklearn.metrics import (
     silhouette_score,
 )
 from sklearn.model_selection import train_test_split
+from statsmodels.stats.multitest import multipletests
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchmetrics import PearsonCorrCoef
 from tqdm import tqdm
@@ -1417,6 +1420,125 @@ def remove_single_data_points(adata, obs_column):
     filtered_anndata = adata[~adata.obs.index.isin(cells_to_remove)]
 
     return filtered_anndata
+
+
+# -----------------------------------------------------
+# (gene, GP) cosine similarity
+# -----------------------------------------------------
+
+
+# ---------- helpers ----------
+def _bh_with_nans(pvals: pd.Series, alpha=0.05, method='fdr_bh'):
+    """Benjamini–Hochberg while preserving NaNs."""
+    pvals = pd.Series(pvals, index=pvals.index)
+    mask = pvals.notna() & np.isfinite(pvals)
+    out = pd.Series(np.nan, index=pvals.index, dtype=float)
+    if mask.any():
+        _, padj, _, _ = multipletests(pvals[mask].values, alpha=alpha, method=method)
+        out.loc[mask] = padj
+    return out
+
+
+def _stars(p):
+    if not np.isfinite(p):
+        return ''
+    return '***' if p < 1e-3 else ('**' if p < 1e-2 else ('*' if p < 5e-2 else ''))
+
+
+def _to_csc(M):
+    if sp.issparse(M):
+        return M if sp.isspmatrix_csc(M) else M.tocsc(copy=False)
+    return sp.csc_matrix(M)
+
+
+# ---------- core sparse stats ----------
+def _t_equal_var_sparse(X_ref, X_query):
+    """
+    Compute per-gene means and pooled-variance t-test directly
+    from sparse/dense matrices.
+    Implicit zeros are treated as 0.
+    Returns dict(mean_ref, mean_query, effect, p_value).
+    """
+    R = _to_csc(X_ref)
+    Q = _to_csc(X_query)
+
+    m, n = R.shape[0], Q.shape[0]
+    assert R.shape[1] == Q.shape[1]
+    G = R.shape[1]
+
+    # sums and squared sums (zeros implicit)
+    sum_R = np.asarray(R.sum(axis=0)).ravel()
+    sum_Q = np.asarray(Q.sum(axis=0)).ravel()
+    sumsq_R = np.asarray(R.power(2).sum(axis=0)).ravel()
+    sumsq_Q = np.asarray(Q.power(2).sum(axis=0)).ravel()
+
+    mean_R = sum_R / max(m, 1)
+    mean_Q = sum_Q / max(n, 1)
+    effect = mean_Q - mean_R
+
+    # sample variances (unbiased). if group size <2 -> NaN variance
+    var_R = np.full(G, np.nan)
+    var_Q = np.full(G, np.nan)
+    if m > 1:
+        var_R = (sumsq_R - (sum_R**2) / m) / (m - 1)
+        var_R[var_R < 0] = 0.0  # numerical guard
+    if n > 1:
+        var_Q = (sumsq_Q - (sum_Q**2) / n) / (n - 1)
+        var_Q[var_Q < 0] = 0.0
+
+    p_value = np.full(G, np.nan)
+    if m > 1 and n > 1 and (m + n - 2) > 0:
+        sp2 = ((m - 1) * var_R + (n - 1) * var_Q) / (m + n - 2)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            se = np.sqrt(sp2 * (1.0 / m + 1.0 / n))
+            t = effect / se
+        df = m + n - 2
+        p_value = 2.0 * student_t.sf(np.abs(t), df)
+
+        # handle 0/NaN SE: if effect==0 => p=1; if effect!=0 => p=0 (perfect separation)
+        bad = ~np.isfinite(se) | (se == 0)
+        if bad.any():
+            same = bad & (np.abs(effect) == 0)
+            diff = bad & (np.abs(effect) > 0)
+            p_value[same] = 1.0
+            p_value[diff] = 0.0
+
+    return dict(mean_ref=mean_R, mean_query=mean_Q, effect=effect, p_value=p_value)
+
+
+def assign_bar_colors(genes, gp_to_color, gpdb):
+    colors = []
+    for gene in genes:
+        color_assigned = 'gray'
+        for gp, color in gp_to_color.items():
+            if gene in gpdb[gp].values:
+                color_assigned = color
+                break
+        colors.append(color_assigned)
+    return colors
+
+
+def _resolve_sig_colors(
+    significance_palette, default_ref='tab:red', default_query='tab:blue'
+):
+    """
+    Accepts either:
+      - a matplotlib cmap name (str), or
+      - a list/tuple of two color specs [ref_color, query_color] for gradient mode.
+    Returns (is_listlike, ref_color, query_color, cmap_name_or_None)
+    """
+    if (
+        isinstance(significance_palette, (list, tuple))
+        and len(significance_palette) >= 2
+    ):
+        ref_col = significance_palette[0]
+        qry_col = significance_palette[1]
+        return True, ref_col, qry_col, None
+    elif isinstance(significance_palette, str):
+        return False, default_ref, default_query, significance_palette
+    else:
+        # sensible fallback
+        return False, default_ref, default_query, 'Blues'
 
 
 #################

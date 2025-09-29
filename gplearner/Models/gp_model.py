@@ -488,6 +488,7 @@ class gpWrapper(nn.Module):
 
         if return_gene_embeddings:
             output = self.wrangle_gene_embeddings(output, tokens_to_keep)
+            output['z'] = z
 
         return output
 
@@ -619,7 +620,7 @@ class gpWrapper(nn.Module):
 
     def get_cls_attn(self, gf_emb, input_dataset, gp_idx):
         '''
-        If multilpe blocks, get attn matrix from last transformer block
+        If multiple blocks, get attn matrix from last transformer block
         '''
 
         gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
@@ -1285,6 +1286,7 @@ class gpTransformerGlobal(gpTransformerBase):
         n_bins=10,
         global_pos_emb='sin_cos',
         global_attn_dropout=0.0,
+        use_cell_token: bool = True,
         **kwargs,
     ):
         super().__init__(
@@ -1293,21 +1295,24 @@ class gpTransformerGlobal(gpTransformerBase):
             use_l2_norm=use_l2_norm,
             **kwargs,
         )
-        self.global_attn_heads = global_attn_heads
-
         self.global_loss = global_loss
 
-        self.cell_token_learner = cellWrapper(
-            gp_inputs=self.gp_inputs,
-            gp_latent_size=self.gp_latent_size,
-            n_blocks=global_n_blocks,
-            num_heads=self.global_attn_heads,
-            global_masking_rate=global_masking_rate,
-            use_flash=use_flash,
-            use_l2_norm=use_l2_norm,
-            global_pos_emb=global_pos_emb,
-            global_attn_dropout=global_attn_dropout,
-        )
+        if use_cell_token:
+            self.global_attn_heads = global_attn_heads
+            self.cell_token_learner = cellWrapper(
+                gp_inputs=self.gp_inputs,
+                gp_latent_size=self.gp_latent_size,
+                n_blocks=global_n_blocks,
+                num_heads=self.global_attn_heads,
+                global_masking_rate=global_masking_rate,
+                use_flash=use_flash,
+                use_l2_norm=use_l2_norm,
+                global_pos_emb=global_pos_emb,
+                global_attn_dropout=global_attn_dropout,
+            )
+        else:
+            self.global_attn_heads = None
+            self.cell_token_learner = None
 
         if self.global_loss == 'supervised':
             if supervised_labels is None:
@@ -1427,7 +1432,7 @@ class gpTransformerGlobalLinear(gpTransformerGlobal):
     """
 
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(use_cell_token=False, **kwargs)
 
     def base_output_to_cell_output(
         self,

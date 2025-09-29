@@ -1,16 +1,8 @@
-import os
-from typing import (
-    List,
-    Optional,
-    Sequence,
-    Union,
-)
+from typing import Optional, Sequence
 
 import anndata
-
 import numpy as np
 import pandas as pd
-import scanpy as sc
 from sklearn.cluster import SpectralClustering
 from sklearn.metrics import silhouette_score
 from tqdm import tqdm
