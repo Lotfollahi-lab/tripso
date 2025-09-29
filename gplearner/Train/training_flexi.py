@@ -88,7 +88,7 @@ def run_training_from_select_gps(
     use_flash: Optional[bool] = False,
     weight_decay: float = 0.0,
     sampler: Optional[str] = None,
-    sample_by: Optional[str] = 'cell_type',
+    sample_by: Optional[str] = None,
     fm_encoder_pkg: str = 'geneformer',
     fm_encoder_name: str = 'gf-6L-30M-i2048',
     peft_config_path: Optional[str] = None,
@@ -121,6 +121,7 @@ def run_training_from_select_gps(
     gp_for_downstream: Optional[str] = None,
     gp_latent_size: Optional[int] = None,
     accumulate_grad_batches: Optional[int] = 1,
+    resume_training: bool = False,
 ):
     """
     Wrapper function for training gpLearner model
@@ -338,64 +339,77 @@ def run_training_from_select_gps(
 
     # ----- Load pretrained model -------
 
-    latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type_old)
-    checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
-    state_dict = checkpoint['state_dict']
+    if resume_training:
+        checkpoint_path = find_latest_file(output_dir, tissue, model_type)
+        print(f'Loading checkpoint from {checkpoint_path}')
+        checkpoint = torch.load(
+            checkpoint_path, map_location=torch.device('cpu'), weights_only=False
+        )
+        gp_transformer.load_state_dict(checkpoint['state_dict'])
 
-    model_state_dict = gp_transformer_v0.state_dict()
-    if global_loss_old == 'reconstruction' and global_loss == 'supervised':
-        irrelevant_params = [
-            'theta',
-            'model.count_head.softmax_output.0.weight',
-            'model.count_head.softmax_output.0.bias',
-        ]
-        for param_name in state_dict:
-            if param_name in irrelevant_params:
-                state_dict[param_name] = torch.zeros_like(model_state_dict[param_name])
+    else:
+        latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type_old)
+        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=torch.device('cpu'), weights_only=False
+        )
+        state_dict = checkpoint['state_dict']
 
-    # Remove params that are not in the new model
-    state_dict = {k: v for k, v in state_dict.items() if k in model_state_dict}
+        model_state_dict = gp_transformer_v0.state_dict()
+        if global_loss_old == 'reconstruction' and global_loss == 'supervised':
+            irrelevant_params = [
+                'theta',
+                'model.count_head.softmax_output.0.weight',
+                'model.count_head.softmax_output.0.bias',
+            ]
+            for param_name in state_dict:
+                if param_name in irrelevant_params:
+                    state_dict[param_name] = torch.zeros_like(
+                        model_state_dict[param_name]
+                    )
 
-    gp_transformer_v0.load_state_dict(state_dict)
+        # Remove params that are not in the new model
+        state_dict = {k: v for k, v in state_dict.items() if k in model_state_dict}
 
-    # ----- Transfer weights of multi_gp_encoder -------
-    for i, gp in enumerate(gp_transformer.model.gp_inputs):
-        if gp in gp_transformer_v0.model.gp_inputs:
-            # find index in original model
-            idx = gp_transformer_v0.model.gp_inputs.index(gp)
+        gp_transformer_v0.load_state_dict(state_dict)
 
-            # transfer weights
-            gp_transformer.model.multi_gp_encoder.encoder[
-                i
-            ] = gp_transformer_v0.model.multi_gp_encoder.encoder[idx]
+        # ----- Transfer weights of multi_gp_encoder -------
+        for i, gp in enumerate(gp_transformer.model.gp_inputs):
+            if gp in gp_transformer_v0.model.gp_inputs:
+                # find index in original model
+                idx = gp_transformer_v0.model.gp_inputs.index(gp)
 
-            # freeze weights for this block
-            for name, param in gp_transformer.model.named_parameters():
-                if f'multi_gp_encoder.encoder.{i}' in name:
-                    param.requires_grad = False
-        else:
-            continue
+                # transfer weights
+                gp_transformer.model.multi_gp_encoder.encoder[
+                    i
+                ] = gp_transformer_v0.model.multi_gp_encoder.encoder[idx]
 
-    # ----- Transfer weights of gf_wrapper -------
-    gp_transformer.model.gf_wrapper = gp_transformer_v0.model.gf_wrapper
+                # freeze weights for this block
+                for name, param in gp_transformer.model.named_parameters():
+                    if f'multi_gp_encoder.encoder.{i}' in name:
+                        param.requires_grad = False
+            else:
+                continue
 
-    # Freeze weights
-    for name, param in gp_transformer.model.named_parameters():
-        if 'gf_wrapper' in name:
-            param.requires_grad = False
+        # ----- Transfer weights of gf_wrapper -------
+        gp_transformer.model.gf_wrapper = gp_transformer_v0.model.gf_wrapper
 
-    # ----- Optionally transfer cell encoder -------
-    if load_cell_token_learner:
-        if (model_type == 'Global') & (model_type_old == 'Global'):
-            gp_transformer.model.cell_token_learner = (
-                gp_transformer_v0.model.cell_token_learner
-            )
+        # Freeze weights
+        for name, param in gp_transformer.model.named_parameters():
+            if 'gf_wrapper' in name:
+                param.requires_grad = False
 
-            # # freeze cell encoder
-            # for name, param in gp_transformer.model.named_parameters():
-            #     if 'cell_encoder' in name:
-            #         param.requires_grad = False
+        # ----- Optionally transfer cell encoder -------
+        if load_cell_token_learner:
+            if (model_type == 'Global') & (model_type_old == 'Global'):
+                gp_transformer.model.cell_token_learner = (
+                    gp_transformer_v0.model.cell_token_learner
+                )
+
+                # # freeze cell encoder
+                # for name, param in gp_transformer.model.named_parameters():
+                #     if 'cell_encoder' in name:
+                #         param.requires_grad = False
 
     # Lightning trainer
     trainer = pl.Trainer(

@@ -488,6 +488,7 @@ class gpWrapper(nn.Module):
 
         if return_gene_embeddings:
             output = self.wrangle_gene_embeddings(output, tokens_to_keep)
+            output['z'] = z
 
         return output
 
@@ -618,24 +619,30 @@ class gpWrapper(nn.Module):
         return output
 
     def get_cls_attn(self, gf_emb, input_dataset, gp_idx):
-        '''
-        If multilpe blocks, get attn matrix from last transformer block
-        '''
+        """
+        If multiple blocks, get attn matrix from last transformer block.
+        Vectorized: LUT + scatter_add_ (with offset) to build (n_cells x n_genes).
+        """
+        gp_tokens = getattr(
+            self, f'gp{gp_idx}_tokens'
+        )  # list/1D tensor of gene token ids
 
-        gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
-
-        # Extract embeddings for the gene program of interest
+        # Build batch inputs
         emb_pad, tokens_pad, _, attn_mask = build_gp_input_matrix(
-            gf_emb['gene_emb'],  # geneformer embeddings
+            gf_emb['gene_emb'],
             input_dataset['input_ids'],
             gp_tokens,
         )
 
-        # Encode tokens for MLM
+        # Keep unencoded tokens for mapping to genes (shape [B, L], excluding CLS col)
         tokens_pad_unencoded = tokens_pad
+        if not torch.is_tensor(tokens_pad_unencoded):
+            tokens_pad_unencoded = torch.as_tensor(tokens_pad_unencoded)
+
+        # Encode tokens for MLM (unchanged)
         tokens_pad = getattr(self, f'gp{gp_idx}_tokens_lookup')[tokens_pad].long()
 
-        # get token GP representation
+        # Forward to get attention
         encoder_output = self.encoder[gp_idx](
             emb_pad,
             attn_mask=attn_mask,
@@ -644,50 +651,65 @@ class gpWrapper(nn.Module):
             return_attention=True,
         )
 
-        attn = encoder_output['attention']
+        # attention: [B, H, S, S] -> mean heads -> take CLS row -> [B, S]
+        attn = encoder_output['attention'].mean(dim=1)  # [B, S, S]
+        attn_cls_all = attn[:, 0, :]  # [B, S]
+        cls_scores = attn_cls_all[:, 0]  # [B]
+        attn_to_tokens = attn_cls_all[:, 1:]  # [B, L], L = S-1
 
-        # Average attention across heads
-        attn = attn.mean(dim=1)
+        # Token ids for those L positions
+        toks = tokens_pad_unencoded  # [B, L]
+        if toks.dtype != torch.long:
+            toks = toks.long()
 
-        output = {}
+        device = toks.device
+        dtype_scores = attn_to_tokens.dtype
 
-        # Select cls attention
-        attn = attn[:, 0, :]
+        # gp_tokens -> tensor on device
+        gp_tokens_t = torch.as_tensor(
+            gp_tokens, device=device, dtype=toks.dtype
+        ).reshape(
+            -1
+        )  # [G]
+        G = gp_tokens_t.numel()
+        B = attn_to_tokens.size(0)
 
-        output['cls'] = attn[:, 0].cpu().detach().numpy()
+        # --- LUT with offset over observed token ids in this batch ---
+        vmin = int(toks.min().item())
+        vmax = int(toks.max().item())
+        R = vmax - vmin + 1
+        offset = -vmin
 
-        # keep only gene scores
-        attn = attn[:, 1:]
+        # Edge case: if R <= 0 (shouldn't happen), skip safely
+        if R <= 0:
+            result = torch.zeros(B, G, device=device, dtype=dtype_scores)
+        else:
+            lut = torch.full((R,), -1, device=device, dtype=torch.long)
 
-        for i, gene in enumerate(gp_tokens):
-            # Ensure the data types match
-            gene = gene.to(tokens_pad_unencoded.dtype)
+            shifted_gp = gp_tokens_t + offset  # may fall outside [0, R)
+            in_range = (shifted_gp >= 0) & (shifted_gp < R)
+            if in_range.any():
+                # map only in-range gp tokens to their column indices
+                gp_cols = torch.arange(G, device=device, dtype=torch.long)
+                lut[shifted_gp[in_range]] = gp_cols[in_range]
 
-            # zero out other genes
-            mask = (tokens_pad_unencoded == gene).to(torch.int)
+            # Map each token position to a gene column (or -1 if not in gp_tokens)
+            gene_idx = lut[toks + offset]  # [B, L] in {-1, 0..G-1}
+            valid = gene_idx >= 0  # [B, L] bool
 
-            masked_score = attn * mask
+            # Scatter-add attention per (cell, gene)
+            result = torch.zeros(B, G, device=device, dtype=dtype_scores)
+            src = attn_to_tokens * valid.to(dtype_scores)  # zero-out non-gp tokens
+            idx = gene_idx.clamp(min=0)  # safe index; src==0 where invalid
+            result.scatter_add_(dim=1, index=idx, src=src)  # (B, G)
 
-            # Find the indices of the non-zero scores
-            non_zero_mask = masked_score != 0
+        # --- Build output dict; move to CPU once ---
+        out = {'cls': cls_scores.detach().cpu().numpy()}
+        res_np = result.detach().cpu().numpy()  # (B, G)
+        for j, tok in enumerate(gp_tokens_t.tolist()):
+            out[tok] = res_np[:, j]
 
-            indices = non_zero_mask.nonzero(as_tuple=True)
-
-            # Initialize the result tensor with zeros
-            result = torch.zeros(attn.shape[0], attn.shape[-1]).to(attn.device)
-
-            # Check if there are any non-zero rows, and update the result tensor
-            if indices[0].nelement() != 0:
-                result[indices] = masked_score[indices]
-
-                # for debugging
-                for row_idx in torch.unique(indices[0]):
-                    if non_zero_mask[row_idx].sum() > 1:
-                        raise ValueError('Multiple non-zero scores for the same gene')
-
-            output[gene.item()] = result.cpu().detach().numpy().sum(axis=-1)
-
-        return output
+        return out
 
 
 class cellWrapper(nn.Module):

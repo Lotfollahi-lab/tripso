@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets
 from peft import LoraConfig, get_peft_model
+from scipy import sparse
 from scipy.sparse import csr_matrix
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.metrics.pairwise import cosine_similarity
@@ -117,6 +118,7 @@ class gpBase(pl.LightningModule):
         lr_scheduler='ReduceLROnPlateau',
         total_epochs: int = 100,
         return_gene_embeddings: bool = False,
+        return_gene_cosim: Optional[str] = None,
         tokens_to_keep: Optional[List] = None,
         genes_to_keep: Optional[List] = None,
         token_to_gene_to_keep_dict: Optional[Dict] = None,
@@ -225,6 +227,7 @@ class gpBase(pl.LightningModule):
 
         # for test step
         self.return_gene_embeddings = return_gene_embeddings
+        self.return_gene_cosim = return_gene_cosim
         self.tokens_to_keep = tokens_to_keep
         self.token_to_gene_to_keep_dict = token_to_gene_to_keep_dict
         self.genes_to_keep = genes_to_keep
@@ -240,6 +243,9 @@ class gpBase(pl.LightningModule):
         self.gene_dataset = None
         self.token_dataset = None
         self.attn_adata_holder: List[ad.AnnData] = []
+        self.gene_to_gp_cosim: Dict[str, np.ndarray] = {}
+        self.gene_meta_dict = None
+        self.gene_to_gene_cosim: Dict[tuple, torch.Tensor] = {}
 
     def forward(self, x, masking, epoch, **kwargs):
         out = self.model(
@@ -392,30 +398,105 @@ class gpBase(pl.LightningModule):
 
             emb_dict = {}
 
-            # Get embeddings of the relevant genes
-            for i, gene in enumerate(self.tokens_to_keep):
-                gene_name = self.token_to_gene_to_keep_dict[gene]
-                emb_dict[gene_name] = output[gene].detach().cpu()
-                emb_dict[f'{gene_name}_rank'] = output[f'{gene}_rank'].detach().cpu()
+            # Option 1: save the embeddings directly
+            if self.return_gene_cosim is None:
+                # Get embeddings of the relevant genes
+                for i, gene in enumerate(self.tokens_to_keep):
+                    gene_name = self.token_to_gene_to_keep_dict[gene]
+                    emb_dict[gene_name] = output[gene].detach().cpu()
+                    emb_dict[f'{gene_name}_rank'] = (
+                        output[f'{gene}_rank'].detach().cpu()
+                    )
 
-            # metadata
-            for k, v in batch.items():
-                if k != 'input_ids':
-                    emb_dict[k] = v
+                # metadata
+                for k, v in batch.items():
+                    if k != 'input_ids':
+                        emb_dict[k] = v
 
-            emb = Dataset.from_dict(emb_dict)
+                emb = Dataset.from_dict(emb_dict)
 
-            if self.gene_dataset is None:
-                self.gene_dataset = emb
-            else:
-                self.gene_dataset = concatenate_datasets([self.gene_dataset, emb])
+                if self.gene_dataset is None:
+                    self.gene_dataset = emb
+                else:
+                    self.gene_dataset = concatenate_datasets([self.gene_dataset, emb])
+
+                return None
+
+            # Option 2: calculate (gene, GP) cosine similarity
+            if self.return_gene_cosim == 'gene_to_gp':
+                gp = output['z'][:, 0, :].squeeze().detach()
+                for i, gene in enumerate(self.tokens_to_keep):
+                    gene_name = self.token_to_gene_to_keep_dict[gene]
+                    gene_emb = output[gene].detach()
+
+                    cos_sim = F.cosine_similarity(gp, gene_emb)
+                    cos_sim = cos_sim.cpu().numpy().squeeze()
+
+                    # make sparse for memory efficiency
+                    cos_sim = sparse.csr_matrix(cos_sim).T  # (1, batch) --> (batch, 1)
+
+                    if gene_name not in self.gene_to_gp_cosim:
+                        self.gene_to_gp_cosim[gene_name] = cos_sim
+                    else:
+                        # Use scipy.sparse.vstack to concatenate csr_matrices
+                        self.gene_to_gp_cosim[gene_name] = sparse.vstack(
+                            [self.gene_to_gp_cosim[gene_name], cos_sim]
+                        )
+
+                # Track metadata
+                meta_dict = {}
+                for k, v in batch.items():
+                    if k != 'input_ids':
+                        # if tensor, move to cpu
+                        if isinstance(v, torch.Tensor):
+                            v = v.cpu().numpy()
+                        meta_dict[k] = v
+
+                if self.gene_meta_dict is None:
+                    self.gene_meta_dict = meta_dict
+                else:
+                    self.gene_meta_dict = {
+                        k: np.concatenate([self.gene_meta_dict[k], v])
+                        if isinstance(v, np.ndarray)
+                        else self.gene_meta_dict[k] + v
+                        for k, v in meta_dict.items()
+                    }
+
+            # Option 3: calculate (gene, gene) cosine similarity
+            if self.return_gene_cosim == 'gene_to_gene':
+                # Vectorized computation for gene-to-gene cosine similarity
+                gene_embs = torch.stack(
+                    [output[gene].detach() for gene in self.tokens_to_keep]
+                )  # (num_genes, emb_dim)
+                gene_names = [
+                    self.token_to_gene_to_keep_dict[gene]
+                    for gene in self.tokens_to_keep
+                ]
+                gene_embs_norm = F.normalize(gene_embs, p=2, dim=1)
+                cos_sim_matrix = (
+                    gene_embs_norm @ gene_embs_norm.T
+                )  # (num_genes, num_genes)
+                cos_sim_matrix_np = cos_sim_matrix.cpu().numpy()
+
+                for i, gene1_name in enumerate(gene_names):
+                    for j, gene2_name in enumerate(gene_names):
+                        key = (gene1_name, gene2_name)
+                        value = cos_sim_matrix_np[i, j]
+                        if key not in self.gene_to_gene_cosim:
+                            self.gene_to_gene_cosim[key] = np.array([value])
+                        else:
+                            self.gene_to_gene_cosim[key] = np.concatenate(
+                                [self.gene_to_gene_cosim[key], np.array([value])]
+                            )
 
             return None
 
         if self.return_attention:
             # returns a dictionary where each gene is a key
             if self.gp_for_downstream != 'cell_token':
-                output = self.model.get_cls_attn(batch, self.gp_for_downstream, masking=False)
+                output = self.model.get_cls_attn(
+                    batch, self.gp_for_downstream, masking=False
+                )
 
                 token_names = list(output.keys())
 
@@ -464,9 +545,65 @@ class gpBase(pl.LightningModule):
             output_path = os.path.join(self.output_dir, self.gene_dir_tag)
             os.makedirs(output_path, exist_ok=True)
             output_name = os.path.join(output_path, f'{self.split_label}_set')
-            self.gene_dataset.save_to_disk(output_name)
-            self.gene_dataset = None
-            return None
+
+            if self.return_gene_cosim is None:
+                self.gene_dataset.save_to_disk(output_name)
+                self.gene_dataset = None
+
+            if self.return_gene_cosim == 'gene_to_gp':
+                # gene_to_gp_cosim is a dict where gene names are keys,
+                # values are sparse matrices (n_cells, 1)
+                # Stack all sparse matrices horizontally to get (n_cells, n_genes)
+                gene_names = list(self.gene_to_gp_cosim.keys())
+                cosim_matrix = sparse.hstack(
+                    [self.gene_to_gp_cosim[gene] for gene in gene_names]
+                )
+
+                obs = pd.DataFrame(self.gene_meta_dict)
+
+                # Pass sparse matrix directly to AnnData, set var_names
+                output_adata = sc.AnnData(
+                    X=cosim_matrix, obs=obs, var=pd.DataFrame(index=gene_names)
+                )
+
+                filename = (
+                    f'gene_to_{self.gp}_cosine_similarity_{self.split_label}_set.h5ad'
+                )
+                filepath = os.path.join(output_path, filename)
+                output_adata.write_h5ad(filepath)
+
+                self.gene_to_gp_cosim = None
+                self.gene_meta_dict = None
+
+            if self.return_gene_cosim == 'gene_to_gene':
+                # gene_to_gene_cosim is a dictionary where keys are gene tuples
+                # values are cosine similarities
+                # output a dataframe of shape (gene,gene)
+                # with genes appropriately labelled
+                # where x[i,j] is the mean cosine similarity
+                gene_names = sorted(
+                    set(
+                        [k[0] for k in self.gene_to_gene_cosim.keys()]
+                        + [k[1] for k in self.gene_to_gene_cosim.keys()]
+                    )
+                )
+                cosim_matrix = pd.DataFrame(
+                    index=gene_names, columns=gene_names, dtype=float
+                )
+                for (gene1, gene2), sims in self.gene_to_gene_cosim.items():
+                    mean_sim = (
+                        sims.mean().item() if hasattr(sims, 'mean') else np.mean(sims)
+                    )
+                    cosim_matrix.loc[gene1, gene2] = mean_sim
+                output_path = os.path.join(self.output_dir, self.gene_dir_tag)
+                os.makedirs(output_path, exist_ok=True)
+                output_name = os.path.join(
+                    output_path,
+                    f'gene_to_gene_cosine_similarity_{self.split_label}_set.csv',
+                )
+                cosim_matrix.to_csv(output_name)
+                self.gene_to_gene_cosim = {}
+                return None
 
         if self.return_attention:
             output_path = os.path.join(self.output_dir, 'attention')
@@ -474,8 +611,17 @@ class gpBase(pl.LightningModule):
             adata = ad.concat(self.attn_adata_holder)
             adata.write_h5ad(
                 os.path.join(
-                    output_path, f'{self.gp_for_downstream}_attention_{self.split_label}_set.h5ad'
+                    output_path,
+                    f'{self.gp_for_downstream}_attention_{self.split_label}_set.h5ad',
                 )
+            )
+
+            print(
+                'Saved attention adata to path:',
+                os.path.join(
+                    output_path,
+                    f'{self.gp_for_downstream}_attention_{self.split_label}_set.h5ad',
+                ),
             )
 
             return None
@@ -931,11 +1077,12 @@ class gpGlobal(gpBase):
             true_counts = torch.cat(self.val_true_counts_list).float()
             pred_counts = torch.cat(self.val_pred_counts_list) # (n_cells, n_genes)
 
+
             # Pearson correlation coefficient
             self.metric['pearson_val'] = PearsonCorrCoef(
                 num_outputs=true_counts.shape[0]
             ).to(true_counts.device)
-            
+
             pearson = self.metric['pearson_val'](pred_counts.T, true_counts.T)
             mean_pearson = torch.mean(pearson)
             self.log(
@@ -1117,16 +1264,17 @@ class gpGlobal(gpBase):
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
         if self.model.reconstruction_loss in ['nb', 'zinb']:
-            
             # get re-scaled predictions
             pred_counts = output['count_output']['count_mean']
-            batch_size_factor = torch.tensor(batch['size_factor']).to(pred_counts.device)
+            batch_size_factor = torch.tensor(batch['size_factor']).to(
+                pred_counts.device
+            )
             dec_mean_gamma = output['count_output']['count_mean']
             size_factor_view = batch_size_factor.unsqueeze(1).expand(
                 dec_mean_gamma.size(0), dec_mean_gamma.size(1)
             )
             dec_mean = dec_mean_gamma * size_factor_view
-            
+
             getattr(self, f'{stage}_pred_counts_list').append(dec_mean)
             getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
 
