@@ -818,6 +818,8 @@ class gpGlobal(gpBase):
                 }
             )
 
+            # Do not predefine as None; we'll lazily initialize when first used
+
         # For learning global cell token
         for stage in ['train', 'val', 'test']:
             if self.global_loss == 'supervised':
@@ -828,10 +830,6 @@ class gpGlobal(gpBase):
                     setattr(self, f'{stage}_{t}_loss', [])
                     getattr(self, f'{stage}_clf_pred')[t] = []
                     getattr(self, f'{stage}_clf_true')[t] = []
-
-            if self.global_loss == 'reconstruction':
-                setattr(self, f'{stage}_true_counts_list', [])
-                setattr(self, f'{stage}_pred_counts_list', [])
 
     def forward(self, x, masking, masking_global=False, **kwargs):
         # masking_global is used to indicate
@@ -891,7 +889,7 @@ class gpGlobal(gpBase):
             loss = loss_base['total_loss'] + cell_masking_loss
 
         elif self.global_loss == 'reconstruction':
-            reconstruction_loss = self.compute_reconstruction_loss(
+            reconstruction_loss, dec_mean = self.compute_reconstruction_loss(
                 batch, output, stage='train'
             )
             loss = loss_base['total_loss'] + reconstruction_loss
@@ -905,6 +903,26 @@ class gpGlobal(gpBase):
                 prog_bar=True,
                 logger=True,
                 sync_dist=True,
+            )
+
+            # Compute Pearson correlation
+            true_counts = batch['counts']
+
+            # Initialize once,
+            # then only update to preserve accumulated state across batches
+            if (
+                'pearson_train' not in self.metric
+                or self.metric['pearson_train'] is None
+            ):
+                self.metric['pearson_train'] = PearsonCorrCoef(
+                    num_outputs=true_counts.shape[0]
+                ).to(true_counts.device)
+
+            # for input (batch, n_genes)
+            # pearson output is of shape (n_genes,)
+
+            self.metric['pearson_train'].update(
+                dec_mean.detach().float().T, true_counts.detach().float().T
             )
 
         self.log(
@@ -944,24 +962,31 @@ class gpGlobal(gpBase):
                 getattr(self, 'train_clf_true')[t] = []
 
         if self.global_loss == 'reconstruction':
-            # return Pearson correlation coefficient
-            true_counts = torch.cat(self.train_true_counts_list).float()
-            pred_counts = torch.cat(self.train_pred_counts_list)
+            # Compute cell-wise aggregated Pearson ----
+            if 'pearson_train' in self.metric:
+                # returns per-gene corr; take mean so it's a scalar
+                pearson_epoch = self.metric['pearson_train'].compute()  # [G]
+                if torch.isnan(pearson_epoch).any():
+                    num_nan = torch.isnan(pearson_epoch).sum().item()
+                    total = pearson_epoch.numel()
+                    warnings.warn(
+                        f'train pearson undefined for {num_nan}/{total}'
+                        'genes due to zero variance in predictions or targets;'
+                        'using nanmean.'
+                    )
+                mean_pearson_epoch = torch.nanmean(pearson_epoch.float())
 
-            # Pearson correlation coefficient
-            self.metric['pearson_train'] = PearsonCorrCoef(
-                num_outputs=true_counts.shape[0]
-            ).to(true_counts.device)
+                self.log(
+                    'train/pearson',
+                    mean_pearson_epoch,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
 
-            pearson = self.metric['pearson_train'](pred_counts.T, true_counts.T)
-            mean_pearson = torch.mean(pearson)
-            self.log(
-                'train/pearson',
-                mean_pearson,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-            )
+                # reset for next epoch
+                self.metric['pearson_train'].reset()
 
             # TODO : properly sample the counts
             # mse = self.metric['mse'](pred_counts, true_counts)
@@ -1008,7 +1033,7 @@ class gpGlobal(gpBase):
             loss = loss_base['total_loss'] + cell_masking_loss
 
         elif self.global_loss == 'reconstruction':
-            reconstruction_loss = self.compute_reconstruction_loss(
+            reconstruction_loss, dec_mean = self.compute_reconstruction_loss(
                 batch, output, stage='val'
             )
             loss = loss_base['total_loss'] + reconstruction_loss
@@ -1021,6 +1046,20 @@ class gpGlobal(gpBase):
                 prog_bar=True,
                 logger=True,
                 sync_dist=True,
+            )
+
+            # Compute Pearson correlation
+            true_counts = batch['counts']
+
+            # Initialize once,
+            # then only update to preserve accumulated state across batches
+            if 'pearson_val' not in self.metric or self.metric['pearson_val'] is None:
+                self.metric['pearson_val'] = PearsonCorrCoef(
+                    num_outputs=true_counts.shape[0]
+                ).to(true_counts.device)
+
+            self.metric['pearson_val'].update(
+                dec_mean.detach().float().T, true_counts.detach().float().T
             )
 
         self.log(
@@ -1073,25 +1112,30 @@ class gpGlobal(gpBase):
             )
 
         if self.global_loss == 'reconstruction':
-            # return Pearson correlation coefficient
-            true_counts = torch.cat(self.val_true_counts_list).float()
-            pred_counts = torch.cat(self.val_pred_counts_list) # (n_cells, n_genes)
+            # Compute cell-wise aggregated Pearson
+            if 'pearson_val' in self.metric:
+                pearson_epoch = self.metric['pearson_val'].compute()  # [G]
+                if torch.isnan(pearson_epoch).any():
+                    num_nan = torch.isnan(pearson_epoch).sum().item()
+                    total = pearson_epoch.numel()
+                    warnings.warn(
+                        f'val pearson undefined for {num_nan}/{total} genes'
+                        'due to zero variance in predictions or targets;'
+                        'using nanmean.'
+                    )
+                mean_pearson = torch.nanmean(pearson_epoch.float())
 
+                self.log(
+                    'val/pearson',
+                    mean_pearson,
+                    on_epoch=True,
+                    prog_bar=True,
+                    logger=True,
+                    sync_dist=True,
+                )
 
-            # Pearson correlation coefficient
-            self.metric['pearson_val'] = PearsonCorrCoef(
-                num_outputs=true_counts.shape[0]
-            ).to(true_counts.device)
-
-            pearson = self.metric['pearson_val'](pred_counts.T, true_counts.T)
-            mean_pearson = torch.mean(pearson)
-            self.log(
-                'val/pearson',
-                mean_pearson,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-            )
+                # reset for next epoch
+                self.metric['pearson_val'].reset()
 
             # TODO : properly sample the counts
             # mse = self.metric['mse'](pred_counts, true_counts)
@@ -1257,28 +1301,20 @@ class gpGlobal(gpBase):
             self.n_conditions_combined,
         )
 
-        if self.model.reconstruction_loss in ['mse']:
-            getattr(self, f'{stage}_pred_counts_list').append(
-                output['count_output']['count_lognorm']
-            )
-            getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
-
         if self.model.reconstruction_loss in ['nb', 'zinb']:
             # get re-scaled predictions
             pred_counts = output['count_output']['count_mean']
-            batch_size_factor = torch.tensor(batch['size_factor']).to(
-                pred_counts.device
+            batch_size_factor = torch.as_tensor(
+                batch['size_factor'], device=pred_counts.device, dtype=pred_counts.dtype
             )
+
             dec_mean_gamma = output['count_output']['count_mean']
             size_factor_view = batch_size_factor.unsqueeze(1).expand(
                 dec_mean_gamma.size(0), dec_mean_gamma.size(1)
             )
             dec_mean = dec_mean_gamma * size_factor_view
 
-            getattr(self, f'{stage}_pred_counts_list').append(dec_mean)
-            getattr(self, f'{stage}_true_counts_list').append(batch['counts'])
-
-        return reconstruction_loss
+        return reconstruction_loss, dec_mean
 
 
 class gpGlobalLoRA(gpGlobal):
@@ -1363,11 +1399,13 @@ class gpGlobalLoRA(gpGlobal):
 
 
 class gpAblation(gpGlobal):
-    def __init__(self, compute_cosine=False, **kwargs):
+    def __init__(self, compute_cosine=False, compute_delta_nb_loss=False, **kwargs):
         super().__init__(**kwargs)
         self.compute_cosine = compute_cosine
-        self.save_raw_embeddings = not compute_cosine
+        self.compute_delta_nb_loss = compute_delta_nb_loss
+        self.save_raw_embeddings = not (compute_cosine or compute_delta_nb_loss)
         self.cosine_adata = None
+        self.delta_nb_loss_adata = None
 
     def build_perturbed_input_matrix(
         self, z, num_genes_per_cell_list, gp_pert_index=None
@@ -1391,6 +1429,74 @@ class gpAblation(gpGlobal):
 
         return z, gp_labels, attn_mask
 
+    def compute_cell_level_reconstruction_loss(self, batch, output):
+        """
+        Compute reconstruction loss per cell (without taking mean across batch).
+        This is needed for delta NB loss computation.
+        """
+        from ..Utils.losses import one_hot_encoder
+
+        true_counts = batch['counts']
+        batch_size_factor = torch.tensor(batch['size_factor']).to(true_counts.device)
+
+        if self.model.reconstruction_loss == 'mse':
+            loss_per_cell = F.mse_loss(
+                output['count_output']['count_lognorm'], true_counts, reduction='none'
+            ).sum(
+                dim=-1
+            )  # Sum over genes for each cell
+            return loss_per_cell
+
+        elif self.model.reconstruction_loss == 'zinb':
+            dec_mean_gamma, dec_dropout = (
+                output['count_output']['count_mean'],
+                output['count_output']['count_dropout'],
+            )
+            size_factor_view = batch_size_factor.unsqueeze(1).expand(
+                dec_mean_gamma.size(0), dec_mean_gamma.size(1)
+            )
+            dec_mean = dec_mean_gamma * size_factor_view
+
+            dispersion = F.linear(
+                one_hot_encoder(batch['batch_key_id'], self.n_conditions_combined),
+                self.theta,
+            )
+            dispersion = torch.exp(dispersion)
+
+            # Compute ZINB loss per cell (without mean)
+            from ..Utils.losses import zinb
+
+            loss_per_cell = -zinb(
+                x=true_counts, mu=dec_mean, theta=dispersion, pi=dec_dropout
+            ).sum(dim=-1)
+            return loss_per_cell
+
+        elif self.model.reconstruction_loss == 'nb':
+            dec_mean_gamma = output['count_output']['count_mean']
+            size_factor_view = batch_size_factor.unsqueeze(1).expand(
+                dec_mean_gamma.size(0), dec_mean_gamma.size(1)
+            )
+            dec_mean = dec_mean_gamma * size_factor_view
+
+            dispersion = F.linear(
+                one_hot_encoder(batch['batch_key_id'], self.n_conditions_combined),
+                self.theta,
+            )
+            dispersion = torch.exp(dispersion)
+
+            # Compute NB loss per cell (without mean)
+            from ..Utils.losses import nb
+
+            loss_per_cell = -nb(x=true_counts, mu=dec_mean, theta=dispersion).sum(
+                dim=-1
+            )
+            return loss_per_cell
+
+        else:
+            raise ValueError(
+                f'Reconstruction loss {self.model.reconstruction_loss} not supported'
+            )
+
     def test_step(self, batch, batch_idx):
         output = self.forward(batch, masking=False, masking_global=False)
 
@@ -1400,6 +1506,13 @@ class gpAblation(gpGlobal):
         if self.compute_cosine:
             cosine_dict = {}
             control_array = emb_dict['control'].numpy()
+
+        if self.compute_delta_nb_loss:
+            delta_nb_loss_dict = {}
+            # Compute control reconstruction loss (cell-level)
+            control_loss_per_cell = self.compute_cell_level_reconstruction_loss(
+                batch, output
+            )
 
         # Pertubations - zero out each GP
         for i, gp in enumerate(self.model.gp_inputs):
@@ -1423,6 +1536,25 @@ class gpAblation(gpGlobal):
                 cos_sim = 1 - np.diag(cosine_similarity(control_array, gp_array))
 
                 cosine_dict[gp] = cos_sim
+
+            elif self.compute_delta_nb_loss:
+                # Create perturbed output for loss computation
+                perturbed_output = output.copy()
+                perturbed_output['cell_token'] = encoder_output['cls']
+
+                # CRITICAL: Re-compute count_output with the new cell token
+                perturbed_output['count_output'] = self.model.count_head(
+                    encoder_output['cls']
+                )
+
+                # Compute perturbed reconstruction loss (cell-level)
+                perturbed_loss_per_cell = self.compute_cell_level_reconstruction_loss(
+                    batch, perturbed_output
+                )
+
+                # Calculate delta loss (perturbed - control) per cell
+                delta_loss_per_cell = perturbed_loss_per_cell - control_loss_per_cell
+                delta_nb_loss_dict[gp] = delta_loss_per_cell.detach().cpu().numpy()
 
             else:
                 emb_dict[f'{gp}_perturb'] = encoder_output['cls'].detach().cpu()
@@ -1462,6 +1594,32 @@ class gpAblation(gpGlobal):
             else:
                 self.cosine_adata = ad.concat([self.cosine_adata, adata])
 
+        elif self.compute_delta_nb_loss:
+            meta_dict = {}
+
+            for k, v in batch.items():
+                if (k != 'input_ids') and (k != 'counts'):
+                    if isinstance(v, torch.Tensor):
+                        meta_dict[k] = v.cpu().numpy()
+                    else:
+                        meta_dict[k] = v
+
+            # Create DataFrame with cell-level delta losses
+            delta_df = pd.DataFrame(
+                delta_nb_loss_dict
+            )  # Each column is a GP, each row is a cell
+
+            adata = sc.AnnData(
+                X=delta_df.values,
+                obs=pd.DataFrame(meta_dict),
+                var=pd.DataFrame(index=delta_nb_loss_dict.keys()),
+            )
+
+            if self.delta_nb_loss_adata is None:
+                self.delta_nb_loss_adata = adata
+            else:
+                self.delta_nb_loss_adata = ad.concat([self.delta_nb_loss_adata, adata])
+
         return None
 
     def on_test_epoch_end(self):
@@ -1473,9 +1631,13 @@ class gpAblation(gpGlobal):
             self.emb_dataset.save_to_disk(output_name)
             self.emb_dataset = None
 
-        else:
+        elif self.compute_cosine:
             self.cosine_adata.write_h5ad(output_name + '.h5ad')
             self.cosine_adata = None
+
+        elif self.compute_delta_nb_loss:
+            self.delta_nb_loss_adata.write_h5ad(output_name + '_delta_nb_loss.h5ad')
+            self.delta_nb_loss_adata = None
 
         return None
 
@@ -1499,7 +1661,7 @@ class gpPrototypes(gpGlobal):
         loss_base = self.compute_gp_loss(batch, output)
 
         # Reconstruction loss
-        reconstruction_loss = self.compute_reconstruction_loss(
+        reconstruction_loss, dec_mean = self.compute_reconstruction_loss(
             batch, output, stage='train'
         )
         loss = loss_base['total_loss'] + reconstruction_loss
@@ -1717,7 +1879,7 @@ class EmbEvaluator(pl.LightningModule):
             self.log('train_mse', mse, on_epoch=True, prog_bar=True, logger=True)
 
             # calculate pearson correlation
-            pearson = torch.corrcoef(pred, true)[0, 1]
+            pearson = torch.corrcoef(pred.T, true.T)[0, 1]
             self.log(
                 'train_pearson', pearson, on_epoch=True, prog_bar=True, logger=True
             )

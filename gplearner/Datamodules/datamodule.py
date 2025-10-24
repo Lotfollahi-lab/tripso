@@ -445,9 +445,9 @@ class txDataModule(LightningDataModule):
         )  # Remaining for test
 
         # # FOR DEBUGGING
-        # train_size = 1
-        # val_size = 1
-        # test_size = 1
+        # train_size = 100
+        # val_size = 100
+        # test_size = 100
 
         discard = dataset_size - train_size - val_size - test_size
 
@@ -542,6 +542,7 @@ class txDataModule(LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True,
+            drop_last=True,
         )
 
     def test_dataloader(self):

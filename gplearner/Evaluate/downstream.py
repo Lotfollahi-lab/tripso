@@ -895,9 +895,19 @@ class gpEval:
 
 
 class gpAblationEval(gpEval):
-    def __init__(self, main_ckpt_dir, compute_cosine=False, *args, **kwargs):
+    def __init__(
+        self,
+        main_ckpt_dir,
+        compute_cosine=False,
+        compute_delta_nb_loss=False,
+        adata_path=None,
+        *args,
+        **kwargs,
+    ):
         self.main_ckpt_dir = os.path.join(main_ckpt_dir, 'checkpoints/last.ckpt')
         self.compute_cosine = compute_cosine
+        self.compute_delta_nb_loss = compute_delta_nb_loss
+        self.adata_path = adata_path
         super().__init__(*args, **kwargs)
 
     def _init_trainer(self, split_label=None, **kwargs):
@@ -914,7 +924,10 @@ class gpAblationEval(gpEval):
         gp_transformer.split_label = split_label
         gp_transformer.output_dir = self.output_dir
         gp_transformer.compute_cosine = self.compute_cosine
-        gp_transformer.save_raw_embeddings = not self.compute_cosine
+        gp_transformer.compute_delta_nb_loss = self.compute_delta_nb_loss
+        gp_transformer.save_raw_embeddings = not (
+            self.compute_cosine or self.compute_delta_nb_loss
+        )
 
         # Extract model
         self.model = gp_transformer.model
@@ -934,6 +947,41 @@ class gpAblationEval(gpEval):
             self.max_len = 4096
 
         return gp_transformer
+
+    def generate_embeddings(
+        self, split='train', precision=32, return_mean_non_padding=False
+    ):
+        '''
+        Save embeddings as Dataset with support for count reconstruction
+        '''
+        gp_transformer = self._init_trainer(
+            save_emb=True,
+            split_label=split,
+            hparam_save=self.hparam_save,
+            num_virtual_tokens=self.num_virtual_tokens,
+            return_mean_non_padding=return_mean_non_padding,
+        )
+
+        # For count reconstruction, we need to pass adata_path to txDataModule
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_test_step=split,
+            seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            model_input_size=self.max_len,
+            adata_path=self.adata_path,  # Pass adata_path for count reconstruction
+            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
+            if hasattr(gp_transformer.model, 'condition_on_length')
+            and gp_transformer.model.condition_on_length
+            else None,
+        )
+
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision=precision
+        )
+
+        trainer.test(gp_transformer, txdata)
 
 
 def calculate_perturbation_effect(embeddings, gp_list, meta_cols):
