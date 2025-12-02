@@ -30,13 +30,11 @@ from ..Models.gp_model import (
     gpTransformerBaseWithPrompt,
     gpTransformerGlobal,
     gpTransformerGlobalWithPrompt,
-    gpTransformerPrototypes,
 )
 from ..Trainers.trainer import (
     gpBase,
     gpGlobal,
     gpGlobalLoRA,
-    gpPrototypes,
 )
 from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import find_latest_file
@@ -92,9 +90,6 @@ def run_training(
     virtual_tokens_label: Optional[str] = None,
     num_prompt_classes: Optional[int] = 0,
     num_nodes: int = 1,
-    num_prototypes: int = 0,
-    prototype_labels_key: Optional[str] = None,
-    lambda_prototype_loss: float = 1e-2,
     prbm_path: Optional[str] = None,
     use_l2_norm: Optional[bool] = False,
     gp_latent_size: Optional[int] = None,
@@ -345,11 +340,6 @@ def run_training(
     if learn_new_gp:
         pl_model = load_from_ckpt('learn_new_gp', pl_model, args)
 
-    # Optionally reset any trainer parameters
-    pl_model.prototype_labels_key = prototype_labels_key
-    pl_model.num_prototypes = num_prototypes
-    pl_model.lambda_prototype_loss = lambda_prototype_loss
-
     # Lightning trainer
     trainer = pl.Trainer(
         max_epochs=n_epochs,
@@ -554,15 +544,6 @@ def configure_logger(args):
                 }
             )
 
-        if args['num_prototypes'] > 0:
-            wandb_logger.experiment.config.update(
-                {
-                    'num_prototypes': args['num_prototypes'],
-                    'prototype_labels_key': args['prototype_labels_key'],
-                    'lambda_prototype_loss': args['lambda_prototype_loss'],
-                }
-            )
-
     return wandb_logger
 
 
@@ -613,12 +594,6 @@ def configure_model(args):
 
         return model
 
-    if args['num_prototypes'] > 0:
-        model = gpTransformerPrototypes(
-            num_prototypes=args['num_prototypes'], **global_params
-        )
-        return model
-
     if args['model_type'] == 'Base':
         model = gpTransformerBase(**common_params)
         return model
@@ -657,16 +632,6 @@ def configure_lightning_module(model, gp_similarity, args):
         'total_n_genes': args['total_n_genes'],
         'global_loss': args['global_loss'],
     }
-
-    prototype_params = {
-        'num_prototypes': args['num_prototypes'],
-        'lambda_prototype_loss': args['lambda_prototype_loss'],
-    }
-
-    if args['num_prototypes'] > 0:
-        pl_model = gpPrototypes(**common_params, **global_params, **prototype_params)
-
-        return pl_model
 
     if args['model_type'] == 'Base':
         pl_model = gpBase(**common_params)

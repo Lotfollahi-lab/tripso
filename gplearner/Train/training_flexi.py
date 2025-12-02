@@ -28,12 +28,10 @@ from ..Models.gp_model import (
     gpTransformerGlobal,
     gpTransformerGlobalLinear,
     gpTransformerGlobalWithPrompt,
-    gpTransformerPrototypes,
 )
 from ..Trainers.trainer import (
     gpBase,
     gpGlobal,
-    gpPrototypes,
 )
 from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import find_latest_file
@@ -100,9 +98,6 @@ def run_training_from_select_gps(
     lambda_go_similarity: float = 1e-2,
     go_similarity_path: Optional[str] = None,
     go_similarity_gp: Optional[str] = 'hvg',
-    use_prototype_loss: bool = False,
-    num_prototypes: int = 0,
-    lambda_prototype_loss: float = 1e-2,
     use_gp_similarity_loss: bool = False,
     num_virtual_tokens: int = 0,
     all_genes: Optional[list] = None,
@@ -502,12 +497,6 @@ def configure_model_version(args, tag):
 
         return model
 
-    if args['num_prototypes'] > 0:
-        model = gpTransformerPrototypes(
-            num_prototypes=args['num_prototypes'], **global_params
-        )
-        return model
-
     if model_type == 'Base':
         model = gpTransformerBase(**common_params)
         return model
@@ -556,15 +545,6 @@ def configure_lightning_module_version(model, tag, gp_similarity, args):
     else:
         global_params['global_loss'] = args['global_loss']
         model_type = args['model_type']
-
-    prototype_params = {
-        'num_prototypes': args['num_prototypes'],
-        'lambda_prototype_loss': args['lambda_prototype_loss'],
-    }
-
-    if args['num_prototypes'] > 0:
-        pl_model = gpPrototypes(**common_params, **global_params, **prototype_params)
-        return pl_model
 
     if model_type == 'Base':
         pl_model = gpBase(**common_params)

@@ -72,7 +72,6 @@ from ..Trainers.trainer import (
     gpBase,
     gpGlobal,
     gpGlobalLoRA,
-    gpPrototypes,
 )
 from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import (  # find_latest_file,
@@ -270,11 +269,6 @@ class gpEval:
 
         elif self.model_type == 'Global_LoRA':
             gp_transformer = gpGlobalLoRA.load_from_checkpoint(
-                self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
-            )
-
-        elif self.model_type == 'Prototypes':
-            gp_transformer = gpPrototypes.load_from_checkpoint(
                 self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
             )
 
@@ -1250,11 +1244,6 @@ def calculate_gp_attribution_scores(
         )
     elif model_type == 'Global':
         gp_transformer = gpGlobal.load_from_checkpoint(
-            model_checkpoint, strict=False, map_location='cpu'
-        )
-
-    elif model_type == 'Prototypes':
-        gp_transformer = gpPrototypes.load_from_checkpoint(
             model_checkpoint, strict=False, map_location='cpu'
         )
 

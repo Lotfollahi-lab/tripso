@@ -2070,28 +2070,6 @@ class gpTransformerGlobalWithPrompt(gpTransformerBaseWithPrompt, gpTransformerGl
         super().__init__(**kwargs)
 
 
-# ----------------------------------
-# Prototypes
-# ----------------------------------
-
-
-class gpTransformerPrototypes(gpTransformerGlobal):
-    def __init__(self, num_prototypes, **kwargs):
-        super().__init__(**kwargs)
-
-        self.num_prototypes = num_prototypes
-
-        self.prototypes = nn.Parameter(
-            torch.empty(
-                self.num_prototypes,
-                self.gp_latent_size,
-            ),
-            requires_grad=True,
-        )
-
-        nn.init.xavier_normal_(self.prototypes)
-
-
 ####################################
 # Embedding evaluation
 ####################################
