@@ -99,7 +99,6 @@ def run_training(
     use_l2_norm: Optional[bool] = False,
     gp_latent_size: Optional[int] = None,
     all_genes: Optional[list] = None,
-    condition_on_length: Optional[bool] = False,
     init_sparsity: Optional[float] = 0.0,
     # for large scale pretraining:
     limit_train_batches: Optional[float] = 1.0,
@@ -277,7 +276,6 @@ def run_training(
         seed=data_seed,
         load_exp=use_onehot_wrapper is True,
         model_input_size=model_input_size,
-        condition_on_length=condition_on_length,
         output_dir=output_dir,
     )
 
@@ -544,7 +542,6 @@ def configure_logger(args):
                 {
                     'global_masking_rate': args['global_masking_rate'],
                     'use_l2_norm_main': args['use_l2_norm'],
-                    'condition_on_length': args['condition_on_length'],
                     'warmup': args['warmup'],
                     'init_sparsity': args['init_sparsity'],
                 }
@@ -591,7 +588,6 @@ def configure_model(args):
         'use_l2_norm': args['use_l2_norm'],
         'gp_latent_size': args['gp_latent_size'],
         'all_genes': args['all_genes'],
-        'condition_on_length': args['condition_on_length'],
         'warmup': args['warmup'],
         'init_sparsity': args['init_sparsity'],
     }

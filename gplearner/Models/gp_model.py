@@ -123,7 +123,6 @@ class GeneWrapper(nn.Module):
         config_dict,
         gp_latent_size,
         use_gf_embeddings=None,
-        condition_on_length=False,
         attn_dropout=0.0,
         init_sparsity=0.0,
     ):
@@ -221,7 +220,6 @@ class GeneWrapper(nn.Module):
             output_dim=gp_latent_size,
             use_flash=config_dict['use_flash'],
             no_mask_tokens=no_mask_tokens,
-            condition_on_length=condition_on_length,
             attn_drop_rate=attn_dropout,
             sparsity=init_sparsity,
         )
@@ -268,7 +266,6 @@ class GeneWrapper(nn.Module):
             masking=masking,
             return_attention=False,
             return_gene_embeddings=True,
-            lengths=input_dataset['scaled_length'],
             return_mean_non_padding=return_mean_non_padding,
         )
 
@@ -309,7 +306,6 @@ class gpWrapper(nn.Module):
         use_pos_emb,
         fm_model_input_size,
         use_l2_norm,
-        condition_on_length,
         attn_dropout,
         init_sparsity,
     ):
@@ -384,7 +380,6 @@ class gpWrapper(nn.Module):
                     use_pos_emb=use_pos_emb,
                     use_l2_norm=use_l2_norm,
                     no_mask_tokens=[0, 1, 2, 3],
-                    condition_on_length=condition_on_length,
                     attn_drop_rate=attn_dropout,
                     sparsity=init_sparsity,
                 )
@@ -456,7 +451,6 @@ class gpWrapper(nn.Module):
                     masking=masking,
                     return_attention=return_attention,
                     return_gene_embeddings=return_gene_embeddings,
-                    lengths=num_genes_per_cell,
                     return_mean_non_padding=return_mean_non_padding,
                 )
 
@@ -993,7 +987,6 @@ class gpTransformerBase(nn.Module):
         use_gf_embeddings=False,
         use_l2_norm=False,
         all_genes=None,
-        condition_on_length=False,
         warmup=0,
         init_sparsity=0.0,
     ):
@@ -1050,7 +1043,6 @@ class gpTransformerBase(nn.Module):
         self.fm_encoder_pkg = fm_encoder_pkg
         self.fm_encoder_name = fm_encoder_name
         self.use_l2_norm = use_l2_norm
-        self.condition_on_length = condition_on_length
         self.warmup = warmup
 
         if fm_encoder_pkg == 'geneformer':
@@ -1147,7 +1139,6 @@ class gpTransformerBase(nn.Module):
                 do_ensembl_conversion=do_ensembl_conversion,
                 use_gf_embeddings=use_gf_embeddings,
                 gp_latent_size=gp_latent_size,
-                condition_on_length=condition_on_length,
                 attn_dropout=attn_dropout,
                 init_sparsity=init_sparsity,
             )
@@ -1205,7 +1196,6 @@ class gpTransformerBase(nn.Module):
             use_pos_emb=use_pos_emb,
             fm_model_input_size=fm_model_input_size,
             use_l2_norm=use_l2_norm,
-            condition_on_length=condition_on_length,
             attn_dropout=attn_dropout,
             init_sparsity=init_sparsity,
         )

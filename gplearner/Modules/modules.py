@@ -432,7 +432,6 @@ class gpTransformerEncoder(nn.Module):
         use_l2_norm=False,
         output_dim=None,
         no_mask_tokens=[None],
-        condition_on_length=False,
         sparsity=0.0,
     ):
         super().__init__()
@@ -441,7 +440,6 @@ class gpTransformerEncoder(nn.Module):
         self.pos_drop = nn.Dropout(p=drop_rate)
         self.num_heads = num_heads
         self.use_l2_norm = use_l2_norm
-        self.condition_on_length = condition_on_length
 
         dpr = [
             x.item() for x in torch.linspace(0, drop_path_rate, depth)
@@ -463,8 +461,6 @@ class gpTransformerEncoder(nn.Module):
         if output_dim is not None and (output_dim != embed_dim):
             self.dim_red = ReduceDim(embed_dim, output_dim)
 
-        # Masking and cls is before appending lengths
-        # (if we are conditioning on lengths)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, output_dim))
         self.mask_emb = nn.Parameter(torch.zeros(1, 1, output_dim))
 
@@ -484,10 +480,6 @@ class gpTransformerEncoder(nn.Module):
             # transformers/models/bert/modeling_bert.py#L159
             self.pos_embed = nn.Embedding(seq_len + 1, output_dim)
             trunc_normal_(self.pos_embed.weight, std=0.02)
-
-        if self.condition_on_length:
-            self.length_mask = nn.Parameter(torch.zeros(1, 1, output_dim))
-            output_dim += 1
 
         self.output_dim = output_dim
 
@@ -621,7 +613,6 @@ class gpTransformerEncoder(nn.Module):
         return_attention,
         return_gene_embeddings=False,
         return_mean_non_padding=False,
-        lengths=None,
     ):
         # Optionally reduce dimensions
         if hasattr(self, 'dim_red') and (self.output_dim != self.embed_dim):
@@ -633,17 +624,6 @@ class gpTransformerEncoder(nn.Module):
 
         # Prepare tokens for transformer
         x, gene_labels = self.prepare_tokens(x, gene_labels)
-
-        if hasattr(self, 'condition_on_length') and self.condition_on_length:
-            if len(lengths.shape) == 1:
-                lengths = lengths.unsqueeze(-1)
-
-            # zero out lengths for masked tokens
-            true_emb = gene_labels == -100
-            lengths = lengths * true_emb
-
-            lengths = lengths.expand(-1, x.shape[1]).unsqueeze(-1)
-            x = torch.cat([x, lengths], dim=-1)
 
         for blk in self.blocks:
             x, attn = blk(
@@ -657,10 +637,7 @@ class gpTransformerEncoder(nn.Module):
         else:
             x = self.norm(x)
 
-        if hasattr(self, 'condition_on_length') and self.condition_on_length:
-            token = x[:, 0, :-1]
-        else:
-            token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
+        token = x[:, 0]  # equivalent to x[:, 0, :] = return <GP> token
 
         # instead of token, take mean of all gene embeddings
         # token = x[:, 1:, :].mean(dim=1)
@@ -682,10 +659,7 @@ class gpTransformerEncoder(nn.Module):
             output['attention'] = attn
 
         if return_gene_embeddings:
-            if hasattr(self, 'condition_on_length') and self.condition_on_length:
-                output['gene_embeddings'] = x[:, 1:, :-1]
-            else:
-                output['gene_embeddings'] = x[:, 1:, :]
+            output['gene_embeddings'] = x[:, 1:, :]
 
         return output
 

@@ -378,10 +378,6 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
-            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
-            if hasattr(gp_transformer.model, 'condition_on_length')
-            and gp_transformer.model.condition_on_length
-            else None,
         )
 
         trainer = pl.Trainer(
@@ -668,10 +664,6 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
-            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
-            if hasattr(gp_transformer.model, 'condition_on_length')
-            and gp_transformer.model.condition_on_length
-            else None,
         )
 
         trainer = pl.Trainer(
@@ -797,10 +789,6 @@ class gpEval:
             data_split_to_pass_to_test_step=split,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
-            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
-            if hasattr(gp_transformer.model, 'condition_on_length')
-            and gp_transformer.model.condition_on_length
-            else None,
         )
 
         trainer = pl.Trainer(
@@ -838,10 +826,6 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
-            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
-            if hasattr(gp_transformer.model, 'condition_on_length')
-            and gp_transformer.model.condition_on_length
-            else None,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
@@ -854,10 +838,6 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
-            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
-            if hasattr(self.gp_transformer.model, 'condition_on_length')
-            and self.gp_transformer.model.condition_on_length
-            else None,
         )
 
         trainer = pl.Trainer(
@@ -883,10 +863,6 @@ class gpEval:
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
-            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
-            if hasattr(gp_transformer.model, 'condition_on_length')
-            and gp_transformer.model.condition_on_length
-            else None,
         )
 
         trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
@@ -971,10 +947,6 @@ class gpAblationEval(gpEval):
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
             adata_path=self.adata_path,  # Pass adata_path for count reconstruction
-            length_scaler_path=os.path.join(self.output_dir, 'length_scaler.pkl')
-            if hasattr(gp_transformer.model, 'condition_on_length')
-            and gp_transformer.model.condition_on_length
-            else None,
         )
 
         trainer = pl.Trainer(
@@ -2163,7 +2135,7 @@ def plot_top_genes(
     save_to=None,
 ):
     """
-    Plot like your snippet, using the columns from calculate_gene_significance(...):
+    Plot using the columns from calculate_gene_significance(...):
       ['gene','mean_ref','mean_query','effect_size','p_adjusted','significance'].
     """
     # defensive copy & ordering

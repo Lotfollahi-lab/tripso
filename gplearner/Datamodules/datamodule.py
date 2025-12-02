@@ -325,8 +325,6 @@ class txDataModule(LightningDataModule):
         filter_value=None,
         frac_for_generation=1,
         fm_encoder_name='gf-6L-30M-i2048',
-        condition_on_length=False,
-        length_scaler_path=None,
         seed=0,
         load_exp=False,
         model_input_size=None,
@@ -378,9 +376,6 @@ class txDataModule(LightningDataModule):
 
         self.use_weighted_sampler = False
         self.use_length_sampler = False
-        self.condition_on_length = condition_on_length
-        self.length_scaler_path = length_scaler_path
-        self.output_dir = output_dir
 
         if sampler == 'weighted':
             self.use_weighted_sampler = True
@@ -462,23 +457,6 @@ class txDataModule(LightningDataModule):
         if self.use_length_sampler:
             print('\nLoading lengths for LengthGroupedSampler\n')
             self.lengths = [d['tk']['length'] for d in self.train_dataset]
-
-        # Optionally fit scalar for lengths
-        if self.condition_on_length:
-            # self.length_scaler = pd.read_pickle(
-            # os.path.join(self.output_dir, 'length_scaler.pkl')
-            # )
-            if self.length_scaler_path is None:
-                print('\nFitting scaler for length normalization\n')
-                lengths = np.array([d['tk']['length'] for d in self.train_dataset])
-                self.length_scaler = RobustScaler()
-                self.length_scaler.fit(lengths.reshape(-1, 1))
-                pd.to_pickle(
-                    self.length_scaler,
-                    os.path.join(self.output_dir, 'length_scaler.pkl'),
-                )
-            else:
-                self.length_scaler = pd.read_pickle(self.length_scaler_path)
 
     def train_dataloader(self):
         if self.use_weighted_sampler:
@@ -589,14 +567,6 @@ class txDataModule(LightningDataModule):
             'input_ids': input_batch_id.clone().detach(),
             'length': length.clone().detach(),
         }
-
-        if self.condition_on_length:
-            scaled_length = self.length_scaler.transform(length.numpy().reshape(-1, 1))
-            output_dict['scaled_length'] = torch.tensor(
-                scaled_length, dtype=torch.float32
-            )
-        else:
-            output_dict['scaled_length'] = length
 
         if self.load_exp:
             norm_exp = [torch.tensor(d['norm_exp']) for d in tokenized_batch]
