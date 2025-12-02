@@ -27,9 +27,7 @@ from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.baselines import gfGlobal
 from ..Models.gp_model import (
     gpTransformerBase,
-    gpTransformerBaseWithPrompt,
     gpTransformerGlobal,
-    gpTransformerGlobalWithPrompt,
 )
 from ..Trainers.trainer import (
     gpBase,
@@ -86,9 +84,6 @@ def run_training(
     seed: Optional[int] = 0,
     data_seed: Optional[int] = None,
     supervised_rem_var: Optional[str] = None,
-    num_virtual_tokens: int = 0,
-    virtual_tokens_label: Optional[str] = None,
-    num_prompt_classes: Optional[int] = 0,
     num_nodes: int = 1,
     prbm_path: Optional[str] = None,
     use_l2_norm: Optional[bool] = False,
@@ -326,9 +321,7 @@ def run_training(
     pl_model = configure_lightning_module(model, gp_similarity, args)
 
     # Optionally load pretrained model
-    if num_virtual_tokens > 0:
-        pl_model = load_from_ckpt('virtual_tokens', pl_model, args)
-    elif resume_training:
+    if resume_training:
         pl_model = load_from_ckpt('resume_training', pl_model, args)
     elif global_training == 'sequential':
         pl_model = load_from_ckpt('sequential', pl_model, args)
@@ -491,7 +484,6 @@ def configure_logger(args):
             'lambda_gp_similarity': args['lambda_gp_similarity'],
             'use_flash': args['use_flash'],
             'weight_decay': args['weight_decay'],
-            'num_virtual_tokens': args['num_virtual_tokens'],
             'use_onehot_wrapper': args['use_onehot_wrapper'],
             'use_pos_emb': args['use_pos_emb'],
             'precision': args['precision'],
@@ -585,15 +577,6 @@ def configure_model(args):
         'global_attn_dropout': args['global_attn_dropout'],
     }
 
-    if args['num_virtual_tokens'] > 0:
-        if args['model_type'] == 'Base':
-            model = gpTransformerBaseWithPrompt(**common_params)
-
-        elif args['model_type'] == 'Global':
-            model = gpTransformerGlobalWithPrompt(**common_params, **global_params)
-
-        return model
-
     if args['model_type'] == 'Base':
         model = gpTransformerBase(**common_params)
         return model
@@ -656,7 +639,6 @@ def load_from_ckpt(mode, pl_model, args):
     Load pretrained model
 
     Mode can be one of:
-    - 'virtual_tokens'
     - 'resume_training'
     - 'sequential'
     - 'finetune'
@@ -671,35 +653,7 @@ def load_from_ckpt(mode, pl_model, args):
     else:
         path_to_base_model = args['path_to_base_model']
 
-    if mode == 'virtual_tokens':
-        if args['path_to_base_model'] is not None:
-            try:
-                latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type)
-            except FileNotFoundError:
-                latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-            checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-            checkpoint = torch.load(
-                checkpoint_path, map_location=torch.device('cpu'), weights_only=False
-            )
-
-            pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
-
-            # freeze everything but prompt tokens and global head
-            for name, param in pl_model.model.named_parameters():
-                if 'prompt' in name:
-                    param.requires_grad = True
-                elif (
-                    ('cell_token_learner' in name)
-                    | ('clf_head' in name)
-                    | ('count_head' in name)
-                ):
-                    param.requires_grad = True
-                else:
-                    param.requires_grad = False
-
-        return pl_model
-
-    elif mode == 'resume_training':
+    if mode == 'resume_training':
         # latest_ckpt = find_latest_file(output_dir, tissue, model_type)
         latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
 

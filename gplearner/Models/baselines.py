@@ -20,7 +20,6 @@ class AverageNonZero(nn.Module):
     def __init__(self, cls_tag='cls'):
         super().__init__()
         self.cls_tag = cls_tag
-        self.num_virtual_tokens = 0
 
     def forward(self, x, return_gene_embeddings=False, *args, **kwargs):
         if return_gene_embeddings:
@@ -154,9 +153,6 @@ class gfBaseline(gpTransformerBase):
             model_type='Mean',
             learn_new_gp=False,
             # MAY NEED TO UPDATE THIS
-            num_virtual_tokens=0,
-            virtual_tokens_label=None,
-            num_prompt_classes=0,
             mean_emb_dict=None,
             use_pos_emb=False,
             use_diffl=False,

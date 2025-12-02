@@ -24,10 +24,8 @@ from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.baselines import gfGlobal
 from ..Models.gp_model import (
     gpTransformerBase,
-    gpTransformerBaseWithPrompt,
     gpTransformerGlobal,
     gpTransformerGlobalLinear,
-    gpTransformerGlobalWithPrompt,
 )
 from ..Trainers.trainer import (
     gpBase,
@@ -99,7 +97,6 @@ def run_training_from_select_gps(
     go_similarity_path: Optional[str] = None,
     go_similarity_gp: Optional[str] = 'hvg',
     use_gp_similarity_loss: bool = False,
-    num_virtual_tokens: int = 0,
     all_genes: Optional[list] = None,
     use_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: bool = False,
@@ -487,15 +484,6 @@ def configure_model_version(args, tag):
         global_params['supervised_labels'] = args['supervised_labels']
         global_params['global_loss'] = args['global_loss']
         model_type = args['model_type']
-
-    if args['num_virtual_tokens'] > 0:
-        if args[f'model_type_{tag}'] == 'Base':
-            model = gpTransformerBaseWithPrompt(**common_params)
-
-        elif args[f'model_type_{tag}'] == 'Global':
-            model = gpTransformerGlobalWithPrompt(**common_params, **global_params)
-
-        return model
 
     if model_type == 'Base':
         model = gpTransformerBase(**common_params)

@@ -160,7 +160,6 @@ class gpEval:
         path_to_trained_model: Optional[str] = None,
         seed: Optional[int] = 0,
         hparam_save: Optional[str] = 'all',
-        num_virtual_tokens: Optional[int] = 0,
         cond_to_shift: Optional[Dict] = None,
         return_classification_report: Optional[bool] = False,
         # for gpmean only
@@ -216,7 +215,6 @@ class gpEval:
 
         # Set up gpTransformer lightning module
         self.model_type = model_type
-        self.num_virtual_tokens = num_virtual_tokens
         self.cond_to_shift = cond_to_shift
 
         # save hparam for gpmean
@@ -234,7 +232,6 @@ class gpEval:
         self.gp_transformer = self._init_trainer(
             return_classification_report=return_classification_report,
             hparam_save=self.hparam_save,
-            num_virtual_tokens=num_virtual_tokens,
         )
 
     def _init_trainer(
@@ -252,7 +249,6 @@ class gpEval:
         save_emb=False,
         split_label=None,
         hparam_save='ignore_model',  # fine for test time?
-        num_virtual_tokens=0,
         return_virtual_tokens=False,
         token_to_gene_to_keep_dict=None,
         return_mean_non_padding=False,
@@ -303,13 +299,7 @@ class gpEval:
         gp_transformer.return_virtual_tokens = return_virtual_tokens
         gp_transformer.return_mean_non_padding = return_mean_non_padding
 
-        gp_transformer.model.multi_gp_encoder.num_virtual_tokens = num_virtual_tokens
         gp_transformer.model.cond_to_shift = self.cond_to_shift
-
-        if hasattr(gp_transformer.model, 'cell_token_learner'):
-            gp_transformer.model.cell_token_learner.num_virtual_tokens = (
-                num_virtual_tokens
-            )
 
         # Extract model
         self.model = gp_transformer.model
@@ -361,7 +351,6 @@ class gpEval:
             save_emb=True,
             split_label=split,
             hparam_save=self.hparam_save,
-            num_virtual_tokens=self.num_virtual_tokens,
             return_mean_non_padding=return_mean_non_padding,
         )
 
@@ -644,7 +633,6 @@ class gpEval:
             gp=gp_for_forward,
             gp_for_downstream=gp_for_downstream,
             split_label=split,
-            num_virtual_tokens=self.num_virtual_tokens,
             token_to_gene_to_keep_dict=token_to_gene_to_keep_dict,
         )
 
@@ -772,7 +760,6 @@ class gpEval:
             return_attention=True,
             gp=gp_for_forward,
             gp_for_downstream=gp_for_downstream,
-            num_virtual_tokens=self.num_virtual_tokens,
             split_label=split,
             token_to_gene_to_keep_dict=token_to_gene_to_keep_dict,
         )
@@ -810,7 +797,7 @@ class gpEval:
         print('Dataset path', self.dataset_path)
 
         gp_transformer = self._init_trainer(
-            test_random_baseline=True, num_virtual_tokens=self.num_virtual_tokens
+            test_random_baseline=True
         )
 
         txdata = txDataModule(
@@ -838,30 +825,6 @@ class gpEval:
             max_epochs=1, devices=1, accelerator='auto', precision=precision
         )
         trainer.test(self.gp_transformer, txdata)
-
-    def generate_virtual_tokens(self, split='test'):
-        '''
-        Extract virtual tokens
-        '''
-        gp_transformer = self._init_trainer(
-            split_label=split,
-            hparam_save=self.hparam_save,
-            num_virtual_tokens=self.num_virtual_tokens,
-            return_virtual_tokens=True,
-        )
-
-        txdata = txDataModule(
-            folder=self.dataset_path,
-            batch_size=self.batch_size,
-            data_split_to_pass_to_test_step=split,
-            seed=self.seed,
-            fm_encoder_name=self.fm_encoder_name,
-            model_input_size=self.max_len,
-        )
-
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
-
-        trainer.validate(gp_transformer, txdata)
 
 
 class gpAblationEval(gpEval):
@@ -928,7 +891,6 @@ class gpAblationEval(gpEval):
             save_emb=True,
             split_label=split,
             hparam_save=self.hparam_save,
-            num_virtual_tokens=self.num_virtual_tokens,
             return_mean_non_padding=return_mean_non_padding,
         )
 
