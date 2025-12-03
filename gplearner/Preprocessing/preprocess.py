@@ -309,7 +309,9 @@ def pp_and_tokenize(
                         for i in range(1, n_splits + 1)
                     ]
                 )
-
+                
+                print('number of cells in split', [len(load_from_disk(f'{root_dir}/data/processed/tokenized/{tissue}_{i}.dataset')) for i in range(1, n_splits + 1)])
+    
             # change labels to numerical ids
             if isinstance(cov_to_encode, str):
                 cov_to_encode = [cov_to_encode]

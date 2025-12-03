@@ -1455,10 +1455,6 @@ class gpTransformerGlobalLinear(gpTransformerGlobal):
 
 
 ####################################
-# Models with additional heads/losses
-####################################
-
-####################################
 # Embedding evaluation
 ####################################
 
