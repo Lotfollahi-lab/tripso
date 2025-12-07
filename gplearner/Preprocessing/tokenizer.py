@@ -2,7 +2,9 @@
 # Build custom tokenizer to return only GP genes
 ####################################################
 
+import logging
 from collections import Counter
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -11,6 +13,8 @@ import scipy.sparse as sp
 from datasets import Dataset
 from geneformer.tokenizer import TranscriptomeTokenizer
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 def rank_genes(gene_vector, gene_tokens):
@@ -208,7 +212,9 @@ class GPTokenizer(TranscriptomeTokenizer):
 
         return output_dataset_truncated
 
-    def tokenize_files(self, data_directory, file_format='h5ad'):
+    def tokenize_files(
+        self, data_directory, file_format: Literal['loom', 'h5ad'] = 'h5ad'
+    ):
         tokenized_cells = []
         if self.custom_attr_name_dict is not None:
             cell_attr = [attr_key for attr_key in self.custom_attr_name_dict.keys()]
@@ -236,6 +242,9 @@ class GPTokenizer(TranscriptomeTokenizer):
                 cell_metadata = None
 
         if file_found == 0:
+            logger.error(
+                f'No .{file_format} files found in directory {data_directory}.'
+            )
             raise
         return tokenized_cells, cell_metadata
 

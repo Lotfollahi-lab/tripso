@@ -14,10 +14,7 @@ from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from peft import PeftConfig, get_peft_model
 from transformers import BertConfig, BertForMaskedLM
 
-from ..Modules.modules import (
-    Mlp,
-    gpTransformerEncoder,
-)
+from ..Modules.modules import Mlp, gpTransformerEncoder
 from ..Utils.geneformer_utils import EmbExtractor, get_gf_repo
 from ..Utils.utils import (
     bin_gene_expression,

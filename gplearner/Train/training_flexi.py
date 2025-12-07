@@ -27,10 +27,7 @@ from ..Models.gp_model import (
     gpTransformerGlobal,
     gpTransformerGlobalLinear,
 )
-from ..Trainers.trainer import (
-    gpBase,
-    gpGlobal,
-)
+from ..Trainers.trainer import gpBase, gpGlobal
 from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import find_latest_file
 from .training import (

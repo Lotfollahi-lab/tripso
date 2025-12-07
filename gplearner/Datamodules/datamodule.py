@@ -14,7 +14,6 @@ from datasets import load_from_disk
 from geneformer import TOKEN_DICTIONARY_FILE
 from geneformer.perturber_utils import pad_tensor_list
 from pytorch_lightning import LightningDataModule
-from sklearn.preprocessing import RobustScaler
 from torch.utils.data import (
     DataLoader,
     Dataset,

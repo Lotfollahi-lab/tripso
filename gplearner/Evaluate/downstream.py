@@ -796,9 +796,7 @@ class gpEval:
 
         print('Dataset path', self.dataset_path)
 
-        gp_transformer = self._init_trainer(
-            test_random_baseline=True
-        )
+        gp_transformer = self._init_trainer(test_random_baseline=True)
 
         txdata = txDataModule(
             folder=self.dataset_path,

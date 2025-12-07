@@ -114,11 +114,11 @@ def rerank_genes(
     similarity_corr = np.abs(corr_matrix)
 
     labels_corr = cluster(similarity_corr)
-    
+
     # Assign labels_corr only to top_score_cluster genes
     # Initialize with NaN
     score_df['labels_corr'] = np.nan
-    
+
     # Assign labels_corr only to genes in top_score_cluster
     # Find the indices in score_df where labels_score == top_score_cluster
     top_cluster_mask = score_df['labels_score'] == top_score_cluster

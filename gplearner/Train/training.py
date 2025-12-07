@@ -25,10 +25,7 @@ from transformers import BertConfig
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.baselines import gfGlobal
-from ..Models.gp_model import (
-    gpTransformerBase,
-    gpTransformerGlobal,
-)
+from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
 from ..Trainers.trainer import (
     gpBase,
     gpGlobal,
