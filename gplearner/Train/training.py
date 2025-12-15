@@ -448,7 +448,7 @@ def configure_callbacks(save_id, args):
         mode='min',
         save_last=True,
         # save every n steps --> issue if dataset has < n steps
-        every_n_train_steps=1_000,
+        every_n_train_steps=500,  # 1_000,
     )
 
     lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='step')

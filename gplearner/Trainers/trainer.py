@@ -22,7 +22,7 @@ from scipy.sparse import csr_matrix
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.metrics.pairwise import cosine_similarity
 from torch import optim
-from torchmetrics import MeanSquaredError, PearsonCorrCoef
+from torchmetrics import MeanSquaredError
 
 from ..Models.gp_model import EmbEvaluatorHead, gpTransformerBase
 from ..Utils.losses import compute_count_loss, compute_gp_similarity_loss
@@ -818,7 +818,9 @@ class gpGlobal(gpBase):
                 }
             )
 
-            # Do not predefine as None; we'll lazily initialize when first used
+            # Track cell-wise Pearson correlations
+            self.train_pearson_corrs: List[torch.Tensor] = []
+            self.val_pearson_corrs: List[torch.Tensor] = []
 
         # For learning global cell token
         for stage in ['train', 'val', 'test']:
@@ -905,25 +907,30 @@ class gpGlobal(gpBase):
                 sync_dist=True,
             )
 
-            # Compute Pearson correlation
+            # Compute cell-wise Pearson correlation (vectorized)
             true_counts = batch['counts']
+            pred = dec_mean.detach().float()  # (batch_size, n_genes)
+            target = true_counts.detach().float()  # (batch_size, n_genes)
 
-            # Initialize once,
-            # then only update to preserve accumulated state across batches
-            if (
-                'pearson_train' not in self.metric
-                or self.metric['pearson_train'] is None
-            ):
-                self.metric['pearson_train'] = PearsonCorrCoef(
-                    num_outputs=true_counts.shape[0]
-                ).to(true_counts.device)
+            # Vectorized computation across all cells
+            pred_mean = pred.mean(dim=1, keepdim=True)  # (batch_size, 1)
+            target_mean = target.mean(dim=1, keepdim=True)  # (batch_size, 1)
+            pred_centered = pred - pred_mean  # (batch_size, n_genes)
+            target_centered = target - target_mean  # (batch_size, n_genes)
 
-            # for input (batch, n_genes)
-            # pearson output is of shape (n_genes,)
+            numerator = (pred_centered * target_centered).sum(dim=1)  # (batch_size,)
+            pred_std = torch.sqrt((pred_centered**2).sum(dim=1))  # (batch_size,)
+            target_std = torch.sqrt((target_centered**2).sum(dim=1))  # (batch_size,)
+            denominator = pred_std * target_std  # (batch_size,)
 
-            self.metric['pearson_train'].update(
-                dec_mean.detach().float().T, true_counts.detach().float().T
+            # Handle zero denominator
+            cell_corrs = numerator / denominator.clamp(min=1e-8)  # (batch_size,)
+            cell_corrs = torch.where(
+                denominator > 0, cell_corrs, torch.tensor(float('nan')).to(pred.device)
             )
+
+            # Store correlations for this batch
+            self.train_pearson_corrs.append(cell_corrs)
 
         self.log(
             'train/loss',
@@ -962,19 +969,19 @@ class gpGlobal(gpBase):
                 getattr(self, 'train_clf_true')[t] = []
 
         if self.global_loss == 'reconstruction':
-            # Compute cell-wise aggregated Pearson ----
-            if 'pearson_train' in self.metric:
-                # returns per-gene corr; take mean so it's a scalar
-                pearson_epoch = self.metric['pearson_train'].compute()  # [G]
-                if torch.isnan(pearson_epoch).any():
-                    num_nan = torch.isnan(pearson_epoch).sum().item()
-                    total = pearson_epoch.numel()
+            # Compute mean of cell-wise Pearson correlations
+            if len(self.train_pearson_corrs) > 0:
+                all_corrs = torch.cat(self.train_pearson_corrs)
+
+                if torch.isnan(all_corrs).any():
+                    num_nan = torch.isnan(all_corrs).sum().item()
+                    total = all_corrs.numel()
                     warnings.warn(
-                        f'train pearson undefined for {num_nan}/{total}'
-                        'genes due to zero variance in predictions or targets;'
+                        f'train pearson undefined for {num_nan}/{total} '
+                        'cells due to zero variance in predictions or targets; '
                         'using nanmean.'
                     )
-                mean_pearson_epoch = torch.nanmean(pearson_epoch.float())
+                mean_pearson_epoch = torch.nanmean(all_corrs.float())
 
                 self.log(
                     'train/pearson',
@@ -985,8 +992,8 @@ class gpGlobal(gpBase):
                     sync_dist=True,
                 )
 
-                # reset for next epoch
-                self.metric['pearson_train'].reset()
+                # Reset for next epoch
+                self.train_pearson_corrs = []
 
             # TODO : properly sample the counts
             # mse = self.metric['mse'](pred_counts, true_counts)
@@ -1048,19 +1055,30 @@ class gpGlobal(gpBase):
                 sync_dist=True,
             )
 
-            # Compute Pearson correlation
+            # Compute cell-wise Pearson correlation (vectorized)
             true_counts = batch['counts']
+            pred = dec_mean.detach().float()  # (batch_size, n_genes)
+            target = true_counts.detach().float()  # (batch_size, n_genes)
 
-            # Initialize once,
-            # then only update to preserve accumulated state across batches
-            if 'pearson_val' not in self.metric or self.metric['pearson_val'] is None:
-                self.metric['pearson_val'] = PearsonCorrCoef(
-                    num_outputs=true_counts.shape[0]
-                ).to(true_counts.device)
+            # Vectorized computation across all cells
+            pred_mean = pred.mean(dim=1, keepdim=True)  # (batch_size, 1)
+            target_mean = target.mean(dim=1, keepdim=True)  # (batch_size, 1)
+            pred_centered = pred - pred_mean  # (batch_size, n_genes)
+            target_centered = target - target_mean  # (batch_size, n_genes)
 
-            self.metric['pearson_val'].update(
-                dec_mean.detach().float().T, true_counts.detach().float().T
+            numerator = (pred_centered * target_centered).sum(dim=1)  # (batch_size,)
+            pred_std = torch.sqrt((pred_centered**2).sum(dim=1))  # (batch_size,)
+            target_std = torch.sqrt((target_centered**2).sum(dim=1))  # (batch_size,)
+            denominator = pred_std * target_std  # (batch_size,)
+
+            # Handle zero denominator
+            cell_corrs = numerator / denominator.clamp(min=1e-8)  # (batch_size,)
+            cell_corrs = torch.where(
+                denominator > 0, cell_corrs, torch.tensor(float('nan')).to(pred.device)
             )
+
+            # Store correlations for this batch
+            self.val_pearson_corrs.append(cell_corrs)
 
         self.log(
             'val/loss',
@@ -1112,18 +1130,19 @@ class gpGlobal(gpBase):
             )
 
         if self.global_loss == 'reconstruction':
-            # Compute cell-wise aggregated Pearson
-            if 'pearson_val' in self.metric:
-                pearson_epoch = self.metric['pearson_val'].compute()  # [G]
-                if torch.isnan(pearson_epoch).any():
-                    num_nan = torch.isnan(pearson_epoch).sum().item()
-                    total = pearson_epoch.numel()
+            # Compute mean of cell-wise Pearson correlations
+            if len(self.val_pearson_corrs) > 0:
+                all_corrs = torch.cat(self.val_pearson_corrs)
+
+                if torch.isnan(all_corrs).any():
+                    num_nan = torch.isnan(all_corrs).sum().item()
+                    total = all_corrs.numel()
                     warnings.warn(
-                        f'val pearson undefined for {num_nan}/{total} genes'
-                        'due to zero variance in predictions or targets;'
+                        f'val pearson undefined for {num_nan}/{total} '
+                        'cells due to zero variance in predictions or targets; '
                         'using nanmean.'
                     )
-                mean_pearson = torch.nanmean(pearson_epoch.float())
+                mean_pearson = torch.nanmean(all_corrs.float())
 
                 self.log(
                     'val/pearson',
@@ -1134,8 +1153,8 @@ class gpGlobal(gpBase):
                     sync_dist=True,
                 )
 
-                # reset for next epoch
-                self.metric['pearson_val'].reset()
+                # Reset for next epoch
+                self.val_pearson_corrs = []
 
             # TODO : properly sample the counts
             # mse = self.metric['mse'](pred_counts, true_counts)

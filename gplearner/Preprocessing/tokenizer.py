@@ -4,7 +4,12 @@
 
 import logging
 from collections import Counter
-from typing import Literal
+from typing import (
+    Dict,
+    List,
+    Literal,
+    Optional,
+)
 
 import numpy as np
 import pandas as pd
@@ -216,6 +221,7 @@ class GPTokenizer(TranscriptomeTokenizer):
         self, data_directory, file_format: Literal['loom', 'h5ad'] = 'h5ad'
     ):
         tokenized_cells = []
+        cell_metadata: Optional[Dict[str, List]] = None
         if self.custom_attr_name_dict is not None:
             cell_attr = [attr_key for attr_key in self.custom_attr_name_dict.keys()]
             cell_metadata = {
@@ -233,7 +239,7 @@ class GPTokenizer(TranscriptomeTokenizer):
             print(f'Tokenizing {file_path}')
             file_tokenized_cells, file_cell_metadata = tokenize_file_fn(file_path)
             tokenized_cells += file_tokenized_cells
-            if self.custom_attr_name_dict is not None:
+            if self.custom_attr_name_dict is not None and cell_metadata is not None:
                 for k in cell_attr:
                     cell_metadata[self.custom_attr_name_dict[k]] += file_cell_metadata[
                         k
