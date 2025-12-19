@@ -39,7 +39,6 @@ def run_training(
     dataset_path: str,
     gpdb_path: str,
     output_dir: str,
-    gp_similarity_file: Optional[str] = None,
     batch_size: int = 32,
     mgm: float = 0.15,
     tissue: Optional[str] = None,
@@ -57,7 +56,6 @@ def run_training(
     resume_training: Optional[bool] = False,
     gp_inputs: Optional[list] = None,
     frac_for_training: Optional[float] = 1.0,
-    lambda_gp_similarity: Optional[float] = 1e-2,
     global_loss: str = 'supervised',
     classification_labels: Optional[list] = None,
     global_attn_heads: Optional[int] = 8,
@@ -91,7 +89,6 @@ def run_training(
     limit_train_batches: Optional[float] = 1.0,
     limit_val_batches: Optional[float] = 1.0,
     val_check_interval: Optional[float] = 1.0,
-    mean_emb_dict: Optional[str] = None,
     use_pos_emb: Optional[str] = 'sin_cos',
     global_pos_emb: Optional[str] = 'sin_cos',
     use_onehot_wrapper: Optional[bool] = False,
@@ -111,95 +108,140 @@ def run_training(
     Parameters
     ----------
     dataset_path : str
-        path to input tokenized dataset
+        Path to input tokenized dataset
     gpdb_path : str
-        path to input gp database, a pandas csv where each column is a GP,
+        Path to input gp database, a pandas csv where each column is a GP,
         with GP names as column names
-    gp_similarity_file : str
-        path to input gp similarity file, a numpy array
-        where x[i,j] is the similarity between GP i and GP j
     output_dir : str
-        directory where we will dump our experiment's results.
-        If not given, then we will use the directory given as
-        the 'results_dir' in the config file.
-    batch_size : int
-        batch size
-    mgm : float
-        masking ratio for masked gene modeling ablation experiments
-    tissue : str
-        tissue name for logging experiment in wandb equivalent to
-        directory name in examples subfolder
-    n_heads : int
-        number of heads for multi-head attention
-    n_blocks : int
-        number of transformer blocks
-    lr_scheduler : str
-        learning rate scheduler for optimizer
-        nb this is a string which will be converted to a class
-    n_epochs : int
-        number of epochs to train for
-    gene_format : str
-        format in which gene names are stored in GPDB
-    model_type : str
-        One of Base, Supervised or Unsupervised Where unsupervised has an
-        extra self-attention head to learn a cell token based on GP tokens
-    strategy : str
-        strategy for multi-GPU lightning trainer
-    attn_dropout : float
-        Dropout for attention layers
-        NB only for final self attention block for now
-    lr : float
-        Model trainer learning rate
-    resume_training : bool
+        Directory where checkpoints and results will be saved
+    batch_size : int, default=32
+        Batch size for training
+    mgm : float, default=0.15
+        Masking ratio for masked gene modeling
+        ie what proportion of genes to mask during training
+    tissue : Optional[str], default=None
+        Tissue name for logging experiment in wandb
+    n_heads : int, default=8
+        Number of heads for multi-head attention in GP encoder
+    n_blocks : int, default=1
+        Number of transformer blocks in GP encoder
+    lr_scheduler : Literal['CosineLRwithWarmUp', 'ReduceLROnPlateau'],
+        default='ReduceLROnPlateau'
+        Learning rate scheduler for optimizer
+    n_epochs : int, default=20
+        Number of epochs to train for
+    gene_format : Literal['symbol', 'ensembl'], default='symbol'
+        Format in which gene names are stored in GPDB
+    model_type : str, default='Base'
+        One of 'Base', 'Global', 'Global_LoRA', or 'Mean'.
+        'Base' trains only the GP encoder. 'Global' adds a cell-level
+        transformer. 'Global_LoRA' uses LoRA for parameter-efficient training.
+        'Mean' uses gene program mean embeddings.
+    strategy : str, default='ddp_find_unused_parameters_true'
+        Strategy for multi-GPU PyTorch Lightning trainer
+    attn_dropout : float, default=0.0
+        Dropout rate for attention layers
+    lr : float, default=1e-3
+        Learning rate for optimizer
+    resume_training : Optional[bool], default=False
         Set to True to resume training from checkpoint
-    gp_inputs : list
-        Which GP from GPDB to include in model if None, defaults to all GP
-    frac_for_training : float
-        fraction of the dataset to use for training - default is 1.0
-        (development only)
-    n_blocks : int
-        number of transformer blocks
-    lambda_gp_similarity : float
-        weight for gp similarity loss
-    global_loss : str
-        loss function for global model
-    classification_labels : list
-        list of labels for supervised classification
-    supervised_labels : list
-        Dict {label : num_classes} for supervised classification
-        TO DO: provide either classification or supervised labels / check compatibility
-    global_attn_heads : int
-        number of heads for learning cell token
-    global_training : str
-        can be 'simultaneous' or 'sequential'
-        if 'sequential' will train global model after training base model
-        if 'simultaneous' will train global model at the same time as base model
-    path_to_base_model : str
-        path to pre-trained gpTransformer Base model for sequential training
-    learn_new_gp : bool
-        if True, load pretrained gpTransformer model, freeze,
-        and learn new gpTransformer block
-    gp_to_learn : list
-        list of GP to learn if learn_new_gp is True
-    global_n_blocks : int
-        number of transformer blocks for final transformer block
-    use_flash:
-        whether to use flash attention in transformer block
-
-    limit_val_batches : float
-        (Union[int, float, None]) How often to check the validation set.
-        Pass a float in the range [0.0, 1.0] to check after a fraction of
-        the training epoch. Pass an int to check after a fixed number of
-        training batches. An int value can only be higher than the number
-        of training batches when check_val_every_n_epoch=None, which
-        validates after every N training batches across epochs or during
-        iteration-based training. Default: 1.0.
-    val_check_interval : float
-        (Optional[int]) Perform a validation loop every after every N
-        training epochs. If None, validation will be done solely based
-        on the number of training batches, requiring val_check_interval
-        to be an integer value. Default: 1.
-        from https://github.com/EveryVoiceTTS/EveryVoice/issues/204
+    gp_inputs : Optional[list], default=None
+        List of GP names from GPDB to include in model. If None, uses all GP
+    frac_for_training : Optional[float], default=1.0
+        Fraction of the dataset to use for training (for development/testing)
+    global_loss : str, default='supervised'
+        Loss function for global model: 'supervised', 'masking', or 'reconstruction'
+    classification_labels : Optional[list], default=None
+        List of labels for supervised classification (deprecated, use supervised_labels)
+    global_attn_heads : Optional[int], default=8
+        Number of attention heads for learning cell token in global model
+    supervised_labels : Optional[dict], default=None
+        Dict mapping label names to number of classes for supervised classification
+    global_masking_rate : Optional[float], default=0.15
+        Masking rate for global model when using masking loss
+    global_attn_dropout : Optional[float], default=0.0
+        Dropout rate for attention layers in global model
+    global_training : str, default='simultaneous'
+        Training mode: 'simultaneous', 'sequential', 'finetune', 'finetune_global',
+        or 'finetune_gene_encoder'. Controls how base and global models are trained
+    path_to_base_model : Optional[str], default=None
+        Path to pre-trained model checkpoint for sequential/finetuning training
+    learn_new_gp : Optional[bool], default=False
+        If True, load pretrained model, freeze most parameters, and learn new GP
+    gp_to_learn : list, default=['novel_gp']
+        List of GP names to learn when learn_new_gp is True
+    global_n_blocks : int, default=1
+        Number of transformer blocks in global model
+    reconstruction_loss : Optional[str], default='nb'
+        Loss function for reconstruction: 'nb' (negative binomial) or 'mse'
+    adata_path : Optional[str], default=None
+        Path to AnnData object with gene expression
+        required for reconstruction loss
+    use_flash : Optional[bool], default=False
+        Whether to use flash attention in transformer blocks
+    weight_decay : float, default=0.0
+        Weight decay for optimizer
+    sampler : Optional[str], default=None
+        Sampling strategy for data loading
+        Options: 'weighted' for WeightedRandomSampler,
+        'length' for LengthGroupedSampler, or None.
+    sample_by : Optional[str], default=None
+        Column name in AnnData to sample by (used with sampler)
+    fm_encoder_name : str, default='gf-6L-30M-i2048'
+        Name of foundation model encoder to use
+    fm_encoder_pkg : str, default='geneformer'
+        Package for foundation model encoder: 'geneformer' or 'from_scratch'
+    peft_config_path : Optional[str], default=None
+        Path to PEFT (Parameter-Efficient Fine-Tuning) configuration file
+    seed : Optional[int], default=0
+        Random seed for reproducibility
+    data_seed : Optional[int], default=None
+        Random seed for data loading. If None, uses same as seed
+    supervised_rem_var : Optional[str], default=None
+        Variable to remove from supervised labels (currently unused)
+    num_nodes : int, default=1
+        Number of nodes for distributed training
+    prbm_path : Optional[str], default=None
+        Path to PRBM model (currently unused)
+    use_l2_norm : Optional[bool], default=False
+        Whether to use L2 normalization in model
+    gp_latent_size : Optional[int], default=None
+        Size of GP latent representation. If None, uses default from model
+    all_genes : Optional[list], default=None
+        List of all genes to consider. If provided, masks GP genes in gene encoder
+    init_sparsity : Optional[float], default=0.0
+        Initial sparsity level for sparse models
+    limit_train_batches : Optional[float], default=1.0
+        Fraction or number of training batches to use per epoch
+    limit_val_batches : Optional[float], default=1.0
+        Fraction or number of validation batches to use
+    val_check_interval : Optional[float], default=1.0
+        How often to check validation set. Float for fraction of epoch,
+        int for number of batches
+    use_pos_emb : Optional[str], default='sin_cos'
+        Type of positional embedding for gene encoder
+    global_pos_emb : Optional[str], default='sin_cos'
+        Type of positional embedding for global model
+    use_onehot_wrapper : Optional[bool], default=False
+        Whether to use one-hot encoding wrapper for gene encoder
+    vocab_gene_names : Optional[list], default=None
+        List of gene names in vocabulary for one-hot encoding
+    precision : int or str, default=32
+        Training precision: 32, 16, or 'bf16-mixed'
+    bert_config : Dict, default={}
+        Configuration dict for BERT model when training from scratch
+    use_gf_embeddings : Optional[bool], default=False
+        Whether to use Geneformer embeddings directly
+    calc_gp_loss : Optional[bool], default=True
+        Whether to calculate GP prediction loss
+    calc_gene_loss : Optional[bool], default=True
+        Whether to calculate gene-level loss
+    lora_config_args : Optional[dict], default=None
+        Configuration arguments for LoRA when using Global_LoRA model
+    warmup : Optional[int], default=0
+        Number of warmup steps for learning rate scheduler
+    accumulate_grad_batches : Optional[int], default=1
+        Number of batches to accumulate gradients over before updating weights
 
     """
 
@@ -295,27 +337,13 @@ def run_training(
             '\nMake sure you pass anndata object with log normalized counts'
         )
 
-    # and similarity file
-    if gp_similarity_file is not None:
-        gp_similarity = np.load(gp_similarity_file, allow_pickle=True)
-        gp_similarity = gp_similarity.astype('float32')
-
-        # filter to match gp_inputs
-        if gp_inputs is not None:
-            # get indices for gp_inputs
-            gp_idx = [gpdb.columns.get_loc(gp) for gp in gp_inputs]
-            gp_similarity = gp_similarity[gp_idx, :][:, gp_idx]
-
-    else:
-        gp_similarity = None
-
     ############################################################################
     # Train model
     ############################################################################
 
     model = configure_model(args)
 
-    pl_model = configure_lightning_module(model, gp_similarity, args)
+    pl_model = configure_lightning_module(model, args)
 
     # Optionally load pretrained model
     if resume_training:
@@ -374,6 +402,18 @@ def run_training(
 
 
 def configure_save_id(args) -> str:
+    """Define a unique ID to use in wandb logging and saving checkpoints.
+
+    Parameters
+    ----------
+    args : dict
+        Arguments dictionary with 'tissue' and 'model_type' keys.
+
+    Returns
+    -------
+    str
+        Unique save ID in format: YYYY-MM-DD_gp_transformer_<tissue>_<model_type>_<id>.
+    """
     tissue = args['tissue']
     supervised_tag = args['model_type']
 
@@ -392,6 +432,17 @@ def configure_save_id(args) -> str:
 
 @rank_zero_only
 def configure_wandb(args, save_id) -> None:
+    """Initialize Weights & Biases logging.
+
+    Only runs on rank 0 in distributed training.
+
+    Parameters
+    ----------
+    args : dict
+        Arguments dictionary with 'output_dir' key.
+    save_id : str
+        Unique experiment identifier.
+    """
     output_dir = args['output_dir']
     wandb_dir = os.path.join(output_dir, 'wandb_logs')
 
@@ -403,6 +454,21 @@ def configure_wandb(args, save_id) -> None:
 
 
 def configure_callbacks(save_id, args):
+    """Configure PyTorch Lightning callbacks for training.
+
+    Parameters
+    ----------
+    save_id : str
+        Unique experiment identifier.
+    args : dict
+        Arguments dictionary with 'model_type', 'global_loss', 'output_dir',
+        and other training configuration.
+
+    Returns
+    -------
+    tuple
+        (early_stopping_callback, checkpoint_callback, lr_monitor)
+    """
     model_type = args['model_type']
     global_loss = args['global_loss']
     output_dir = args['output_dir']
@@ -458,6 +524,20 @@ def configure_callbacks(save_id, args):
 
 @rank_zero_only
 def configure_logger(args):
+    """Configure Weights & Biases logger for training.
+
+    Only runs on rank 0 in distributed training.
+
+    Parameters
+    ----------
+    args : dict
+        Arguments dictionary with training configuration.
+
+    Returns
+    -------
+    WandbLogger
+        Configured Weights & Biases logger.
+    """
     # create a logger to log training progress
     wandb_logger = WandbLogger(log_model=True)
 
@@ -477,8 +557,6 @@ def configure_logger(args):
             'transformer_block': 'preLN',
             'learning_rate': args['lr'],
             'frac_for_training': args['frac_for_training'],
-            'use_gp_similarity_loss': args['gp_similarity_file'] is not None,
-            'lambda_gp_similarity': args['lambda_gp_similarity'],
             'use_flash': args['use_flash'],
             'weight_decay': args['weight_decay'],
             'use_onehot_wrapper': args['use_onehot_wrapper'],
@@ -537,6 +615,19 @@ def configure_logger(args):
 
 
 def configure_model(args):
+    """Configure model based on arguments.
+
+    Parameters
+    ----------
+    args : dict
+        Arguments dictionary with model configuration including 'model_type',
+        'gpdb', and other model parameters.
+
+    Returns
+    -------
+    nn.Module
+        Configured model (gpTransformerBase, gpTransformerGlobal, or gfGlobal).
+    """
     common_params = {
         'database': args['gpdb'],
         'n_blocks': args['n_blocks'],
@@ -587,17 +678,29 @@ def configure_model(args):
         return model
 
 
-def configure_lightning_module(model, gp_similarity, args):
+def configure_lightning_module(model, args):
+    """Configure PyTorch Lightning module.
+    This is where architecture arguments are passed to the model.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Base model to wrap.
+    args : dict
+        Arguments dictionary with training configuration.
+
+    Returns
+    -------
+    pl.LightningModule
+        Lightning module wrapper (gpBase or gpGlobal).
+    """
     common_params = {
         'model': model,
         # 'model_type': args['model_type'],
         'lr': args['lr'],
         'total_epochs': args['n_epochs'],
         'lr_scheduler': args['lr_scheduler'],
-        'use_gp_similarity_loss': gp_similarity is not None,
-        'gp_similarity': gp_similarity,
         'output_dir': args['output_dir'],
-        'lambda_gp_similarity': args['lambda_gp_similarity'],
         'weight_decay': args['weight_decay'],
         'optimizer': torch.optim.AdamW,  # DeepSpeedCPUAdam
         # if args['strategy'].startswith('deepspeed')
@@ -632,15 +735,28 @@ def configure_lightning_module(model, gp_similarity, args):
 
 
 def load_from_ckpt(mode, pl_model, args):
-    '''
-    Load pretrained model
+    """Load model weights from checkpoint.
 
-    Mode can be one of:
-    - 'resume_training'
-    - 'sequential'
-    - 'finetune'
+    Parameters
+    ----------
+    mode : {'resume_training', 'sequential', 'finetune'}
+        Loading mode determining which weights to load and freeze.
+        - 'resume_training': Resume training from last checkpoint
+        - 'sequential': Load pretrained model for sequential training
+            in this case, existing weights are loaded and base model
+            is frozen
+        - 'finetune': Load model for fine-tuning
+    pl_model : pl.LightningModule
+        Lightning module to load weights into.
+    args : dict
+        Arguments dictionary with checkpoint path information including
+        'output_dir', 'tissue', 'model_type', and 'path_to_base_model'.
 
-    '''
+    Returns
+    -------
+    pl.LightningModule
+        Model with loaded weights.
+    """
 
     output_dir = args['output_dir']
     tissue = args['tissue']

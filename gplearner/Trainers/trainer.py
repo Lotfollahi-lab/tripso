@@ -19,17 +19,16 @@ from datasets import Dataset, concatenate_datasets
 from peft import LoraConfig, get_peft_model
 from scipy import sparse
 from scipy.sparse import csr_matrix
-from sklearn.metrics import classification_report, roc_auc_score
+from sklearn.metrics import classification_report
 from sklearn.metrics.pairwise import cosine_similarity
 from torch import optim
 from torchmetrics import MeanSquaredError
 
-from ..Models.gp_model import EmbEvaluatorHead, gpTransformerBase
-from ..Utils.losses import compute_count_loss, compute_gp_similarity_loss
+from ..Models.gp_model import gpTransformerBase
+from ..Utils.losses import compute_count_loss
 from ..Utils.utils import (
     CosineLRwithWarmUp,
     evaluate_gene_expr_reconstruction,
-    get_gp_tokens,
     wrangle_classification_report,
 )
 
@@ -40,73 +39,87 @@ from ..Utils.utils import (
 
 class gpBase(pl.LightningModule):
     """
-    Description:
-    ------------
-    Trainer for gpTransformer model with tokenized scRNA-seq dataset as input.
-    This module encompasses the following steps:
-    1. Initialise model
-    2. Define training, validation and test step
-    3. Define optimizer
-    4. Define loss function
-    5. Define metrics
+    Base trainer for gene program transformer models.
 
-    Parameters:
-    -----------
-    model: gpTransformer
-        instantiated class of gpTransformer model
-        (either Base, Supervised or Unsupervised)
+    PyTorch Lightning module for training the GPformer base model.
+    The core components are a gene encoder and multiple gene program encoders.
 
-    model_type:
-        Mean : learn GP representations by averaging representations
-        Base : use individual transformer blocks to learn GP representations
-        Global : additionally learn a global cell token
+    The trainer supports:
+    - Masked gene modeling (MGM) for learning gene program representations
+    - Optional masked gene modeling for gene encoder
+    - Flexible learning rates and optimizers
+    - Attention weight extraction
+    - Gene embedding extraction and cosine similarity computation
 
-    model_loss:
-        loss function for learning global cell token
-        only supervised implemented for now
+    Args:
+        model (gpTransformerBase):
+            Instantiated gene program transformer model.
+        output_dir (str, optional):
+            Directory to save outputs. Defaults to '/path/to/output'.
 
-    lambda_clf_loss:
-        dictionary of form {label_name : value} weighting classification loss
+        --- Model training ---
 
-    output_dir:
-        path to save outputs
+        lr (Union[float, Dict], optional): Learning rate.
+        weight_decay (float, optional): L2 regularization weight decay.
+            Defaults to 0.
+        optimizer (optim.Optimizer, optional): PyTorch optimizer class
+        lr_scheduler (str, optional): Learning rate scheduler
+            ('ReduceLROnPlateau' or 'CosineLRwithWarmUp').
+            Defaults to 'ReduceLROnPlateau'.
+        total_epochs (int, optional): Total number of training epochs.
+            Defaults to 20.
+        hparam_save (str, optional): Whether to save all hyperparameters
+            ('all' or other). Defaults to 'all'.
+        set_gpfinder_weight_decay (float, optional): Special weight decay
+            for gpfinder. Defaults to None.
+        calc_gp_loss (bool, optional): Whether to calculate gene program
+            masking loss. Defaults to True.
+        calc_gene_loss (bool, optional): Whether to calculate gene encoder
+            masking loss. Defaults to False.
+        warmup (int, optional): Number of epochs during which only gene
+            encoder loss is calculated. Defaults to 0.
 
-    use_gp_similarity_loss:
-        whether to use GP similarity loss
+        --- Evaluation ---
 
-    lambda_gp_similarity:
-        weight for GP similarity loss
+        gp (str, optional): Gene program of interest for extraction. Defaults to None.
+        gp_for_downstream (str, optional): Gene program to use for
+            downstream analysis. Defaults to None.
+        save_emb (bool, optional): Whether to save embeddings at test time.
+        split_label (str, optional): Data split label ('train', 'val',
+            'test'). Defaults to 'train'.
+        return_mean_non_padding (bool, optional): Whether to return mean
+            of non-padding tokens instead of CLS token. Defaults to False.
 
-    gp_similarity:
-        path to file containing GP similarity matrix
+        --- Gene embeddings ---
 
-    lr:
-        learning rate
+        return_gene_embeddings (bool, optional): Whether to extract gene
+            embeddings at test time. Defaults to False.
+        return_gene_cosim (str, optional): (for gene embeddings)
+            if None, returns embeddings directly.
+            if 'gene_to_gp', computes gene-to-gene program cosine similarity.
+            if 'gene_to_gene', computes gene-to-gene cosine similarity.
+        tokens_to_keep (List, optional): List of gene token IDs to
+            extract embeddings for.
+            Defaults to None.
+            When None, extracts all gene tokens.
+        genes_to_keep (List, optional): List of gene names to keep.
+            Defaults to None.
+        token_to_gene_to_keep_dict (Dict, optional):
+            Mapping from token IDs to gene names.
+            Defaults to None.
+        gene_dir_tag (str, optional): Tag for gene embedding output directory.
+            If None (default) uses output_dir.
 
-    return_classification_report:
-        whether to return classification report at test time
-        set to False if not using supervised learning
-        or if test data does not contain true labels
+        --- Attention matrix ---
 
-    Returns:
-    --------
-
+        return_attention (bool, optional): Whether to return attention
+            weights. Defaults to False.
     """
 
     def __init__(
         self,
         model: gpTransformerBase,
         output_dir: str = '/path/to/output',
-        # GP similarity -> force cosine similarity of <GP> towards
-        # similarity (defined by GP overlap)
-        use_gp_similarity_loss: bool = False,
-        lambda_gp_similarity=1e-2,
-        gp_similarity: Optional[str] = None,
-        # Use GO -> regularize attention matrix towards GO importance
-        use_go_similarity_loss: bool = False,
-        lambda_go_similarity=1e-2,
-        go_similarity: Optional[pd.DataFrame] = None,
-        go_similarity_gp: Optional[str] = 'hvg',  # GP to apply GO similarity loss:
         lr: Union[float, Dict] = 1e-3,
         weight_decay: float = 0,
         optimizer: Union[
@@ -116,7 +129,7 @@ class gpBase(pl.LightningModule):
             # DeepSpeedCPUAdam
         ] = optim.AdamW,
         lr_scheduler='ReduceLROnPlateau',
-        total_epochs: int = 100,
+        total_epochs: int = 20,
         return_gene_embeddings: bool = False,
         return_gene_cosim: Optional[str] = None,
         tokens_to_keep: Optional[List] = None,
@@ -150,60 +163,6 @@ class gpBase(pl.LightningModule):
         self.calc_gp_loss = calc_gp_loss
         self.calc_gene_loss = calc_gene_loss
         self.warmup = warmup
-
-        if use_gp_similarity_loss and gp_similarity is None:
-            raise ValueError(
-                'If use_gp_similarity_loss is True, gp_similarity_file must be provided'
-            )
-
-        self.use_gp_similarity_loss = use_gp_similarity_loss
-        self.gp_similarity = gp_similarity
-        self.lambda_gp_similarity = lambda_gp_similarity
-        self.go_similarity_gp = go_similarity_gp
-
-        if use_go_similarity_loss and go_similarity is None:
-            raise ValueError(
-                'If use_go_similarity_loss is True, go_similarity_file must be provided'
-            )
-
-        self.use_go_similarity_loss = use_go_similarity_loss
-        self.lambda_go_similarity = lambda_go_similarity
-        self.go_similarity_gp = go_similarity_gp
-
-        if go_similarity is not None:
-            go_similarity_tensor = torch.tensor(go_similarity.values).float()
-            self.register_buffer('go_similarity', go_similarity_tensor)
-
-            self.go_genes = go_similarity.index
-
-            # Check order of genes
-            gp_index = self.model.gp_inputs.index(go_similarity_gp)
-            gp_tokens = (
-                (getattr(self.model.multi_gp_encoder, f'gp{gp_index}_tokens'))
-                .cpu()
-                .numpy()
-            )
-
-            # Convert go genes to tokens
-            go_tokens = np.array(
-                list(
-                    get_gp_tokens(
-                        pd.Series(go_similarity.index),
-                        do_ensembl_conversion=self.model.do_ensembl_conversion,
-                        gp_name=go_similarity_gp,
-                        gene_token_path=self.model.gene_token_path,
-                        gene_name_path=self.model.gene_name_path,
-                    )
-                )
-            )
-
-            # Check identical:
-            assert np.all(gp_tokens == go_tokens), 'GO genes do not match GP tokens'
-
-        else:
-            self.go_similarity = go_similarity
-
-        self.lambda_gp_similarity = lambda_gp_similarity
 
         # configuring optimizers
         self.lr = lr
@@ -668,23 +627,6 @@ class gpBase(pl.LightningModule):
             'loss_per_gp': gp_loss_dict,
         }
 
-        if self.use_gp_similarity_loss:
-            gp_similarity_loss = compute_gp_similarity_loss(
-                output['z'], self.gp_similarity
-            )
-            loss += self.lambda_gp_similarity * gp_similarity_loss
-            holder['gp_similarity_loss'] = gp_similarity_loss
-
-        if self.use_go_similarity_loss:
-            # only implemented for single GP for now
-            # otherwise would need one matrix per GP
-            gp_idx = self.model.gp_inputs.index(self.go_similarity_gp)
-            output_attn = self.model.get_last_self_attn(batch, gp_idx)
-
-            go_similarity_loss = F.mse_loss(output_attn['attn'], self.go_similarity)
-            loss += self.lambda_go_similarity * go_similarity_loss
-            holder['go_similarity_loss'] = go_similarity_loss
-
         holder['total_loss'] = loss
 
         return holder
@@ -995,17 +937,6 @@ class gpGlobal(gpBase):
                 # Reset for next epoch
                 self.train_pearson_corrs = []
 
-            # TODO : properly sample the counts
-            # mse = self.metric['mse'](pred_counts, true_counts)
-            # mean_mse = torch.mean(mse)
-            # self.log(
-            #     'train/mse',
-            #     mean_mse,
-            #     on_epoch=True,
-            #     prog_bar=True,
-            #     logger=True,
-            # )
-
         # empty lists
         self.train_true_counts_list = []
         self.train_pred_counts_list = []
@@ -1018,9 +949,6 @@ class gpGlobal(gpBase):
             masking=self.calc_gp_loss,
             masking_global=self.global_loss == 'masking',
         )
-
-        # track_tissue = pd.Series(batch['tissue'])
-        # print('Ground truth tissue', track_tissue.value_counts())
 
         if self.calc_gp_loss:
             loss_base = super().compute_gp_loss(batch, output)
@@ -1155,17 +1083,6 @@ class gpGlobal(gpBase):
 
                 # Reset for next epoch
                 self.val_pearson_corrs = []
-
-            # TODO : properly sample the counts
-            # mse = self.metric['mse'](pred_counts, true_counts)
-            # mean_mse = torch.mean(mse)
-            # self.log(
-            #     'val/mse',
-            #     mean_mse,
-            #     on_epoch=True,
-            #     prog_bar=True,
-            #     logger=True,
-            # )
 
         # empty lists
         self.val_true_counts_list = []
@@ -1419,6 +1336,14 @@ class gpGlobalLoRA(gpGlobal):
 
 class gpAblation(gpGlobal):
     def __init__(self, compute_cosine=False, compute_delta_nb_loss=False, **kwargs):
+        """
+        Trainer for computing ablation metrics by perturbing gene programs.
+        compute_cosine: whether to compute cosine similarity between
+            control and perturbed cell embeddings.
+        compute_delta_nb_loss: whether to compute delta reconstruction loss between
+            control and perturbed reconstructions.
+
+        """
         super().__init__(**kwargs)
         self.compute_cosine = compute_cosine
         self.compute_delta_nb_loss = compute_delta_nb_loss
@@ -1561,7 +1486,7 @@ class gpAblation(gpGlobal):
                 perturbed_output = output.copy()
                 perturbed_output['cell_token'] = encoder_output['cls']
 
-                # CRITICAL: Re-compute count_output with the new cell token
+                # Re-compute count_output with the new cell token
                 perturbed_output['count_output'] = self.model.count_head(
                     encoder_output['cls']
                 )
@@ -1659,311 +1584,6 @@ class gpAblation(gpGlobal):
             self.delta_nb_loss_adata = None
 
         return None
-
-
-# Prompt trainer not implemented
-# --> see previous code for classification head
-# specific for virtual tokens
-# maybe need function to return_virtual_tokens too?
-
-
-########################################
-# For evaluating learned embeddings
-########################################
-
-
-class EmbEvaluator(pl.LightningModule):
-    def __init__(
-        self,
-        n_classes,
-        emb_dim,
-        task,
-        lr,
-        emb_label,
-        y_label,
-        output_dir,
-        filter_tag,
-        num_condition_cat=0,
-    ):
-        super().__init__()
-        self.save_hyperparameters()
-
-        self.evaluator_head = EmbEvaluatorHead(emb_dim, n_classes, num_condition_cat)
-        self.emb_label = emb_label
-
-        if task == 'classification':
-            # add id tag for encoded covariate
-            if not y_label.endswith('_id'):
-                y_label = f'{y_label}_id'
-        self.y_label = y_label
-        self.task = task
-        self.output_dir = output_dir
-        self.filter_tag = filter_tag
-
-        if task == 'classification':
-            self.loss_fn = nn.CrossEntropyLoss()
-        elif task == 'regression':
-            self.loss_fn = nn.MSELoss()
-        else:
-            raise ValueError('Task must be either classification or regression')
-
-        self.lr = lr
-
-        # for tracking
-        self.y_unencoded = []
-        for stage in ['train', 'val', 'test']:
-            setattr(self, f'{stage}_pred', [])
-            setattr(self, f'{stage}_true', [])
-
-    def forward(self, x):
-        return self.evaluator_head(x)
-
-    def training_step(self, batch, batch_idx):
-        x = batch[self.emb_label]
-        y = batch[self.y_label]
-
-        y_out = self.evaluator_head(x)
-
-        loss = self.loss_fn(y_out, y)
-
-        self.log(
-            'train_loss',
-            loss,
-            on_step=True,
-            on_epoch=True,
-            logger=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
-
-        self.train_pred.append(y_out)
-        self.train_true.append(y)
-
-        return loss
-
-    def on_train_epoch_end(self):
-        # calculate accuracy
-        if self.task == 'classification':
-            pred = torch.cat(self.train_pred)
-            true = torch.cat(self.train_true)
-            acc = (pred.argmax(dim=1) == true).float().mean()
-            self.log(
-                'train_accuracy',
-                acc,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-            )
-
-        elif self.task == 'regression':
-            pred = torch.cat(self.train_pred)
-            true = torch.cat(self.train_true)
-            mse = self.loss_fn(pred, true)
-            self.log('train_mse', mse, on_epoch=True, prog_bar=True, logger=True)
-
-            # calculate pearson correlation
-            pearson = torch.corrcoef(pred.T, true.T)[0, 1]
-            self.log(
-                'train_pearson', pearson, on_epoch=True, prog_bar=True, logger=True
-            )
-
-        # reset
-        self.train_pred = []
-        self.train_true = []
-
-    def validation_step(self, batch, batch_idx):
-        x = batch[self.emb_label]
-
-        y = batch[self.y_label]
-
-        y_out = self.evaluator_head(x)
-
-        loss = self.loss_fn(y_out, y)
-        self.log(
-            'val_loss',
-            loss,
-            on_step=False,
-            on_epoch=True,
-            logger=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
-
-        self.val_pred.append(y_out)
-        self.val_true.append(y)
-
-        return loss
-
-    def on_validation_epoch_end(self):
-        # calculate accuracy
-        if self.task == 'classification':
-            pred = torch.cat(self.val_pred)
-            true = torch.cat(self.val_true)
-            acc = (pred.argmax(dim=1) == true).float().mean()
-            self.log('val_accuracy', acc, on_epoch=True, prog_bar=True, logger=True)
-
-        elif self.task == 'regression':
-            pred = torch.cat(self.val_pred)
-            true = torch.cat(self.val_true)
-            mse = self.loss_fn(pred, true)
-            self.log('val_mse', mse, on_epoch=True, prog_bar=True, logger=True)
-
-            # calculate pearson correlation
-            pearson = torch.corrcoef(pred, true)[0, 1]
-            self.log('val_pearson', pearson)
-
-        # reset
-        self.val_pred = []
-        self.val_true = []
-
-    def test_step(self, batch, batch_idx):
-        x = batch[self.emb_label]
-
-        y = batch[self.y_label]
-
-        label_name = self.y_label
-        label_name = label_name.replace('_id', '')
-        y_unencoded = batch[label_name]
-
-        y_out = self.evaluator_head(x)
-
-        self.test_pred.append(y_out)
-        self.test_true.append(y)
-        self.y_unencoded += y_unencoded
-
-    def on_test_epoch_end(self):
-        # calculate accuracy
-        if self.task == 'classification':
-            pred = torch.cat(self.test_pred)
-            true = torch.cat(self.test_true)
-            acc = (pred.argmax(dim=1) == true).float().mean()
-            self.log('test_accuracy', acc)
-
-            # output classification report
-            true_classes = true.cpu().numpy()
-            predicted_classes = pred.argmax(dim=1).cpu().numpy()
-            report = classification_report(
-                true_classes, predicted_classes, output_dict=True
-            )
-
-            output_df = wrangle_classification_report(report)
-
-            output_df = output_df[
-                ~output_df['output_class'].isin(['macro avg', 'weighted avg'])
-            ]
-
-            # ---------- Calculate ROC-AUC -----------------
-            # count number of nan values
-            pred_np = pred.cpu().numpy()
-            idx = np.isnan(pred_np).any(axis=1)
-            nans = idx.sum()
-            if nans > 0:
-                print('Number of nan values:', nans)
-
-            # drop rows with nan
-            warnings.warn(
-                f'Dropping {len(idx)} nan values (out of {true_classes.shape[0]})'
-                'for ROC-AUC calculation'
-            )
-            pred = pred[~idx]
-            true_classes = true_classes[~idx]
-
-            # Apply softmax with numerical stability
-            max_pred = torch.max(pred, dim=-1, keepdim=True)[0]
-            stabilized_pred = pred - max_pred
-            class_proba = F.softmax(stabilized_pred, dim=-1).cpu().numpy()
-
-            # check if multiclass
-            if len(np.unique(true_classes)) > 2:
-                roc_auc = roc_auc_score(
-                    true_classes, class_proba, multi_class='ovr', average=None
-                )
-                roc_df = pd.DataFrame(
-                    {
-                        'class': np.unique(true_classes),
-                        'roc_auc': roc_auc,
-                    }
-                )
-
-                output_df['output_class'] = output_df['output_class'].astype(int)
-                output_df = output_df.join(roc_df.set_index('class'), on='output_class')
-
-            else:
-                # Extract the probabilities for the positive class (class 1)
-                y_score_positive_class = class_proba[:, 1]
-                roc_auc = roc_auc_score(true_classes, y_score_positive_class)
-                output_df['roc_auc'] = roc_auc
-
-            # ---------- Wrangle output -----------------
-            # convert labels back to original strings
-            original_labels = self.y_unencoded
-            conversion_df = pd.DataFrame(
-                {
-                    'encoded': true_classes,
-                    'original': original_labels,
-                }
-            ).drop_duplicates()
-
-            conversion_dict = {
-                str(k): v
-                for k, v in zip(conversion_df['encoded'], conversion_df['original'])
-            }
-
-            output_df['output_class'] = output_df['output_class'].astype(str)
-            output_df['output_class'] = output_df['output_class'].map(conversion_dict)
-
-            # check output directory exists
-            if not os.path.exists(os.path.join(self.output_dir, 'cell_metrics')):
-                os.makedirs(
-                    os.path.join(self.output_dir, 'cell_metrics'), exist_ok=True
-                )
-
-            output_df.to_csv(
-                os.path.join(
-                    self.output_dir,
-                    f'cell_metrics/{self.y_label}_from_{self.emb_label}'
-                    f'{self.filter_tag}.csv',
-                ),
-                index=False,
-            )
-
-        elif self.task == 'regression':
-            pred = torch.cat(self.test_pred)
-            true = torch.cat(self.test_true)
-            mse = self.loss_fn(pred, true)
-            self.log('test_mse', mse)
-
-            # calculate pearson correlation
-            pearson = torch.corrcoef(pred, true)[0, 1]
-            self.log('test_pearson', pearson)
-
-            # output to csv
-            df = pd.DataFrame(
-                {
-                    'MSE': [mse.item()],
-                    'Pearson': [pearson.item()],
-                    'Max true': [true.max().item()],
-                    'Max pred': [pred.max().item()],
-                    'Min true': [true.min().item()],
-                    'Min pred': [pred.min().item()],
-                }
-            )
-
-            df.to_csv(
-                os.path.join(
-                    self.output_dir,
-                    f'cell_metrics/{self.y_label}_from_{self.emb_label}.csv',
-                ),
-                index=False,
-            )
-
-        # reset
-        self.test_pred = []
-        self.test_true = []
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
-        return optimizer
 
 
 if __name__ == '__main__':

@@ -23,8 +23,19 @@ logger = logging.getLogger(__name__)
 
 
 def rank_genes(gene_vector, gene_tokens):
-    """
-    Rank gene expression vector.
+    """Rank genes by expression values.
+
+    Parameters
+    ----------
+    gene_vector : np.ndarray
+        Gene expression values.
+    gene_tokens : np.ndarray
+        Corresponding gene token IDs.
+
+    Returns
+    -------
+    np.ndarray
+        Gene tokens sorted by descending expression values.
     """
     # sort by median-scaled gene values
     sorted_indices = np.argsort(-gene_vector)
@@ -40,9 +51,24 @@ def sum_ensembl_ids(
     file_format='loom',
     chunk_size=512,
 ):
-    """
-    Map Ensembl IDs from gene mapping dictionary.
-    If duplicate Ensembl IDs are found, sum counts together.
+    """Map and collapse Ensembl IDs, summing duplicate counts.
+
+    Parameters
+    ----------
+    data_directory : str
+        Directory containing data files.
+    collapse_gene_ids : bool
+        Whether to collapse duplicate gene IDs.
+    gene_mapping_dict : dict
+        Dictionary mapping gene names to Ensembl IDs.
+    gene_token_dict : dict
+        Dictionary mapping Ensembl IDs to tokens.
+    custom_attr_name_dict : dict
+        Dictionary of custom attribute names.
+    file_format : {'loom', 'h5ad'}, optional
+        Format of input files (default: 'loom').
+    chunk_size : int, optional
+        Number of files to process per chunk (default: 512).
     Returns adata object with deduplicated Ensembl IDs.
     """
 

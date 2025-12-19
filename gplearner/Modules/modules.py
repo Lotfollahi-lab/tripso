@@ -19,15 +19,11 @@ Mostly copy-paste from timm library.
 https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
 """
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-
-# from flash_attn import flash_attn_func
-from torch import Tensor
 
 from ..Utils.utils import (
     drop_path,
@@ -72,9 +68,14 @@ class ReduceDim(nn.Module):
 
 
 class DropPath(nn.Module):
-    """
-    Drop paths (Stochastic Depth) per sample
-    (when applied in main path of residual blocks).
+    """Drop paths (Stochastic Depth) per sample.
+
+    Applies stochastic depth when used in main path of residual blocks.
+
+    Parameters
+    ----------
+    drop_prob : float or None, optional
+        Probability of dropping a path (default: None).
     """
 
     def __init__(self, drop_prob=None):
@@ -282,9 +283,17 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
-        """
-        Arguments:
-            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """Forward pass with positional encoding.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape (batch_size, seq_len, embedding_dim).
+
+        Returns
+        -------
+        torch.Tensor
+            Input with added positional encoding and dropout applied.
         """
 
         pe = self.pe[:, : x.size(1)]  # (1, seq_len, 512)
@@ -311,105 +320,87 @@ class LearntPositionalEncoding(nn.Module):
         return x + self.position_embeddings(position_ids)
 
 
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
-
-class RotaryPositionalEmbeddings(nn.Module):
-    """
-    This class implements Rotary Positional Embeddings (RoPE)
-    proposed in https://arxiv.org/abs/2104.09864.
-
-    Reference implementation (used for correctness verfication)
-    can be found here:
-    https://github.com/facebookresearch/llama/blob/main/llama/model.py#L450
-
-    In this implementation we cache the embeddings for each position upto
-    ``max_seq_len`` by computing this during init.
-
-    Args:
-        dim (int): Embedding dimension. This is usually set to the dim of each
-            head in the attention module computed as ````embed_dim`` // ``num_heads````
-        max_seq_len (int): Maximum expected sequence length for the
-            model, if exceeded the cached freqs will be recomputed
-        base (int): The base for the geometric progression used to compute
-            the rotation angles
-
-    From https://pytorch.org/torchtune/0.1/_modules/torchtune/modules/
-    position_embeddings.html#RotaryPositionalEmbeddings
-
-    accessed 11/10/2024
-
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        max_seq_len: int = 4096,
-        base: int = 10_000,
-    ) -> None:
-        super().__init__()
-        self.dim = dim
-        self.base = base
-        self.max_seq_len = max_seq_len
-        self._rope_init()
-
-    # We need to explicitly define reset_parameters for FSDP initialization, see
-    # https://github.com/pytorch/pytorch/blob/
-    # 797d4fbdf423dd9320ebe383fb57ffb1135c4a99/torch/distributed/fsdp/_init_utils.py#L885
-    def reset_parameters(self):
-        self._rope_init()
-
-    def _rope_init(self):
-        theta = 1.0 / (
-            self.base
-            ** (torch.arange(0, self.dim, 2)[: (self.dim // 2)].float() / self.dim)
-        )
-        self.register_buffer('theta', theta, persistent=False)
-        self.build_rope_cache(self.max_seq_len)
-
-    def build_rope_cache(self, max_seq_len: int = 4096) -> None:
-        # Create position indexes `[0, 1, ..., max_seq_len - 1]`
-        seq_idx = torch.arange(
-            max_seq_len, dtype=self.theta.dtype, device=self.theta.device
-        )
-
-        # Outer product of theta and position index; output tensor has
-        # a shape of [max_seq_len, dim // 2]
-        idx_theta = torch.einsum('i, j -> ij', seq_idx, self.theta).float()
-
-        # cache includes both the cos and sin components and so the output shape is
-        # [max_seq_len, dim // 2, 2]
-        # modified to return cos and sin separately
-        # cache = torch.stack([torch.cos(idx_theta), torch.sin(idx_theta)], dim=-1)
-        # self.register_buffer("cache", cache, persistent=False)
-
-        cache_cos = torch.cos(idx_theta)
-        cache_sin = torch.sin(idx_theta)
-
-        # convert to bf16
-        cache_cos = cache_cos.to(torch.bfloat16)
-        cache_sin = cache_sin.to(torch.bfloat16)
-
-        self.register_buffer('cache_cos', cache_cos, persistent=False)
-        self.register_buffer('cache_sin', cache_sin, persistent=False)
-
-    def forward(self, x: Tensor, input_pos: Optional[Tensor] = None) -> Tensor:
-        pass
-
-    # pytorch implementation returns tensor with RoPE already applied
-
-
 # --------------------------------------------------------------------
 # Main encoder class
 # --------------------------------------------------------------------
 
 
 class gpTransformerEncoder(nn.Module):
-    """GP Transformer main block"""
+    """Gene Program Transformer Encoder.
+
+    Building block transformer encoder for the GPformer model, supporting
+    masked language modeling, multiple attention mechanisms, and flexible
+    positional encodings.
+
+    Parameters
+    ----------
+    n_gp_tokens : int
+        Number of gene program tokens in the vocabulary.
+    depth : int
+        Number of transformer blocks.
+    mlm_masking_prob : float
+        Probability of masking tokens for masked language modeling.
+    embed_dim : int, optional
+        Embedding dimension (default: 512).
+    num_heads : int, optional
+        Number of attention heads (default: 1).
+    mlp_ratio : float, optional
+        Ratio of MLP hidden dimension to embedding dimension (default: 0.5).
+    qkv_bias : bool, optional
+        Whether to add bias to QKV projection (default: False).
+    qk_scale : float or None, optional
+        Scale factor for attention scores. If None, uses 1/sqrt(head_dim)
+        (default: None).
+    drop_rate : float, optional
+        Dropout rate for position embeddings (default: 0.0).
+    attn_drop_rate : float, optional
+        Dropout rate for attention weights (default: 0.0).
+    drop_path_rate : float, optional
+        Stochastic depth rate (default: 0.0).
+    norm_layer : nn.Module, optional
+        Normalization layer class (default: nn.LayerNorm).
+    use_pos_emb : {'sin_cos', 'learned', 'absolute', None}, optional
+        Type of positional embedding. 'sin_cos' uses sinusoidal embeddings,
+        'learned' uses learned embeddings, 'absolute' uses BERT-style
+        embeddings, None uses no positional encoding (default: 'sin_cos').
+    vocab_size : int or None, optional
+        Size of vocabulary for decoder. If None, uses n_gp_tokens
+        (default: None).
+    use_flash : bool, optional
+        Whether to use flash attention (default: False).
+    seq_len : int, optional
+        Maximum sequence length (default: 2048).
+    use_l2_norm : bool, optional
+        Whether to use L2 normalization instead of LayerNorm (default: False).
+    output_dim : int or None, optional
+        Output dimension. If None, uses embed_dim. If output_dim != embed_dim,
+        an MLP layer is added to project to output_dim (default: None).
+    no_mask_tokens : list, optional
+        List of token IDs that should not be masked during MLM
+        (default: [None]).
+    sparsity : float, optional
+        Sparsity level for weight initialization, where 0.0 is fully dense
+        (default: 0.0).
+
+    Attributes
+    ----------
+    embed_dim : int
+        Stored embedding dimension.
+    output_dim : int
+        Stored output dimension.
+    cls_token : nn.Parameter
+        Learnable CLS token.
+    mask_emb : nn.Parameter
+        Learnable mask embedding for MLM.
+    pos_embed : nn.Module
+        Positional embedding module.
+    blocks : nn.ModuleList
+        List of transformer blocks.
+    decoder : nn.Linear
+        Linear decoder for masked language modeling.
+    mask_generator : callable
+        Function for generating MLM masks.
+    """
 
     def __init__(
         self,
@@ -521,12 +512,18 @@ class gpTransformerEncoder(nn.Module):
             self.apply(self._init_weights)
 
     def sparse_init(self, m, std=0.01):
-        """
-        Initialize the tensor with sparsity and standard deviation for non-zero values.
-        Parameters:
-        tensor (torch.Tensor): The weight tensor to be initialized.
-        sparsity (float): Fraction of elements set to zero
-        std (float): Standard deviation of the non-zero elements.
+        """Initialize layer weights with sparsity.
+
+        Parameters
+        ----------
+        m : nn.Module
+            Layer to initialize (Linear or LayerNorm).
+        std : float, optional
+            Standard deviation for non-zero weight values (default: 0.01).
+
+        Notes
+        -----
+        Uses self.sparsity to determine fraction of elements set to zero.
         """
         if isinstance(m, nn.Linear):
             with torch.no_grad():
@@ -554,6 +551,24 @@ class gpTransformerEncoder(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def random_gene_masking(self, x, gene_labels):
+        """Apply random masking to gene tokens for masked language modeling.
+
+        Masks a subset of tokens according to the masking probability, replacing them
+        with mask embeddings or random tokens. Updates labels to only compute loss on
+        masked tokens.
+
+        Args:
+            x (torch.Tensor): Input embeddings of shape
+                (batch_size, seq_len, embed_dim).
+            gene_labels (torch.Tensor): Gene labels of shape (batch_size,
+                seq_len).
+
+        Returns:
+            tuple: A tuple containing:
+                - x (torch.Tensor): Masked input embeddings.
+                - gene_labels (torch.Tensor): Updated labels with -100
+                  for unmasked positions.
+        """
         x = x.clone()
         gene_labels = gene_labels.clone()
 
@@ -562,6 +577,25 @@ class gpTransformerEncoder(nn.Module):
         # Apply the mask to the target tensor
         # if mask = 1, we want to 0 out the token embedding
         # but keep the label for loss calculation
+        """Prepare input tokens by adding CLS token and positional encodings.
+
+        Prepends a learnable CLS token to the sequence and adds positional information
+        according to the specified encoding type. Also adds a dummy label (-100) for the
+        CLS token position.
+
+        Args:
+            x (torch.Tensor): Input embeddings of shape
+                (batch_size, seq_len, embed_dim).
+            gene_labels (torch.Tensor): Gene labels of shape
+                (batch_size, seq_len).
+
+        Returns:
+            tuple: A tuple containing:
+                - x (torch.Tensor): Token embeddings with CLS and positional
+                  encoding, shape (batch_size, seq_len+1, embed_dim).
+                - gene_labels (torch.Tensor): Labels with CLS dummy label
+                  prepended, shape (batch_size, seq_len+1).
+        """
         x = torch.where(mask.unsqueeze(-1), self.mask_emb.expand_as(x), x)
         # x = x.masked_fill(mask.unsqueeze(-1), 0)
 
@@ -577,6 +611,21 @@ class gpTransformerEncoder(nn.Module):
         return x, gene_labels
 
     def prepare_tokens(self, x, gene_labels):
+        """Prepare input tokens by adding CLS token and positional encodings.
+
+        Args:
+            x (torch.Tensor): Input embeddings of shape
+                (batch_size, seq_len, embed_dim).
+            gene_labels (torch.Tensor): Gene labels of shape (batch_size,
+                seq_len).
+
+        Returns:
+            tuple: A tuple containing:
+                - x (torch.Tensor): Token embeddings with CLS and positional encoding,
+                  shape (batch_size, seq_len+1, embed_dim).
+                - gene_labels (torch.Tensor): Labels with CLS dummy label prepended,
+                  shape (batch_size, seq_len+1).
+        """
         B = x.shape[0]  # batch size
 
         # add the [CLS] token to the embed patch tokens
@@ -598,7 +647,6 @@ class gpTransformerEncoder(nn.Module):
         if self.use_pos_emb == 'absolute':
             pos = self.pos_embed(torch.arange(x.shape[1], device=x.device))
             x = x + pos
-
         elif self.use_pos_emb is not None:
             x = self.pos_embed(x)
 
@@ -614,6 +662,35 @@ class gpTransformerEncoder(nn.Module):
         return_gene_embeddings=False,
         return_mean_non_padding=False,
     ):
+        """
+        Forward pass of the GP Transformer Encoder.
+        Args:
+            x (torch.Tensor): Input embeddings of shape
+                (batch_size, seq_len, embed_dim).
+            gene_labels (torch.Tensor): Gene labels of shape (batch_size,
+                seq_len).
+            masking (bool): Whether to apply random masking for MLM.
+            attn_mask (torch.Tensor): Attention mask of shape (batch_size, seq_len+1).
+            return_attention (bool): Whether to return attention weights.
+            return_gene_embeddings (bool): Whether to return gene embeddings.
+            return_mean_non_padding (bool):
+                Whether to return mean of non-padding gene embeddings
+                (not used in main model, only for baselines)
+        Returns:
+            dict: A dictionary containing:
+                - 'cls': CLS token embeddings of shape (batch_size, embed_dim).
+                - 'logits_lm': Logits for masked language modeling of
+                  shape (batch_size, seq_len+1, vocab_size).
+                - 'gene_labels': Updated gene labels with -100 for
+                  unmasked positions.
+                - 'attention' (optional): Attention weights if
+                  return_attention is True.
+                - 'gene_embeddings' (optional): Gene embeddings if
+                  return_gene_embeddings is True.
+                - 'mean_non_padding' (optional): Mean of non-padding gene
+                  embeddings if return_mean_non_padding is True.
+                  (not used in main model, only for baselines)
+        """
         # Optionally reduce dimensions
         if hasattr(self, 'dim_red') and (self.output_dim != self.embed_dim):
             x = self.dim_red(x)
@@ -672,32 +749,6 @@ class gpTransformerEncoder(nn.Module):
             if len(self.blocks) - i <= n:
                 output.append(self.norm(x))
         return output
-
-
-class PretrainedEmbeddings(nn.Module):
-    '''
-    BertEmbedding style class for exploring LIG
-    Initialize nn.Embedding directly from embeddings
-    which are output from another part of the model
-    # NOT USED
-    '''
-
-    def __init__(
-        self,
-        pretrained_emb,
-        pretrained_pos_emb,
-        vocab_size,
-        embedding_dim,
-    ):
-        super().__init__()
-        self.word_embeddings = nn.Embedding(vocab_size, embedding_dim).from_pretrained(
-            pretrained_emb
-        )
-        self.position_embeddings = pretrained_pos_emb
-
-    def forward(self):
-        embeddings = self.word_embeddings + self.position_embeddings
-        return embeddings
 
 
 if __name__ == '__main__':

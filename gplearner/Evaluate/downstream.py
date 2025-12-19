@@ -2,7 +2,6 @@ import os
 import random
 import warnings
 from typing import (
-    Any,
     Dict,
     Literal,
     Optional,
@@ -20,18 +19,14 @@ import scipy.sparse as sp
 import scprep
 import seaborn as sns
 import torch
-from captum.attr import GuidedGradCam
 from datasets import load_from_disk
-from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import (
     LinearSegmentedColormap,
     Normalize,
     to_rgba,
 )
-from pytorch_lightning.loggers import CSVLogger
 from scipy.sparse import issparse
-from scipy.spatial.distance import cosine
 from scipy.stats import ttest_ind
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
@@ -41,7 +36,6 @@ from sklearn.metrics import (
     mean_squared_error,
     r2_score,
 )
-from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.preprocessing import MinMaxScaler
 
@@ -50,41 +44,31 @@ try:
     from IPython import get_ipython
 
     if 'IPKernelApp' in get_ipython().config:
-        from tqdm.notebook import tqdm
+        from tqdm.notebook import tqdm  # noqa: F401
     else:
-        from tqdm import tqdm
+        from tqdm import tqdm  # noqa: F401
 except (ImportError, AttributeError):
     # Default to regular tqdm in case of any issues
-    from tqdm import tqdm
+    pass
 
-from ..Datamodules.datamodule import (
-    EmbDataModule,
-    iEmbDataModule,
-    iTxDataModule,
-    txDataModule,
-)
+from ..Datamodules.datamodule import txDataModule
 from ..Metrics.metrics import evaluate_emd_ref_vs_query
 from ..Models.baselines import gfGlobal
-from ..Models.interpretability import iGlobalWrapper, iGpWrapper
 from ..Trainers.trainer import (
-    EmbEvaluator,
     gpAblation,
     gpBase,
     gpGlobal,
     gpGlobalLoRA,
 )
-from ..Utils.geneformer_utils import get_gf_repo
-from ..Utils.utils import (  # find_latest_file,
+from ..Utils.utils import (
     MidpointNormalize,
     _bh_with_nans,
     _resolve_sig_colors,
     _stars,
     _t_equal_var_sparse,
-    align_indices,
     assign_bar_colors,
     build_token_to_gene_name_dict,
     remove_single_data_points,
-    summarize_attributions,
     wrangle_classification_report,
 )
 
@@ -107,34 +91,28 @@ class gpEval:
         Path to folder containing tokenized dataset
     gpdb_path : str
         Path to gene program database
-    gp_similarity_file : str
-        Path to gene program similarity matrix
     output_dir : str
         Path to directory where we will save outputs
+        and where model checkoints are stored
     batch_size : int
-        Batch size
+        Batch size for evaluation step
     n_blocks : int
         Number of transformer blocks
     gene_format : str
         Format in which gene names are stored in GPDB
+        One of 'symbol' or 'ensembl'
     tissue : str
         Tissue name for logging experiment in wandb
-        Equivalent to directory name in examples subfolder
+        This is also present in model checkpoint name
     model_type : str
-        One of Base, Supervised or Unsupervised
-        Where unsupervised has an extra self-attention head
-        to learn a cell token based on GP tokens
+        Base (GP blocks only) or Global (with cell token)
     n_heads : int
         Number of heads for multi-head attention
     gp_latent_size : int
         Size of latent space for GP tokens
-        If <256, will use MLP to reduce dimensions of Geneformer gene embeddings
-        Else take embeddings directly
     gp_inputs : list
         Which GP from GPDB to include in model
         if None, defaults to all GP
-    gene_counts_df : str
-        Dataframe with the counts of each gene in the dataset
     supervised_labels : list
         Dict {label : num_classes} for supervised classification
     global_attn_heads : int
@@ -142,9 +120,6 @@ class gpEval:
     global_loss :
         loss used to train global attention model
         (for compatibility with gpGlobal init)
-
-    Returns
-    -------
 
     """
 
@@ -155,7 +130,6 @@ class gpEval:
         dataset_path: Optional[str] = None,
         tissue: Optional[str] = 'test',
         model_type: Optional[str] = 'Base',
-        model_type_in_checkpoint: Optional[str] = None,
         batch_size: Optional[int] = 128,
         path_to_trained_model: Optional[str] = None,
         seed: Optional[int] = 0,
@@ -180,12 +154,6 @@ class gpEval:
 
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
-            # tag = (
-            #     model_type_in_checkpoint
-            #     if model_type_in_checkpoint is not None
-            #     else model_type
-            # )
-
             if path_to_trained_model is None:
                 model_path = output_dir
             else:
@@ -369,122 +337,6 @@ class gpEval:
 
         trainer.test(gp_transformer, txdata)
 
-    @staticmethod
-    def evaluate_embeddings(
-        y_label,
-        folder_path,
-        output_dir,
-        emb_label,
-        task='classification',
-        emb_dim=256,
-        lr=1e-3,
-        batch_size=128,
-        num_workers=1,
-        meta_labels=None,
-        data_type='dataset',
-        n_epochs=3,
-        continuous_cov=[],
-        use_weighted_sampler=False,
-        sample_by=None,
-        filter_key=None,
-        filter_value=None,
-        encode_covariate=False,
-        filter_tag=None,
-        condition_variable=None,
-        # development
-        frac_for_training=1,
-        mode=None,
-    ):
-        '''
-        Train nn.Linear layer based on embeddings
-        '''
-
-        os.makedirs(os.path.join(output_dir, 'cell_metrics'), exist_ok=True)
-        ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
-        os.makedirs(ckpt_dir, exist_ok=True)
-
-        # set seed for reproducibility
-        seed = 0
-        np.random.seed(seed)
-        random.seed(seed)
-        pl.seed_everything(seed)
-        torch.manual_seed(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-        print(f'Evaluating {emb_label} embeddings')
-        if filter_tag is None:
-            filter_tag = (
-                f'_{filter_key}_{filter_value}' if filter_value is not None else ''
-            )
-        else:
-            filter_tag = f'_{filter_tag}'
-        if task == 'classification':
-            clf_label = y_label
-        else:
-            clf_label = None
-
-        if meta_labels is None:
-            meta_labels = [y_label]
-
-        emb_dm = EmbDataModule(
-            folder_path,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            emb_label=emb_label,
-            meta_labels=meta_labels,
-            data_type=data_type,
-            continuous_cov=continuous_cov,
-            use_weighted_sampler=use_weighted_sampler,
-            label_key=sample_by,
-            filter_key=filter_key,
-            filter_value=filter_value,
-            clf_label=clf_label,
-            encode_covariate=encode_covariate,
-            frac_for_training=frac_for_training,
-            mode=mode,
-            condition_variable=condition_variable,
-        )
-
-        emb_dm.setup()
-
-        emb_evaluator = EmbEvaluator(
-            n_classes=emb_dm.num_classes,
-            emb_dim=emb_dim,
-            task=task,
-            lr=lr,
-            emb_label=emb_label,
-            y_label=y_label,
-            output_dir=output_dir,
-            filter_tag=filter_tag,
-            num_condition_cat=emb_dm.num_condition_classes,
-        )
-
-        logger = CSVLogger(
-            os.path.join(output_dir, 'evaluation_logs'),
-            name=f"{emb_label}_{y_label.replace('_id', '')}{filter_tag}",
-        )
-
-        checkpoint_callback = pl.callbacks.ModelCheckpoint(
-            monitor='val_loss',
-            dirpath=ckpt_dir,
-            filename=f"{y_label.replace('_id', '')}_{emb_label}_{task}{filter_tag}",
-            save_top_k=1,
-            mode='min',
-        )
-
-        trainer = pl.Trainer(
-            max_epochs=n_epochs,
-            callbacks=[checkpoint_callback],
-            devices=1,
-            accelerator='auto',
-            logger=logger,
-            # precision=16,
-        )
-
-        trainer.fit(emb_evaluator, emb_dm)
-        trainer.test(emb_evaluator, emb_dm)
-
     def visualize(
         self,
         label_to_plot,
@@ -548,17 +400,6 @@ class gpEval:
             else:
                 raise ValueError('method must be one of ["umap", "pca"].')
 
-    @staticmethod
-    def _load_and_save_latent(self, adata, new, model_name):
-        if new.shape[0] != adata.shape[0]:
-            idx_union = set(new.obs['idx']).union(set(adata.obs['idx']))
-            new = new[new.obs['idx'].isin(idx_union)]
-            adata = adata[adata.obs['idx'].isin(idx_union)]
-
-        adata.obsm[model_name] = new.X
-
-        return adata
-
     def generate_gene_embeddings(
         self,
         gp_for_forward: Optional[str],
@@ -583,13 +424,15 @@ class gpEval:
         obs_key : str
             Key in adata.obs to filter on
         obs_value : str
-            Value in adata.obs to filter on
+            value of obs_key to keep
         data_frac : float
             Fraction of data to use for generating embeddings
         gp_for_forward: str or None
             Pathway to use for model forward pass
+            This is helpful if you only need to run forward pass
+            on one GP rather than all of them.
         gp_for_downstream : str
-            Pathway to use for generating embeddings
+            Pathway to use for focus of downstream analysis
         genes_to_keep : list
             Genes to generate embeddings for
             if None --> all genes
@@ -598,10 +441,8 @@ class gpEval:
             if gene_to_gp: anndata with (gene, GP) cosine similarity
             if gene_to_gene: matrix of mean (gene, gene) cosine similarity
 
-
         Use find_genes_in_multiple_gp or get_genes_in_single_gp from Utils.utils
         for GP selection
-
         """
         os.chdir(self.output_dir)
 
@@ -778,38 +619,6 @@ class gpEval:
 
         trainer.test(gp_transformer, txdata)
 
-    def test_random_baseline(self, adata_path):
-        '''
-        Compare Pearson and MSE of count reconstruction for true cells vs random cells
-        '''
-
-        # to do check reconstruction loss
-        if (self.model_type != 'Global') & (self.model.global_loss != 'reconstruction'):
-            raise ValueError(
-                'Random baseline only implemented for reconstruction '
-                'loss from global cell token,'
-                f'not {self.model_type}, {self.model.global_loss}'
-            )
-
-        # Initialize trainer
-        os.chdir(self.output_dir)
-
-        print('Dataset path', self.dataset_path)
-
-        gp_transformer = self._init_trainer(test_random_baseline=True)
-
-        txdata = txDataModule(
-            folder=self.dataset_path,
-            batch_size=self.batch_size,
-            adata_path=adata_path,
-            seed=self.seed,
-            fm_encoder_name=self.fm_encoder_name,
-            model_input_size=self.max_len,
-        )
-
-        trainer = pl.Trainer(max_epochs=1, devices=1, accelerator='auto', precision=32)
-        trainer.test(gp_transformer, txdata)
-
     def evaluate_supervised_model(self, precision=32):
         txdata = txDataModule(
             folder=self.dataset_path,
@@ -826,6 +635,60 @@ class gpEval:
 
 
 class gpAblationEval(gpEval):
+    """
+    Evaluation class for gene program ablation studies.
+
+    Extends gpEval to support ablation analysis by generating embeddings with
+    individual gene programs removed. Can compute cosine similarity between
+    ablated and full embeddings, or calculate changes in reconstruction loss.
+
+    Parameters
+    ----------
+    main_ckpt_dir : str
+        Path to directory containing the main model checkpoint (last.ckpt).
+    compute_cosine : bool, default=False
+        Whether to compute cosine similarity between ablated and full embeddings.
+    compute_delta_nb_loss : bool, default=False
+        Whether to compute change in negative binomial loss after ablation.
+    adata_path : str, optional
+        Path to .h5ad file for count reconstruction analysis. Required if
+        compute_delta_nb_loss=True.
+    *args
+        Additional positional arguments passed to parent gpEval class.
+    **kwargs
+        Additional keyword arguments passed to parent gpEval class.
+
+    Attributes
+    ----------
+    main_ckpt_dir : str
+        Full path to the checkpoint file.
+    compute_cosine : bool
+        Flag for cosine similarity computation.
+    compute_delta_nb_loss : bool
+        Flag for NB loss computation.
+    adata_path : str or None
+        Path to count data for reconstruction.
+
+    Notes
+    -----
+    - Only supports 'Global' model_type (raises error for 'Base')
+    - When compute_cosine or compute_delta_nb_loss is True, raw embeddings
+      are not saved to conserve memory
+    - Ablation is performed by systematically removing each gene program and
+      evaluating the impact on embeddings or reconstruction
+
+    Examples
+    --------
+    >>> evaluator = gpAblationEval(
+    ...     main_ckpt_dir='path/to/checkpoint',
+    ...     compute_cosine=True,
+    ...     gpdb_path='path/to/gpdb.csv',
+    ...     output_dir='path/to/output',
+    ...     dataset_path='path/to/data'
+    ... )
+    >>> evaluator.generate_embeddings(split='test')
+    """
+
     def __init__(
         self,
         main_ckpt_dir,
@@ -842,6 +705,37 @@ class gpAblationEval(gpEval):
         super().__init__(*args, **kwargs)
 
     def _init_trainer(self, split_label=None, **kwargs):
+        """
+        Initialize the ablation trainer module.
+
+        Loads the gpAblation model from checkpoint and configures it for
+        ablation analysis. Sets flags for cosine similarity or NB loss
+        computation based on initialization parameters.
+
+        Parameters
+        ----------
+        split_label : str, optional
+            Dataset split to use ('train', 'test', or 'val').
+        **kwargs
+            Additional keyword arguments (currently unused but maintained
+            for compatibility with parent class).
+
+        Returns
+        -------
+        gp_transformer : gpAblation
+            Configured ablation trainer ready for evaluation.
+
+        Raises
+        ------
+        ValueError
+            If model_type is 'Base' (ablation only supports 'Global' models).
+
+        Notes
+        -----
+        - Automatically sets save_raw_embeddings=False when computing
+          cosine or NB loss metrics to save memory
+        - Extracts model configuration including encoder package and max length
+        """
         if self.model_type == 'Base':
             raise ValueError('Ablation not implemented for Base model')
 
@@ -882,9 +776,40 @@ class gpAblationEval(gpEval):
     def generate_embeddings(
         self, split='train', precision=32, return_mean_non_padding=False
     ):
-        '''
-        Save embeddings as Dataset with support for count reconstruction
-        '''
+        """
+        Generate embeddings for ablation analysis.
+
+        Performs systematic ablation by removing each gene program and generating
+        embeddings.
+        For larger datasets, it is more efficient to compute cosine similarity or
+        changes in reconstruction loss rather than saving raw embeddings.
+
+        Parameters
+        ----------
+        split : str, default='train'
+            Dataset split to use for generating embeddings ('train', 'test', or 'val').
+        precision : int, default=32
+            Numerical precision for PyTorch Lightning trainer (16, or 32).
+        return_mean_non_padding : bool, default=False
+            Whether to return mean embeddings excluding padding tokens.
+            (for compatibility with parent class)
+
+        Returns
+        -------
+        None
+            Results are saved to output_dir based on the configured analysis type:
+            - If compute_cosine=True: saves cosine similarities between ablated
+              and full embeddings
+            - If compute_delta_nb_loss=True: saves changes in reconstruction loss
+            - Otherwise: saves raw ablated embeddings as HuggingFace Dataset
+
+        Notes
+        -----
+        - Requires adata_path to be set during initialization if computing NB loss
+        - Each gene program is ablated iteratively under the hood
+        - Output files are named according to the split and ablation configuration
+
+        """
         gp_transformer = self._init_trainer(
             save_emb=True,
             split_label=split,
@@ -892,7 +817,6 @@ class gpAblationEval(gpEval):
             return_mean_non_padding=return_mean_non_padding,
         )
 
-        # For count reconstruction, we need to pass adata_path to txDataModule
         txdata = txDataModule(
             folder=self.dataset_path,
             batch_size=self.batch_size,
@@ -900,7 +824,7 @@ class gpAblationEval(gpEval):
             seed=self.seed,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
-            adata_path=self.adata_path,  # Pass adata_path for count reconstruction
+            adata_path=self.adata_path,  # for reconstruction loss calculation
         )
 
         trainer = pl.Trainer(
@@ -908,52 +832,6 @@ class gpAblationEval(gpEval):
         )
 
         trainer.test(gp_transformer, txdata)
-
-
-def calculate_perturbation_effect(embeddings, gp_list, meta_cols):
-    '''
-    Calculate the effect of perturbing a gene program on cell token
-
-    Inputs:
-    embeddings: huggingface dataset object with control cls and {GP}_perturb cls
-    gp_list: list of gene programs to evaluate
-    meta_cols: list of metadata columns to keep
-
-    Returns:
-    adata_similarity: anndata object with (1 - cosine similarity) between control
-    and perturbed embeddings for each cell
-
-    '''
-
-    control = sc.AnnData(
-        X=np.array(embeddings['control']),
-        obs=embeddings.select_columns(meta_cols).to_pandas(),
-    )
-
-    n_cells = control.n_obs
-    n_geps = len(gp_list)
-
-    # Create an empty matrix to store cosine similarities
-    similarity_matrix = np.zeros((n_cells, n_geps))
-
-    for j, gep_key in tqdm(
-        enumerate(gp_list), desc='Calculating GP perturbation effect'
-    ):
-        gep = sc.AnnData(
-            X=np.array(embeddings[f'{gep_key}_perturb']),
-            obs=embeddings.select_columns(meta_cols).to_pandas(),
-        )
-
-        # take (1-) so that the bigger the number the bigger the effect
-        similarity_scores = 1 - np.diag(cosine_similarity(control.X, gep.X))
-        similarity_matrix[:, j] = similarity_scores
-
-    # Create the final AnnData object
-    adata_similarity = sc.AnnData(
-        X=similarity_matrix, obs=control.obs, var=pd.DataFrame(index=gp_list)
-    )
-
-    return adata_similarity
 
 
 ################################
@@ -973,10 +851,49 @@ def calculate_gp_emd(
     gpdb=None,
     filtering_dict=None,
 ):
-    '''
-    Calculate EMD between reference and query distributions
+    """
+    Calculate Earth Mover's Distance (EMD) between reference and query distributions.
 
-    '''
+    Computes the EMD metric to quantify the distributional difference between
+    reference and query gene program embeddings across different conditions.
+
+    Parameters
+    ----------
+    data : str or datasets.Dataset or anndata.AnnData
+        Input data containing embeddings. Can be:
+        - Path to .h5ad file
+        - Path to HuggingFace dataset
+        - Loaded dataset or AnnData object
+    source_key : str
+        Column name in data.obs identifying reference vs query samples.
+    ref_label : str
+        Value in source_key column identifying reference samples.
+    query_label : str
+        Value in source_key column identifying query samples.
+    condition_key : str
+        Column name for grouping samples within reference/query sets.
+    output_dir : str
+        Directory path where results CSV will be saved.
+    filename : str, optional
+        Custom filename for output CSV. If None, uses format:
+        '{ref_label}_vs_{query_label}_emd.csv'
+    gp : str or list of str, optional
+        Specific gene program(s) to analyze. If None, uses all from gpdb.
+    gpdb : str, optional
+        Path to gene program database CSV. Required if gp is None.
+    filtering_dict : dict, optional
+        Dictionary of {column: value(s)} for filtering data before analysis.
+        Values can be single items or lists.
+
+    Returns
+    -------
+    None
+        Results are saved to a CSV file in output_dir.
+
+    Notes
+    -----
+    Either gp or gpdb must be provided to specify gene programs to analyze.
+    """
 
     if isinstance(data, str):
         if data.endswith('.h5ad'):
@@ -1047,569 +964,8 @@ def calculate_gp_emd(
 
 
 ################################
-# Grad-CAM
+# Visualization
 ################################
-
-
-def calculate_gp_attribution_scores(
-    gpdb_path,
-    dataset_path,
-    data_split,
-    gp_latent_size,
-    model_checkpoint,
-    obs_key,
-    obs_value,
-    output_dir,
-    gp,
-    block_n=-1,
-    total_n_cells=None,
-    task='classification',
-    gpdb_ref_path=None,
-    gene_format='symbol',
-    emb_dataset_path=None,
-    gene_counts_df=None,
-    gp_inputs=None,
-    model_type='Base',
-    peft_config_path=None,
-    fm_encoder_pkg='geneformer',
-    fm_encoder_name='gf-6L-30M-i2048',
-    output_file_name=None,
-    model_input_size: int = 2048,
-):
-    '''
-    Calculate attribution scores for each gene program
-    '''
-
-    # --------------------------
-    # Set seed
-    # --------------------------
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # set seed
-    seed = 0
-    np.random.seed(seed)
-    random.seed(seed)
-    pl.seed_everything(seed)
-    torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-    # --------------------------
-    # Set up Geneformer
-    # --------------------------
-
-    if fm_encoder_pkg == 'geneformer':
-        gf_repo_path = get_gf_repo()
-        geneformer_model = os.path.join(gf_repo_path, fm_encoder_name)
-
-        if '4096' in fm_encoder_name:
-            gene_token_path = TOKEN_DICTIONARY_FILE
-            gene_name_path = ENSEMBL_DICTIONARY_FILE
-
-        else:
-            gene_token_path = os.path.join(
-                gf_repo_path,
-                'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
-            )
-
-            gene_name_path = os.path.join(
-                gf_repo_path,
-                'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
-            )
-
-    elif fm_encoder_pkg == 'from_scratch':
-        gf_repo_path = get_gf_repo()
-        if model_type == 'Base':
-            gpformer = gpBase.load_from_checkpoint(
-                model_checkpoint,
-                strict=False,
-                map_location='cpu',
-            )
-        elif model_type == 'Global':
-            gpformer = gpGlobal.load_from_checkpoint(
-                model_checkpoint, strict=False, map_location='cpu'
-            )
-
-        geneformer_model = gpformer.model.gf_wrapper
-
-        if geneformer_model.model.config.max_position_embeddings == 4096:
-            gene_token_path = TOKEN_DICTIONARY_FILE
-            gene_name_path = ENSEMBL_DICTIONARY_FILE
-        else:
-            gene_token_path = os.path.join(
-                gf_repo_path,
-                'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
-            )
-
-            gene_name_path = os.path.join(
-                gf_repo_path,
-                'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
-            )
-
-    else:
-        raise ValueError(
-            'Please provide valid fm_encoder_pkg (geneformer or from_scratch)'
-        )
-
-    # --------------------------
-    # Set up dataloader
-    # --------------------------
-
-    gpdb = pd.read_csv(gpdb_path)
-
-    if gp_inputs is None:
-        gp_inputs = list(gpdb.columns)
-    elif isinstance(gp_inputs, str):
-        gp_inputs = [gp]
-
-    if gene_counts_df is not None:
-        gene_counts_df = pd.read_csv(gene_counts_df)
-
-    txdata = iTxDataModule(
-        folder=dataset_path,
-        batch_size=1,
-        return_tuple=True,
-        gp=gp,
-        gpdb=gpdb,
-        do_ensembl_conversion=(gene_format != 'ensembl'),
-        filter_key=obs_key,
-        filter_value=obs_value,
-        geneformer_model=geneformer_model,
-        peft_config_path=peft_config_path,
-        gene_name_path=gene_name_path,
-        gene_token_path=gene_token_path,
-        model_input_size=model_input_size,
-        fm_encoder_pkg=fm_encoder_pkg,
-    )
-
-    txdata.setup()
-    dataloader = getattr(txdata, data_split + '_dataloader')()
-    print('Number of cells', len(dataloader))
-
-    if total_n_cells is None:
-        total_n_cells = len(dataloader)
-
-    y_label = obs_key
-
-    # --------------------------
-    # Set up model
-    # --------------------------
-
-    if model_type == 'Base':
-        gp_transformer = gpBase.load_from_checkpoint(
-            model_checkpoint,
-            strict=False,
-            map_location='cpu',
-        )
-    elif model_type == 'Global':
-        gp_transformer = gpGlobal.load_from_checkpoint(
-            model_checkpoint, strict=False, map_location='cpu'
-        )
-
-    # Load classification layer
-    # or train if not available
-    ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
-    clf_ckpt = f"{y_label.replace('_id', '')}_{gp}_{task}"
-
-    if os.path.exists(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')):
-        clf_layer = EmbEvaluator.load_from_checkpoint(
-            os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
-        )
-
-    else:
-        if emb_dataset_path is None:
-            raise ValueError(
-                'Please provided path to embeddings for training linear layer'
-            )
-        gpEval.evaluate_embeddings(
-            y_label=y_label,
-            encode_covariate=True,
-            folder_path=emb_dataset_path,
-            output_dir=output_dir,
-            emb_label=gp,
-            task=task,
-            emb_dim=gp_latent_size,
-            lr=1e-3,
-            batch_size=128,
-            num_workers=1,
-            data_type='dataset',
-            n_epochs=3,
-            continuous_cov=[],
-        )
-
-        clf_layer = EmbEvaluator.load_from_checkpoint(
-            os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
-        )
-
-    imodel = iGpWrapper(
-        gp_transformer,
-        clf_layer,
-        gp_of_interest=gp,
-    )
-
-    imodel = imodel.to(device)
-
-    # --------------------------
-    # Run attribution
-    # --------------------------
-
-    # set up attribution
-    gc = GuidedGradCam(imodel, imodel.gp_block.blocks[block_n].mlp)
-
-    attribution_scores: Dict[Any, Any] = {}
-    all_tokens = set()
-    counter = 0
-
-    for b in tqdm(dataloader):
-        if counter < total_n_cells:
-            counter += 1
-            emb = b[0].to(device)
-
-            edict = {
-                k: v.to(device) if isinstance(v, torch.Tensor) else v
-                for k, v in b[1].items()
-            }
-
-            input_ids = (emb, edict)
-            token_labels = edict['token_labels'].squeeze().cpu().numpy().tolist()
-            for labels in token_labels:
-                all_tokens.add(labels)
-
-            attributions = gc.attribute(
-                input_ids[0],
-                target=edict[f'{obs_key}_id'],
-                additional_forward_args=input_ids[1],
-            )
-
-            attr_norm = summarize_attributions(attributions).detach().cpu().numpy()
-
-            for i, t in enumerate(token_labels):
-                if t in attribution_scores.keys():
-                    attribution_scores[t] += [attr_norm[i]]
-                    attribution_scores[f'{t}_abs'] += [np.abs(attr_norm[i])]
-                    attribution_scores[f'{t}_rank'] += [i]
-                else:
-                    attribution_scores[t] = [attr_norm[i]]
-                    attribution_scores[f'{t}_abs'] = [np.abs(attr_norm[i])]
-                    attribution_scores[f'{t}_rank'] = [i]
-
-        else:
-            break
-
-    for t in all_tokens:
-        attribution_scores[t] = np.nanmean(attribution_scores[t])
-        attribution_scores[f'{t}_abs'] = np.nanmean(attribution_scores[f'{t}_abs'])
-        attribution_scores[f'{t}_std'] = np.nanstd(attribution_scores[t])
-        attribution_scores[f'{t}_abs_std'] = np.nanstd(attribution_scores[f'{t}_abs'])
-        attribution_scores[f'{t}_rank'] = np.nanmean(attribution_scores[f'{t}_rank'])
-
-    rows = []
-
-    for t in all_tokens:
-        row = {
-            'token': t,
-            'attribution_score': attribution_scores[t],
-            'abs_attribution_score': attribution_scores[f'{t}_abs'],
-            'std_attribution_score': attribution_scores[f'{t}_std'],
-            'abs_std_attribution_score': attribution_scores[f'{t}_abs_std'],
-            'rank': attribution_scores[f'{t}_rank'],
-        }
-
-        rows.append(row)
-
-    attribution_df = pd.DataFrame(rows)
-
-    # Add gene conversion
-    gene_df = pd.DataFrame(imodel.gene_conversion)
-    gene_df = gene_df.join(attribution_df.set_index('token'), on='token')
-
-    # add GP labels
-    if gpdb_ref_path is None:
-        gpdb_ref_path = gpdb_path
-
-    # add GP labels
-    if gpdb_ref_path is None:
-        gpdb_ref_path = gpdb_path
-
-    gpdb_og = pd.read_csv(gpdb_ref_path)
-
-    for ogp in gpdb_og.columns:
-        if gene_format == 'symbol':
-            gene_df[ogp] = np.where(gene_df['symbol'].isin(gpdb_og[ogp]), 1, 0)
-        else:
-            gene_df[ogp] = np.where(gene_df['ensembl'].isin(gpdb_og[ogp]), 1, 0)
-
-    if output_file_name is None:
-        output_file_name = f'{gp}_attribution_scores_{obs_value}_block_{block_n}.csv'
-
-    gene_df.to_csv(
-        os.path.join(output_dir, output_file_name),
-        index=False,
-    )
-
-
-def calculate_cell_token_attribution_scores(
-    gpdb_path,
-    dataset_path,
-    emb_dataset_path,
-    data_split,
-    gp_latent_size,
-    model_checkpoint,
-    obs_key,
-    obs_value,
-    output_dir,
-    # for EmbEvaluator
-    emb_label,
-    task,
-    encode_covariate=True,
-    save_plot=False,
-    gp_inputs=None,
-    use_embedding=False,
-    pretrained_emb=None,
-    supervised_labels=None,
-    block_n=-1,
-):
-    # --------------------------
-    # Set seed
-    # --------------------------
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # set seed
-    seed = 0
-    np.random.seed(seed)
-    random.seed(seed)
-    pl.seed_everything(seed)
-    torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-    # --------------------------
-    # Set up dataloader
-    # --------------------------
-
-    gpdb = pd.read_csv(gpdb_path)
-
-    if gp_inputs is None:
-        gp_inputs = list(gpdb.columns)
-
-    emb_dm = iEmbDataModule(
-        folder_path=emb_dataset_path,
-        batch_size=1,
-        gp_inputs=gp_inputs,
-        meta_labels=obs_key,
-        clf_label=obs_key,
-        encode_covariate=encode_covariate,
-    )
-
-    emb_dm.setup()
-
-    dataloader = getattr(emb_dm, data_split + '_dataloader')()
-
-    # --------------------------
-    # Build dictionary for class : id conversion
-    # --------------------------
-
-    y_label = obs_key + '_id'
-
-    if encode_covariate:
-        datax = load_from_disk(dataset_path)
-        labels = datax.unique(obs_key)
-        conversion_dict = {k: i for i, k in enumerate(labels)}
-
-    else:
-        datax = load_from_disk(dataset_path)
-        datax = datax.select_columns([y_label, obs_key])
-        conversion = datax.to_pandas().drop_duplicates()
-        conversion_dict = {
-            k: v for k, v in zip(conversion[obs_key], conversion[y_label])
-        }
-
-    # --------------------------
-    # Set up model
-    # --------------------------
-
-    gp_transformer = gpGlobal.load_from_checkpoint(
-        model_checkpoint,
-        strict=False,
-        map_location='cpu',
-    )
-
-    # Load classification layer
-    # or train if not available
-    if gp_transformer.model.global_loss != 'supervised':
-        ckpt_dir = os.path.join(output_dir, 'evaluation_model_checkpoints')
-        clf_ckpt = f"{y_label.replace('_id', '')}_{emb_label}_{task}"
-        if os.path.exists(os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')):
-            clf_layer = EmbEvaluator.load_from_checkpoint(
-                os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
-            )
-
-        else:
-            gpEval.evaluate_embeddings(
-                y_label=obs_key,
-                folder_path=emb_dataset_path,
-                output_dir=output_dir,
-                emb_label=emb_label,
-                task=task,
-                emb_dim=gp_latent_size,
-                lr=1e-3,
-                batch_size=128,
-                num_workers=1,
-                data_type='dataset',
-                n_epochs=3,
-                continuous_cov=[],
-                encode_covariate=encode_covariate,
-            )
-
-            clf_layer = EmbEvaluator.load_from_checkpoint(
-                os.path.join(ckpt_dir, f'{clf_ckpt}.ckpt')
-            )
-
-        task_index = None
-    else:
-        clf_layer = None
-        tasks = list(supervised_labels.keys())
-        if not obs_key.endswith('_id'):
-            task_tag = obs_key + '_id'
-        else:
-            task_tag = obs_key
-        task_index = tasks.index(task_tag)
-
-    imodel = iGlobalWrapper(
-        gp_transformer,
-        clf_layer,
-        global_loss=gp_transformer.model.global_loss,
-        use_embedding=use_embedding,
-        pretrained_emb=pretrained_emb,
-        vocab_size=len(gpdb.columns),
-        embedding_dim=gp_latent_size,
-        task_index=task_index,
-    )
-    imodel = imodel.to(device)
-
-    # --------------------------
-    # Run attribution
-    # --------------------------
-
-    # set up attribution
-    gc = GuidedGradCam(imodel, imodel.global_block.encoder.blocks[block_n].mlp)
-
-    attribution_scores = {}
-
-    for g in gp_inputs:
-        attribution_scores[g] = []
-        attribution_scores[f'{g}_abs'] = []
-
-    for b in tqdm(dataloader):
-        if b[1][obs_key] == [obs_value]:
-            emb = b[0].to(device)
-
-            edict = {
-                k: v.to(device) if isinstance(v, torch.Tensor) else v
-                for k, v in b[1].items()
-            }
-
-            input_ids = (emb, edict)
-
-            attributions = gc.attribute(
-                input_ids[0],
-                target=conversion_dict[obs_value],
-                additional_forward_args=input_ids[1],
-            )
-
-            attr_norm = summarize_attributions(attributions).detach().cpu().numpy()
-
-            for i, g in enumerate(gp_inputs):
-                attribution_scores[g] += [attr_norm[i]]
-                attribution_scores[f'{g}_abs'] += [abs(attr_norm[i])]
-
-    for g in gp_inputs:
-        attribution_scores[g] = np.nanmean(np.array(attribution_scores[g]))
-        attribution_scores[f'{g}_std'] = np.nanstd(np.array(attribution_scores[g]))
-
-        # Absolute values
-        attribution_scores[f'{g}_abs'] = np.nanmean(
-            np.array(attribution_scores[f'{g}_abs'])
-        )
-        attribution_scores[f'{g}_abs_std'] = np.nanstd(
-            np.array(attribution_scores[f'{g}_abs'])
-        )
-
-    rows = []
-    for g in gp_inputs:
-        row = {
-            'GP': g,
-            'scores': attribution_scores[g],
-            'scores_abs': attribution_scores[f'{g}_abs'],
-            # 'score_std': attribution_scores[f'{g}_std'],
-            # 'score_abs_std': attribution_scores[f'{g}_abs_std'],
-        }
-        rows.append(row)
-
-    # Convert the list of dictionaries to a DataFrame
-    attribution_df = pd.DataFrame(rows)
-
-    gradcam_output_dir = os.path.join(output_dir, 'gradcam_outputs')
-
-    if not os.path.exists(gradcam_output_dir):
-        os.makedirs(gradcam_output_dir)
-
-    attribution_df.to_csv(
-        os.path.join(
-            gradcam_output_dir,
-            f'cell_token_attribution_scores_{obs_value}_block_{block_n}.csv',
-        ),
-        index=False,
-    )
-
-    if save_plot:
-        # Sorting the DataFrame by 'scores_abs' in descending order
-        attribution_df_sorted_abs = attribution_df.sort_values(
-            by='scores_abs', ascending=False
-        )
-
-        plt.figure()
-        ax = sns.barplot(attribution_df_sorted_abs, x='GP', y='scores_abs')
-
-        ax.set_title(obs_value.capitalize().replace('_', ' '))
-        ax.set_ylabel('Absolute attribution score')
-        ax.set_xlabel('Gene Program')
-
-        # Rotating x-tick labels 90 degrees
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=90)
-
-        plt.tight_layout()
-
-        plt.savefig(
-            os.path.join(
-                gradcam_output_dir, f'cell_token_abs_attribution_scores_{obs_value}.pdf'
-            )
-        )
-        plt.close()
-
-        # Sorting the DataFrame by 'scores' in descending order
-        attribution_df_sorted = attribution_df.sort_values(by='scores', ascending=False)
-
-        plt.figure()
-        ax = sns.barplot(attribution_df_sorted, x='GP', y='scores')
-
-        ax.set_title(obs_value.capitalize().replace('_', ' '))
-        ax.set_ylabel('Attribution score')
-        ax.set_xlabel('Gene Program')
-
-        # Rotating x-tick labels 90 degrees
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=90)
-
-        plt.tight_layout()
-
-        plt.savefig(
-            os.path.join(
-                gradcam_output_dir, f'cell_token_attribution_scores_{obs_value}.pdf'
-            )
-        )
-        plt.close()
 
 
 def visualize_with_gene_exp(
@@ -1628,7 +984,11 @@ def visualize_with_gene_exp(
     scale=False,
 ):
     """
-    UMAP of GP embeddings
+    Visualize gene program embeddings with gene expression overlay on UMAP.
+
+    Creates UMAP plots of gene program embeddings colored by gene expression
+    levels. Optionally filters data and displays additional metadata labels.
+
     """
     os.chdir(output_dir)
 
@@ -1752,6 +1112,50 @@ def calc_eval_metrics(
     normalize=False,
     model_type='knn',
 ):
+    """
+    Calculate evaluation metrics for gene program embeddings using supervised learning.
+
+    Trains a classifier or regressor on gene program embeddings and evaluates
+    performance on a test set. Supports multiple model types and tasks.
+
+    Parameters
+    ----------
+    train_set : datasets.Dataset or anndata.AnnData
+        Training data containing embeddings and labels.
+    test_set : datasets.Dataset or anndata.AnnData
+        Test data containing embeddings and labels.
+    gp : str
+        Gene program name to use for embeddings. For AnnData, use 'cell_token'
+        to use full .X matrix.
+    label : str
+        Column name containing target labels for classification/regression.
+    output_dir : str
+        Directory where results CSV will be saved.
+    k : int, default=20
+        Number of neighbors for KNN models.
+    data_type : {'dataset', 'h5ad'}, default='dataset'
+        Format of input data.
+    task : {'classification', 'regression'}, default='classification'
+        Type of supervised learning task.
+    normalize : bool, default=False
+        Whether to normalize embeddings by row sum. Only for AnnData input.
+    model_type : {'knn', 'linear', 'logistic'}, default='knn'
+        Type of model to use:
+        - 'knn': K-nearest neighbors
+        - 'linear': Linear regression (regression only)
+        - 'logistic': Logistic regression (classification only)
+
+    Returns
+    -------
+    None
+        Results are saved to CSV file in output_dir.
+
+    Notes
+    -----
+    For classification tasks, saves a detailed classification report with
+    precision, recall, and F1 scores per class. For regression tasks, saves
+    MSE, MAE, and R² metrics.
+    """
     np.random.seed(0)
     random.seed(0)
 
@@ -1863,94 +1267,6 @@ def calc_eval_metrics(
     return None
 
 
-# --------------------------
-# Gene embeddings analysis
-# --------------------------
-
-
-def calculate_gene_to_gp_cosine_similarity(
-    gene_data,
-    cell_data,
-    gp,
-    genes,
-):
-    # 1. Extract cell embeddings
-    print('Exctracting cell data')
-    cell_idx = cell_data['idx']
-    cell = np.asarray(cell_data[gp])
-
-    # 2. Extract gene embeddings
-    print(
-        'Extracting gene data'
-        ' (depending on the size of your data, this can take a few minutes)'
-    )
-    gene_idx = gene_data['idx']
-
-    gene_arrays = {}
-
-    for gene in tqdm(genes, desc='Extracting genes', leave=False):
-        if gene in gene_data.column_names:
-            gene_arrays[gene] = np.asarray(gene_data[gene])
-
-    # 3. Align indices
-    print('Aligning indices')
-    shared_indices, cell, gene_arrays = align_indices(
-        cell_idx, gene_idx, cell, gene_arrays
-    )
-
-    # 4. Calculate cosine similarity
-    print('Calculating cosine similarity')
-    cosim_df = pd.DataFrame(index=shared_indices, columns=gene_arrays.keys())
-
-    for gene, gene_arr in tqdm(gene_arrays.items(), leave=False):
-        cosim_df[gene] = [1 - cosine(gp, g) for gp, g in zip(cell, gene_arr)]
-
-        # find indices where gene_arr is all 0
-        zero_indices = np.where(np.all(gene_arr == 0, axis=1))[0]
-        zero_labels = cosim_df.index[zero_indices]
-        cosim_df.loc[zero_labels, gene] = np.nan
-
-    return cosim_df
-
-
-def pivot_cosine_similarity_data_longer(
-    cosim_df,
-    cell_data,
-    meta_cols,
-    missing_gene_threshold=None,
-    fillna=False,
-):
-    # Remove genes with too many missing values
-    if missing_gene_threshold:
-        col_to_drop = []
-
-        for g in cosim_df.columns:
-            if (
-                len(cosim_df[cosim_df[g].isna()])
-                > missing_gene_threshold * cosim_df.shape[0]
-            ):
-                col_to_drop.append(g)
-
-        print('Number of columns to drop', len(col_to_drop))
-
-        cosim_df = cosim_df.drop(columns=col_to_drop)
-
-    if 'idx' not in meta_cols:
-        meta_cols = ['idx'] + meta_cols
-
-    obs_df = cell_data.select_columns(meta_cols).to_pandas()
-
-    merged_df = cosim_df.join(obs_df.set_index('idx'))
-    merged_df['idx'] = merged_df.index.values
-
-    # Wrangling dataframe into long format
-    df_long = merged_df.melt(
-        id_vars=meta_cols, var_name='gene', value_name='cosine_sim'
-    )
-
-    return df_long
-
-
 # ===================================
 # Gene, GP cosine similarity
 # ===================================
@@ -1965,17 +1281,57 @@ def calculate_gene_significance(
     fillna=False,
 ):
     """
-    Vectorized, sparse-safe per-gene stats with BH correction.
+    Calculate statistical significance of gene differences between two groups.
 
-    input_data:
-      - AnnData: uses .X (sparse OK), .obs[obs_col], .var_names
-      - DataFrame (long): must contain ['gene','cosine_sim', obs_col]
-    obs_col / obs_value_ref / obs_value_query:
-      - group variable and the two levels to compare
-    adata_gene_threshold:
-      - drop genes that are zero in > threshold fraction of cells (0..1)
-    fillna:
-      - if DataFrame path, fill NaNs in cosine_sim with 0 (treat missing as zero)
+    Performs gene-wise t-tests comparing reference and query groups, with
+    Benjamini-Hochberg multiple testing correction. Supports both AnnData
+    (with sparse matrices) and long-format DataFrame inputs.
+
+    Parameters
+    ----------
+    input_data : anndata.AnnData or pandas.DataFrame
+        Input data containing gene information. For AnnData, uses .X matrix
+        (sparse supported) with genes in .var_names. For DataFrame, must
+        contain columns: ['gene', 'cosine_sim', obs_col].
+    obs_col : str, optional
+        Column name containing group labels. Required if obs_value_ref and
+        obs_value_query are provided.
+    obs_value_ref : str, optional
+        Value in obs_col identifying the reference group.
+    obs_value_query : str, optional
+        Value in obs_col identifying the query group.
+    adata_gene_threshold : float, default=0.9
+        For AnnData input only. Removes genes that are zero in more than this
+        fraction of cells (0 to 1).
+    fillna : bool, default=False
+        For DataFrame input only. If True, fills NaN values in 'cosine_sim'
+        with 0.
+
+    Returns
+    -------
+    results : pandas.DataFrame
+        DataFrame with columns:
+        - 'gene': gene name
+        - 'p_value': raw p-value from t-test
+        - 'mean_ref': mean value in reference group
+        - 'mean_query': mean value in query group
+        - 'effect_size': difference (mean_query - mean_ref)
+        - 'p_adjusted': Benjamini-Hochberg adjusted p-value
+        - 'significance': star notation ('***', '**', '*', or '')
+
+    Raises
+    ------
+    ValueError
+        If required parameters are missing or no cells found for specified groups.
+    KeyError
+        If required columns are missing from DataFrame input.
+
+    Notes
+    -----
+    - For AnnData, efficiently handles sparse matrices without densification
+    - Uses equal-variance t-test
+    - Significance stars: *** p<0.001, ** p<0.01, * p<0.05
+    - Genes with insufficient data (n<=1) for either group get NaN p-values
     """
     # ---- DataFrame path (backwards compatible) ----
     if isinstance(input_data, pd.DataFrame):
@@ -2084,8 +1440,60 @@ def plot_top_genes(
     save_to=None,
 ):
     """
-    Plot using the columns from calculate_gene_significance(...):
-      ['gene','mean_ref','mean_query','effect_size','p_adjusted','significance'].
+    Create a 2x2 grid of bar plots showing top genes by various metrics.
+
+    Generates four subplots:
+    1. Top genes by mean cosine similarity in reference group
+    2. Top genes by mean cosine similarity in query group
+    3. Top genes with strongest negative effect (ref > query)
+    4. Top genes with strongest positive effect (query > ref)
+
+    Parameters
+    ----------
+    stats_df : pandas.DataFrame
+        Output from calculate_gene_significance with columns:
+        ['gene', 'mean_ref', 'mean_query', 'effect_size', 'p_adjusted', 'significance'].
+    obs_value_ref : str, optional
+        Label for reference group (used in titles).
+    obs_value_query : str, optional
+        Label for query group (used in titles).
+    gp_to_color : str, optional
+        Gene program name for custom coloring. Requires gpdb.
+    gpdb : pandas.DataFrame, optional
+        Gene program database for custom coloring.
+    topn : int, default=10
+        Number of top genes to display in each subplot.
+    figsize : tuple, default=(18, 14)
+        Figure size in inches (width, height).
+    show_significance : bool, default=True
+        Whether to show significance stars on effect size plots.
+    color_scheme : {'default', 'significance'}, default='default'
+        Coloring scheme:
+        - 'default': uses gp_to_color if provided, else default seaborn colors
+        - 'significance': colors bars by -log10(p_adjusted) with colorbar
+    significance_palette : str or list, default='Blues'
+        For color_scheme='significance':
+        - str: matplotlib colormap name
+        - list: [ref_color, query_color] for custom colors
+    palette_as_gradient : bool, default=False
+        If True with list significance_palette, creates white-to-color gradients.
+    hspace : float, default=0.5
+        Vertical spacing between subplots.
+    wspace : float, default=0.5
+        Horizontal spacing between subplots.
+    save_to : str, optional
+        Path to save figure. If None, figure is only displayed.
+
+    Returns
+    -------
+    None
+        Displays and optionally saves the plot.
+
+    Notes
+    -----
+    - Significance stars: *** p<0.001, ** p<0.01, * p<0.05
+    - Non-significant genes (p≥0.05) shown in gray when color_scheme='significance'
+    - Effect size is calculated as mean_query - mean_ref
     """
     # defensive copy & ordering
     df = stats_df.copy()
@@ -2339,6 +1747,25 @@ def plot_top_genes(
 
 
 def compute_phate(adata, n_components=2):
+    """
+    Compute PHATE dimensionality reduction on AnnData object.
+
+    PHATE (Potential of Heat-diffusion for Affinity-based Transition Embedding)
+    is a dimensionality reduction method that preserves both local and global
+    structure in high-dimensional data.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object containing data in .X matrix.
+    n_components : int, default=2
+        Number of dimensions in the PHATE embedding.
+
+    Returns
+    -------
+    data_phate : numpy.ndarray
+        PHATE embedding with shape (n_cells, n_components).
+    """
     phate_operator = phate.PHATE(n_components=n_components)
     data_phate = phate_operator.fit_transform(adata.X)
     return data_phate
@@ -2347,6 +1774,38 @@ def compute_phate(adata, n_components=2):
 def plot_phate(
     data_phate, adata, label, label_order, output_file, color_map='Spectral'
 ):
+    """
+    Create and save a PHATE scatter plot colored by categorical labels.
+
+    Generates a 2D scatter plot of PHATE embeddings with points colored
+    according to a categorical label, using a fixed category order.
+
+    Parameters
+    ----------
+    data_phate : numpy.ndarray
+        PHATE embedding coordinates with shape (n_cells, n_components).
+    adata : anndata.AnnData
+        AnnData object containing metadata in .obs.
+    label : str
+        Column name in adata.obs to use for coloring points.
+    label_order : list of str
+        Desired order of categories for color assignment and legend.
+    output_file : str
+        Path where the plot will be saved as PDF.
+    color_map : str, default='Spectral'
+        Name of matplotlib colormap to use for category colors.
+
+    Returns
+    -------
+    None
+        Saves plot to output_file and displays it.
+
+    Notes
+    -----
+    - Categories not present in data are automatically filtered from label_order
+    - Legend is placed outside the plot area (upper left, bbox_to_anchor=(1, 1))
+    - Uses scprep.plot.scatter2d for plotting
+    """
     # Desired fixed order of categories
     fixed_order = [c for c in label_order if c in adata.obs[label].unique()]
 
@@ -2405,12 +1864,32 @@ def plot_phate(
 
 def plot_gp_score_fold_change(df, title_ct, top_n=10, color_map='Blues', save_to=None):
     """
-    Plots a horizontal bar plot with bars colored by -log10(pvals_adj).
-    The colorbar directly reflects -log10(pvals_adj) values.
+    Create horizontal bar plot of top gene programs by log fold change.
 
-    Parameters:
-    - df: pandas DataFrame with columns: names, scores, logfoldchanges, pvals, pvals_adj
-    - top_n: number of top entries by absolute log fold change
+    Visualizes the top gene programs ranked by log fold change, with bars
+    colored by statistical significance (-log10 of adjusted p-value).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame with columns:
+        - 'names': gene program names
+        - 'logfoldchanges': log fold change values
+        - 'pvals_adj': adjusted p-values
+        Additional columns may be present but are not used.
+    title_ct : str
+        Cell type or condition name to include in plot title.
+    top_n : int, default=10
+        Number of top gene programs to display.
+    color_map : str, default='Blues'
+        Name of matplotlib colormap for coloring bars by significance.
+    save_to : str, optional
+        Path to save the figure. If None, figure is only displayed.
+
+    Returns
+    -------
+    None
+        Displays and optionally saves the plot.
     """
     # Prepare data
     df_sorted = df.reindex(df['logfoldchanges'].sort_values(ascending=False).index)
@@ -2470,6 +1949,60 @@ def plot_gp_scores_per_cell(
     save=None,
     **kwargs,
 ):
+    """
+    Create heatmap of gene program scores across cells grouped by category.
+
+    Generates a heatmap showing gene program scores for individual cells,
+    sorted within groups and optionally smoothed with a moving average.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object containing gene program scores.
+    var_names : list of str
+        List of variable names (genes/gene programs) to plot. Must exist
+        in adata.var_names.
+    groupby : str
+        Column name in adata.obs for grouping cells.
+    layer : str, default='Ms'
+        Layer name in adata.layers to use for scores. If not found, uses .X.
+    color_map : str, default='viridis'
+        Matplotlib colormap name for heatmap colors.
+    n_convolve : int, default=20
+        Window size for moving average smoothing. If None, no smoothing applied.
+    min_max_scale : {0, 1, None}, optional
+        Normalization method:
+        - 0: normalize each gene (row) independently to [0, 1]
+        - 1: normalize across all values to [0, 1]
+        - None: no normalization
+    colorbar : bool, optional
+        Whether to show colorbar. Default depends on context.
+    context : str, optional
+        Seaborn plotting context ('paper', 'notebook', 'talk', 'poster').
+    font_scale : float, optional
+        Font scale multiplier for seaborn context.
+    figsize : tuple, default=(10, 4)
+        Figure size in inches (width, height).
+    show : bool, optional
+        Whether to display the plot. If None, shows by default.
+    save : str, optional
+        Path to save the figure. If None, figure is not saved.
+    **kwargs
+        Additional keyword arguments (currently unused).
+
+    Returns
+    -------
+    None
+        Displays and optionally saves the plot.
+
+    Notes
+    -----
+    - Cells are sorted within each group by the first variable in var_names
+    - Group boundaries are marked with vertical black lines
+    - Group names are displayed below the heatmap
+    - Invalid genes are skipped with a warning during smoothing
+    - NaN and Inf values are replaced with 0
+    """
     # Filter valid genes
     var_names = [g for g in var_names if g in adata.var_names]
     if not var_names:
