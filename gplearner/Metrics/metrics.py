@@ -17,10 +17,21 @@ from tqdm import tqdm
 
 
 def calc_gp_stats(model, dm):
-    """
-    Calculate the number of genes per cell per GP
-    (only using validation set to save time)
+    """Calculate number of genes per cell for each gene program.
 
+    Uses validation set only to save computation time.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Model with gp_inputs attribute listing gene programs.
+    dm : DataModule
+        Data module with validation dataloader and metadata.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with gene counts per cell for each GP and metadata.
     """
     dm.setup()
 
@@ -102,18 +113,28 @@ def calc_gp_stats(model, dm):
 
 
 def mmd_loss_calc(source_features, target_features, gamma):
-    """Initializes Maximum Mean Discrepancy(MMD)
-    between source_features and target_features.
-    - Gretton, Arthur, et al. "A Kernel Two-Sample Test". 2012.
+    """Calculate Maximum Mean Discrepancy (MMD) loss.
+
+    Computes MMD between source and target feature distributions using
+    RBF kernel.
+
     Parameters
     ----------
-    source_features: torch.Tensor
-         Tensor with shape [batch_size, z_dim]
-    target_features: torch.Tensor
-         Tensor with shape [batch_size, z_dim]
+    source_features : torch.Tensor
+        Source distribution features, shape (batch_size, z_dim).
+    target_features : torch.Tensor
+        Target distribution features, shape (batch_size, z_dim).
+    gamma : float
+        RBF kernel scaling parameter.
+
     Returns
     -------
-    Returns the computed MMD between x and y.
+    torch.Tensor
+        Computed MMD value between distributions.
+
+    References
+    ----------
+    Gretton, Arthur, et al. "A Kernel Two-Sample Test". 2012.
     """
 
     xx = rbf_kernel(source_features, source_features, gamma)
@@ -260,32 +281,38 @@ def wasserstein(
     power: int = 2,
     **kwargs,
 ) -> float:
-    """
-    Compute the Wasserstein distance between two distributions.
+    """Compute Wasserstein distance between two distributions.
 
-    Args:
-        x0 (torch.Tensor): The first distribution.
-        x1 (torch.Tensor): The second distribution.
-        method (Optional[str], optional):
-            The method for computing Wasserstein distance.
-            Options are "exact", "sinkhorn". Defaults to None.
-        reg (float, optional):
-            Regularization parameter for the Sinkhorn method.
-            Defaults to 0.05.
-        power (int, optional):
-            Power for the distance computation, can be 1 or 2.
-            Defaults to 2.
-        **kwargs: Additional keyword arguments.
+    Parameters
+    ----------
+    x0 : torch.Tensor
+        The first distribution.
+    x1 : torch.Tensor
+        The second distribution.
+    method : {'exact', 'sinkhorn'} or None, optional
+        Method for computing Wasserstein distance. If None, uses 'exact'
+        (default: None).
+    reg : float, optional
+        Regularization parameter for the Sinkhorn method (default: 0.05).
+    power : {1, 2}, optional
+        Power for the distance computation (default: 2).
+    **kwargs
+        Additional keyword arguments.
 
-    Raises:
-        ValueError: If an unknown method is provided.
+    Returns
+    -------
+    float
+        The computed Wasserstein distance.
 
-    Returns:
-        float: The computed Wasserstein distance.
+    Raises
+    ------
+    ValueError
+        If an unknown method is provided.
 
-    From https://github.com/atong01/conditional-flow-matching/
-    blob/v0/src/models/components/optimal_transport.py
-
+    References
+    ----------
+    From https://github.com/atong01/conditional-flow-matching/blob/
+    v0/src/models/components/optimal_transport.py
     """
     assert power == 1 or power == 2
     # ot_fn should take (a, b, M) as arguments where a, b are marginals and
@@ -358,22 +385,32 @@ def poly_mmd2(f_of_X, f_of_Y, d=2, alpha=1.0, c=2.0):
 def compute_distribution_distances(
     pred: torch.Tensor, true: torch.Tensor, method='sinkhorn'
 ):
-    """
-    Computes distances between predicted and true distributions.
+    """Compute distribution distances between predicted and true distributions.
 
-    Args:
-        pred (torch.Tensor):
-            Predicted tensor of shape [batch, times, dims].
-        true (Union[torch.Tensor, list]):
-            True tensor of shape [batch, times, dims]
-            or list of tensors of length times.
+    Calculates multiple distance metrics including Wasserstein distances and
+    Maximum Mean Discrepancy (MMD) variants.
 
-    Returns:
-        dict: Dictionary containing the computed distribution distances.
+    Parameters
+    ----------
+    pred : torch.Tensor
+        Predicted tensor of shape (batch, times, dims).
+    true : torch.Tensor or list
+        True tensor of shape (batch, times, dims) or list of tensors of
+        length times.
+    method : str, optional
+        Method for Wasserstein computation (default: 'sinkhorn').
 
-    from https://github.com/theislab/CFGen/blob/main/
-    cfgen/eval/distribution_distances.py#L16
-    accessed 24/09/24
+    Returns
+    -------
+    dict
+        Dictionary containing computed distribution distances with keys:
+        '1-Wasserstein', '2-Wasserstein', 'Linear_MMD', 'Poly_MMD'.
+
+    References
+    ----------
+    From https://github.com/theislab/CFGen/blob/main/cfgen/
+    eval/distribution_distances.py#L16
+    (accessed 24/09/24)
     """
     min_size = min(pred.shape[0], true.shape[0])
 
@@ -396,16 +433,25 @@ def compute_distribution_distances(
 
 
 def euclidean_kernel_matrix(X, Y, gamma=1.0):
-    """
-    Compute the Euclidean kernel matrix based on pairwise Euclidean distances.
+    """Compute Euclidean kernel matrix from pairwise distances.
 
-    Parameters:
-        X (ndarray): Samples from distribution P, shape (m, d).
-        Y (ndarray): Samples from distribution Q, shape (n, d).
-        gamma (float): Kernel scaling factor.
+    Parameters
+    ----------
+    X : ndarray
+        Samples from distribution P, shape (m, d).
+    Y : ndarray
+        Samples from distribution Q, shape (n, d).
+    gamma : float, optional
+        Kernel scaling factor (default: 1.0).
 
-    Returns:
-        K_xx, K_yy, K_xy: Kernel matrices.
+    Returns
+    -------
+    K_xx : ndarray
+        Kernel matrix for X with itself.
+    K_yy : ndarray
+        Kernel matrix for Y with itself.
+    K_xy : ndarray
+        Cross kernel matrix between X and Y.
     """
     return (
         np.exp(-gamma * cdist(X, X, 'euclidean')),
@@ -415,16 +461,21 @@ def euclidean_kernel_matrix(X, Y, gamma=1.0):
 
 
 def compute_mmd(X, Y, gammas):
-    """
-    Compute the Maximum Mean Discrepancy (MMD) between two distributions.
+    """Compute Maximum Mean Discrepancy (MMD) between distributions.
 
-    Parameters:
-        X (ndarray): Samples from distribution P, shape (m, d).
-        Y (ndarray): Samples from distribution Q, shape (n, d).
-        gamma (float): Kernel scaling factor.
+    Parameters
+    ----------
+    X : ndarray
+        Samples from distribution P, shape (m, d).
+    Y : ndarray
+        Samples from distribution Q, shape (n, d).
+    gammas : list of float
+        List of kernel scaling factors to test.
 
-    Returns:
-        float: MMD value.
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 'gamma' and 'mmd' columns for each scaling factor.
     """
 
     mmd = []
@@ -444,7 +495,22 @@ def compute_mmd(X, Y, gammas):
 
 
 def compute_sinkhorn(adata1, adata2, epsilons):
-    """Compute Sinkhorn divergence between two datasets."""
+    """Compute Sinkhorn divergence between two datasets.
+
+    Parameters
+    ----------
+    adata1 : AnnData
+        First dataset.
+    adata2 : AnnData
+        Second dataset.
+    epsilons : list of float
+        Regularization parameters to test.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 'epsilon' and 'sinkhorn_divergence' columns.
+    """
     x, y = jnp.array(adata1.X), jnp.array(adata2.X)
     results = [
         sinkhorn_divergence(pointcloud.PointCloud, x=x, y=y, epsilon=eps)[0]

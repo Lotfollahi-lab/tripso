@@ -1149,7 +1149,9 @@ def plot_umap_with_centroids(
     plt.close()
 
 
-def plot_num_pairs_by_gp(df, col, value, sort_by=None, sort_by_row=None, **kwargs):
+def plot_num_pairs_by_gp(
+    df, col, value, sort_by=None, sort_by_row=None, highlight=None, **kwargs
+):
     '''
     Make a heatmap where rows are source/target cell types,
     columns are GPs, and values are counts of pairs mapped to each population.
@@ -1160,6 +1162,9 @@ def plot_num_pairs_by_gp(df, col, value, sort_by=None, sort_by_row=None, **kwarg
 
     sort_by_row:
         - str: name of the row (mapped cell type) to sort GP columns by
+
+    highlight:
+        - list: GP labels to highlight in red on the x-axis
 
     **kwargs:
         arguments passed to sns.heatmap (cmap, annot, vmin, vmax, etc.)
@@ -1198,8 +1203,14 @@ def plot_num_pairs_by_gp(df, col, value, sort_by=None, sort_by_row=None, **kwarg
     heatmap_data = heatmap_data[sorted_columns]
 
     # Create the heatmap
-    plt.figure(figsize=(12, 8))
-    sns.heatmap(heatmap_data, cbar=True, linewidths=0.5, **kwargs)
+    fig, ax = plt.subplots(figsize=(12, 8))
+    sns.heatmap(heatmap_data, cbar=True, linewidths=0.5, ax=ax, **kwargs)
+
+    # Color specified GP labels in red
+    if highlight is not None:
+        for i, label in enumerate(heatmap_data.columns):
+            if label in highlight:
+                ax.get_xticklabels()[i].set_color('red')
 
     plt.xlabel('GP')
     plt.ylabel('Mapped cell type')

@@ -4,7 +4,6 @@ from typing import Dict
 
 import torch
 import torch.nn.functional as F
-from torchmetrics.functional import pairwise_cosine_similarity
 
 from .utils import one_hot_encoder
 
@@ -155,20 +154,6 @@ def zinb(
 
     res = mul_case_zero + mul_case_non_zero
     return res
-
-
-def compute_gp_similarity_loss(z, true_gp_similarity):
-    # calculate pairwise cosine similarity
-    cs = []
-    for i in range(z.shape[0]):
-        c = pairwise_cosine_similarity(z[i, :])
-        cs.append(c)
-    gp_cosine_similarity = torch.stack(cs)
-
-    # compute loss
-    gp_similarity_loss = F.mse_loss(gp_cosine_similarity, true_gp_similarity)
-
-    return gp_similarity_loss
 
 
 def compute_count_loss(
