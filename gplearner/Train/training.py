@@ -91,7 +91,6 @@ def run_training(
     val_check_interval: Optional[float] = 1.0,
     use_pos_emb: Optional[str] = 'sin_cos',
     global_pos_emb: Optional[str] = 'sin_cos',
-    use_onehot_wrapper: Optional[bool] = False,
     vocab_gene_names: Optional[list] = None,
     precision=32,  # 'bf16-mixed',
     bert_config: Dict = {},
@@ -222,8 +221,6 @@ def run_training(
         Type of positional embedding for gene encoder
     global_pos_emb : Optional[str], default='sin_cos'
         Type of positional embedding for global model
-    use_onehot_wrapper : Optional[bool], default=False
-        Whether to use one-hot encoding wrapper for gene encoder
     vocab_gene_names : Optional[list], default=None
         List of gene names in vocabulary for one-hot encoding
     precision : int or str, default=32
@@ -303,7 +300,6 @@ def run_training(
         sampler=sampler,
         label_key=sample_by,
         seed=data_seed,
-        load_exp=use_onehot_wrapper is True,
         model_input_size=model_input_size,
         output_dir=output_dir,
     )
@@ -559,7 +555,6 @@ def configure_logger(args):
             'frac_for_training': args['frac_for_training'],
             'use_flash': args['use_flash'],
             'weight_decay': args['weight_decay'],
-            'use_onehot_wrapper': args['use_onehot_wrapper'],
             'use_pos_emb': args['use_pos_emb'],
             'precision': args['precision'],
             'fm_encoder_name': args['fm_encoder_name'],
@@ -639,7 +634,6 @@ def configure_model(args):
         'learn_new_gp': args['learn_new_gp'],
         'peft_config_path': args['peft_config_path'],
         'use_pos_emb': args['use_pos_emb'],
-        'use_onehot_wrapper': args['use_onehot_wrapper'],
         'vocab_gene_names': args['vocab_gene_names'],
         'do_ensembl_conversion': args['gene_format'] == 'symbol',
         'fm_encoder_name': args['fm_encoder_name'],

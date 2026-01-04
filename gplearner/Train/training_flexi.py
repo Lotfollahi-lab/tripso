@@ -84,7 +84,6 @@ def run_training_from_select_gps(
     calc_gp_loss: bool = True,
     all_genes: Optional[list] = None,
     use_pos_emb: Optional[str] = 'sin_cos',
-    use_onehot_wrapper: bool = False,
     vocab_gene_names: Optional[str] = None,
     num_nodes: int = 1,
     limit_train_batches: float = 1.0,
@@ -215,8 +214,6 @@ def run_training_from_select_gps(
         List of all genes to consider. If provided, masks GP genes in gene encoder
     use_pos_emb : Optional[str], default='sin_cos'
         Type of positional embedding for gene encoder
-    use_onehot_wrapper : bool, default=False
-        Whether to use one-hot encoding wrapper for gene encoder
     vocab_gene_names : Optional[str], default=None
         List of gene names in vocabulary for one-hot encoding
     num_nodes : int, default=1
@@ -309,7 +306,6 @@ def run_training_from_select_gps(
         sampler=sampler,
         label_key=sample_by,
         seed=data_seed,
-        load_exp=use_onehot_wrapper is True,
         model_input_size=model_input_size,
     )
 
@@ -487,7 +483,6 @@ def configure_model_version(args, tag):
         'fm_encoder_name': args['fm_encoder_name'],
         'peft_config_path': args['peft_config_path'],
         'use_pos_emb': args['use_pos_emb'],
-        'use_onehot_wrapper': args['use_onehot_wrapper'],
         'vocab_gene_names': args['vocab_gene_names'],
         'do_ensembl_conversion': args['gene_format'] == 'symbol',
         'bert_config': args['bert_config'],

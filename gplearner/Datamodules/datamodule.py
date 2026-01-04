@@ -215,8 +215,6 @@ class txDataModule(LightningDataModule):
         fm_encoder_name (str): Name of foundation model encoder.
             Defaults to 'gf-6L-30M-i2048'.
         seed (int): Random seed for data splitting. Defaults to 0.
-        load_exp (bool): Whether to load normalized expression values.
-            Defaults to False.
         model_input_size (int): Maximum input sequence length for padding.
             Required.
         output_dir (str): Output directory path. Defaults to './'.
@@ -243,7 +241,6 @@ class txDataModule(LightningDataModule):
         frac_for_generation=1,
         fm_encoder_name='gf-6L-30M-i2048',
         seed=0,
-        load_exp=False,
         model_input_size=None,
         output_dir='./',
         # development only:
@@ -266,7 +263,6 @@ class txDataModule(LightningDataModule):
         self.filter_value = filter_value
         self.frac_for_generation = frac_for_generation
         self.seed = seed
-        self.load_exp = load_exp
         self.model_input_size = model_input_size
         if model_input_size is None:
             raise ValueError('Please specify input sequence length')
@@ -472,10 +468,6 @@ class txDataModule(LightningDataModule):
             'input_ids': input_batch_id.clone().detach(),
             'length': length.clone().detach(),
         }
-
-        if self.load_exp:
-            norm_exp = [torch.tensor(d['norm_exp']) for d in tokenized_batch]
-            output_dict['norm_exp'] = torch.stack(norm_exp)
 
         # Keep track of metadata
         for m in self.metadata:
