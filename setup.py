@@ -17,6 +17,7 @@ setup(
             "sphinx~=8.1.3",  # last version to support Python 3.10
             "sphinx-autobuild~=2024.10.3",  # last version to suppport Python 3.10
             "sphinx-rtd-theme~=3.0.2",
+            "myst-nb~=1.3.0",
         ],
     },
     entry_points={
