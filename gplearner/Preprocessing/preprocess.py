@@ -13,16 +13,10 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 from datasets import concatenate_datasets, load_from_disk
-from geneformer import (
-    ENSEMBL_DICTIONARY_FILE,
-    TOKEN_DICTIONARY_FILE,
-    TranscriptomeTokenizer,
-)
-from scipy.sparse import issparse
+from geneformer import ENSEMBL_DICTIONARY_FILE, TranscriptomeTokenizer
 
 from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import do_balanced_downsampling_anndata, encode_labels
-from .gp_curation import make_gpdb
 from .tokenizer import GPTokenizer
 
 seed = 0
@@ -41,20 +35,12 @@ def pp_and_tokenize(
     subsample_by: Optional[List] = ['cell_type'],
     n_cells_per_class: int = 20_000,
     chunk_size: int = 50_000,
-    reference_gpdb: Union[List[str], str] = '/path/to/reference/databases',
-    use_ontology: Optional[bool] = False,
-    n_cells_to_count: Optional[int] = 100,
-    threshold_value: Optional[int] = 6,
-    overlap_threshold: Optional[float] = 0.5,
-    max_gp_len: Optional[int] = 100,
     name_tag: Optional[str] = 'Reactome',
     cov_to_encode: Union[List[str], str] = ['cell_type', 'condition'],
     batch_keys: Optional[List[str]] = None,
     tissue: Optional[str] = None,
-    save_intermediate: Optional[bool] = False,
     hvg_batch_key: Optional[str] = None,
     save_gp_genes_object: Optional[bool] = False,
-    pp_cellxgene: Optional[bool] = False,
     calculate_hvg: Optional[bool] = True,
     do_tokenization: Optional[bool] = True,
     use_gp_tokenizer: Optional[bool] = False,
@@ -62,43 +48,91 @@ def pp_and_tokenize(
     gp_genes_union: Optional[List[str]] = None,
     output_data_name: Optional[str] = None,
 ):
-    """
-    Preprocess and tokenize data for scGPL
+    """Preprocess and tokenize scRNA-seq data for GPformer training.
 
-    Parameters:
-    -----------
+    This function performs the complete preprocessing pipeline including:
+    - Loading and optionally subsampling AnnData objects
+    - Optionally calculating highly variable genes (HVGs)
+    - Splitting data into chunks (for reasonable RAM usage)
+    - Tokenizing data using Geneformer or custom tokenizer
+    - Encoding categorical covariates
+    - Optionally saving GP genes subset AnnData object
+
+    Parameters
+    ----------
     root_dir : str
-        Root directory where h5ad / tokenized data is stored
-    adata_path : str
-        Path to anndata object to tokenize
-    vars_to_keep : list
-        obs column names to keep from anndata object
-        these will be kept as columns in the input_dataset
-    subsample_by : list
-        Whether to subsample the dataset to balance across specific classes
-    n_cells_per_class : int
-        When doing balanced subsampling,
-        what is the minimum number of cells to keep in each class
-        If the number of cells in a category is less than this number,
-        keep all cells in that category
-    chunk_size : int
-        Size of chunks to split the data into
+        Output directory where processed h5ad and tokenized data will be saved.
+        Directory structure will be created as: root_dir/data/processed/
+    adata_path : str, optional
+        Path to input AnnData h5ad file to preprocess and tokenize.
+    input_size : int, default=2048
+        Maximum input sequence length for tokenization. Determines which
+        Geneformer token dictionary to use (2048 or 4096).
+    vars_to_keep : dict or list, default=['cell_type']
+        Metadata column names from adata.obs to retain in tokenized dataset.
+        If dict, maps obs column names to output column names.
+    subsample_by : list of str, optional, default=['cell_type']
+        Metadata columns to use for balanced downsampling. Set to None to
+        skip subsampling. Multiple columns will be combined.
+    n_cells_per_class : int, default=20000
+        Minimum number of cells to keep per class during balanced subsampling.
+        Classes with fewer cells will keep all available cells.
+    chunk_size : int, default=50000
+        Number of cells per chunk when splitting large datasets for tokenization.
+    name_tag : str, default='Reactome'
+        Identifier tag for gene program database filename (gpdb_{name_tag}.csv).
+    cov_to_encode : str or list of str, default=['cell_type', 'condition']
+        Metadata columns to encode as integer IDs (creates {column}_id columns).
+    batch_keys : list of str, optional
+        Metadata columns to combine into a 'batch_key' column (joined with '_').
+        Used for HVG calculation, and will be used in decoder
+        of count reconstruction step.
+    tissue : str, optional
+        Tissue type identifier for naming output files. If None, uses last
+        component of root_dir path.
+    hvg_batch_key : str, optional
+        Column name to use as batch key for highly variable gene calculation.
+        If None and batch_keys provided, uses 'batch_key'.
+    save_gp_genes_object : bool, default=False
+        Whether to save a separate h5ad file containing only genes from gene
+        programs in gpdb_{name_tag}.csv.
+    calculate_hvg : bool, default=True
+        Whether to calculate highly variable genes using Seurat v3 method
+        (top 2000 genes) and subset to HVGs.
+    do_tokenization : bool, default=True
+        Whether to perform tokenization step. Set to False to only preprocess.
+    use_gp_tokenizer : bool, default=False
+        Whether to use GPTokenizer (True) or standard TranscriptomeTokenizer
+        (False) for tokenization.
+    do_ensembl_conversion : bool, default=True
+        Whether to convert gene names to Ensembl IDs during tokenization.
+    gp_genes_union : list of str, optional
+        Union of all GP genes to be used in tokenizer. If None and
+        use_gp_tokenizer=True, will be loaded from gpdb_{name_tag}.csv.
+    output_data_name : str, optional
+        Custom name for output dataset directory. If None, uses 'input_dataset'.
 
-    reference_gpdb : list
-        List of paths to reference databases
-    use_ontology : bool
-        Whether to use ontology information to curate reference databases
-    n_cells_to_count : int
-        How many cells to use to count genes in reference databases
-    threshold_value : int
-        threshold for number of genes which must be expressed in 50% of cells
-    overlap_threshold : float
-        Threshold for overlap between GP
-    max_gp_len : int
-        Maximum length of GP
-    name_tag : str
-        Name tag for reference databases
+    Raises
+    ------
+    ValueError
+        If adata_path is not provided and no existing h5ad found in root_dir.
+        If hvg_batch_key cannot be determined when calculate_hvg=True.
+        If no GP genes found in dataset when save_gp_genes_object=True.
+        If gpdb_{name_tag}.csv file not found in root_dir.
 
+    Notes
+    -----
+    Expected gene program database format: CSV file where each column represents
+    a gene program and contains gene identifiers (one per row).
+
+    Output directory structure:
+        root_dir/
+            data/processed/
+                input_h5ad/          - Preprocessed h5ad files
+                tokenized/           - Tokenized datasets
+                input_dataset/       - Final encoded dataset
+                    or {output_data_name}/
+            gpdb_{name_tag}.csv      - Gene program database (must exist)
     """
     # Step 1 : Tokenize data
 
@@ -125,13 +159,6 @@ def pp_and_tokenize(
             adata.obs['batch_key'] = adata.obs[batch_keys].apply(
                 lambda x: '_'.join(x), axis=1
             )
-
-        if pp_cellxgene:
-            adata.var['ensembl_id'] = adata.var.index
-            if issparse(adata.X):
-                adata.obs['n_counts'] = adata.X.sum(axis=1).A1
-            else:
-                adata.obs['n_counts'] = adata.X.sum(axis=1)
 
         # optionally downsample
         if subsample_by is not None:
@@ -334,42 +361,15 @@ def pp_and_tokenize(
         else:
             print('Skipping preprocessing step')
 
-    # Step 3 : Prepare GP databases
+    # Step 3 : Check for GP databases
     if not os.path.exists(f'{root_dir}/gpdb_{name_tag}.csv'):
-        if input_size == 2048:
-            token_dict = pd.read_pickle(
-                os.path.join(
-                    geneformer_repo_path,
-                    'geneformer/gene_dictionaries_30m/token_dictionary_gc30M.pkl',
-                )
-            )
-
-            name_dict = pd.read_pickle(
-                os.path.join(
-                    geneformer_repo_path,
-                    'geneformer/gene_dictionaries_30m/gene_name_id_dict_gc30M.pkl',
-                )
-            )
-
-        else:
-            token_dict = pd.read_pickle(TOKEN_DICTIONARY_FILE)
-            name_dict = pd.read_pickle(ENSEMBL_DICTIONARY_FILE)
-
-        make_gpdb(
-            dataset_path=folder_path,
-            output_path=root_dir,
-            gp_inputs=reference_gpdb,
-            use_ontology=use_ontology,
-            n_cells_to_count=n_cells_to_count,
-            threshold_value=threshold_value,
-            overlap_threshold=overlap_threshold,
-            max_gp_len=max_gp_len,
-            name_tag=name_tag,
-            save_intermediate=save_intermediate,
-            token_dict=token_dict,
-            name_dict=name_dict,
+        raise ValueError(
+            'GP database not found'
+            'Please provide path to existing csv file'
+            'where each column corresponds to a gene program'
         )
 
+    # Step 4 : Save GP genes object
     if save_gp_genes_object:
         # Load GP genes
         if gp_genes_union is None:
@@ -418,3 +418,10 @@ def pp_and_tokenize(
         adata.write_h5ad(
             os.path.join(root_dir, f'data/processed/input_h5ad/{tissue}_gp_genes.h5ad')
         )
+
+    # Clean up empty (temporary) tokenized directories
+    tokenized_dir = os.path.join(root_dir, 'data/processed/tokenized')
+    if os.path.exists(tokenized_dir):
+        if not os.listdir(tokenized_dir):
+            os.rmdir(tokenized_dir)
+            print(f'Removed empty tokenized directory: {tokenized_dir}')

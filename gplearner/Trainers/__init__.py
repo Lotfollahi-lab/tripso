@@ -1,7 +1,3 @@
-from .trainer import (
-    gpBase,
-    gpGlobal,
-    gpPrototypes,
-)
+from .trainer import gpBase, gpGlobal
 
-__all__ = ['gpBase', 'gpGlobal', 'gpPrototypes']
+__all__ = ['gpBase', 'gpGlobal']

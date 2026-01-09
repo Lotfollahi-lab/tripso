@@ -2,13 +2,13 @@ from .baselines import (
     AverageNonZero,
     gfBaseline,
     gfGlobal,
+    gpAverager,
 )
 from .gp_model import (
     gfWrapper,
     gpTransformerBase,
     gpWrapper,
 )
-from .interpretability import iGlobalWrapper, iGpWrapper
 
 __all__ = [
     'gpTransformerBase',
@@ -18,6 +18,4 @@ __all__ = [
     'gpWrapper',
     'gfWrapper',
     'gfGlobal',
-    'iGlobalWrapper',
-    'iGpWrapper',
 ]

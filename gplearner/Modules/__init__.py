@@ -3,7 +3,6 @@ from .modules import (
     Block,
     Mlp,
     PositionalEncoding,
-    PromptEncoder,
     gpTransformerEncoder,
 )
 
@@ -13,5 +12,4 @@ __all__ = [
     'Attention',
     'Block',
     'PositionalEncoding',
-    'PromptEncoder',
 ]

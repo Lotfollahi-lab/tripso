@@ -2,7 +2,14 @@
 # Build custom tokenizer to return only GP genes
 ####################################################
 
+import logging
 from collections import Counter
+from typing import (
+    Dict,
+    List,
+    Literal,
+    Optional,
+)
 
 import numpy as np
 import pandas as pd
@@ -12,10 +19,23 @@ from datasets import Dataset
 from geneformer.tokenizer import TranscriptomeTokenizer
 from tqdm import tqdm
 
+logger = logging.getLogger(__name__)
+
 
 def rank_genes(gene_vector, gene_tokens):
-    """
-    Rank gene expression vector.
+    """Rank genes by expression values.
+
+    Parameters
+    ----------
+    gene_vector : np.ndarray
+        Gene expression values.
+    gene_tokens : np.ndarray
+        Corresponding gene token IDs.
+
+    Returns
+    -------
+    np.ndarray
+        Gene tokens sorted by descending expression values.
     """
     # sort by median-scaled gene values
     sorted_indices = np.argsort(-gene_vector)
@@ -31,9 +51,24 @@ def sum_ensembl_ids(
     file_format='loom',
     chunk_size=512,
 ):
-    """
-    Map Ensembl IDs from gene mapping dictionary.
-    If duplicate Ensembl IDs are found, sum counts together.
+    """Map and collapse Ensembl IDs, summing duplicate counts.
+
+    Parameters
+    ----------
+    data_directory : str
+        Directory containing data files.
+    collapse_gene_ids : bool
+        Whether to collapse duplicate gene IDs.
+    gene_mapping_dict : dict
+        Dictionary mapping gene names to Ensembl IDs.
+    gene_token_dict : dict
+        Dictionary mapping Ensembl IDs to tokens.
+    custom_attr_name_dict : dict
+        Dictionary of custom attribute names.
+    file_format : {'loom', 'h5ad'}, optional
+        Format of input files (default: 'loom').
+    chunk_size : int, optional
+        Number of files to process per chunk (default: 512).
     Returns adata object with deduplicated Ensembl IDs.
     """
 
@@ -208,8 +243,11 @@ class GPTokenizer(TranscriptomeTokenizer):
 
         return output_dataset_truncated
 
-    def tokenize_files(self, data_directory, file_format='h5ad'):
+    def tokenize_files(
+        self, data_directory, file_format: Literal['loom', 'h5ad'] = 'h5ad'
+    ):
         tokenized_cells = []
+        cell_metadata: Optional[Dict[str, List]] = None
         if self.custom_attr_name_dict is not None:
             cell_attr = [attr_key for attr_key in self.custom_attr_name_dict.keys()]
             cell_metadata = {
@@ -227,7 +265,7 @@ class GPTokenizer(TranscriptomeTokenizer):
             print(f'Tokenizing {file_path}')
             file_tokenized_cells, file_cell_metadata = tokenize_file_fn(file_path)
             tokenized_cells += file_tokenized_cells
-            if self.custom_attr_name_dict is not None:
+            if self.custom_attr_name_dict is not None and cell_metadata is not None:
                 for k in cell_attr:
                     cell_metadata[self.custom_attr_name_dict[k]] += file_cell_metadata[
                         k
@@ -236,6 +274,9 @@ class GPTokenizer(TranscriptomeTokenizer):
                 cell_metadata = None
 
         if file_found == 0:
+            logger.error(
+                f'No .{file_format} files found in directory {data_directory}.'
+            )
             raise
         return tokenized_cells, cell_metadata
 
