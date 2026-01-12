@@ -102,7 +102,7 @@ def run_training(
     accumulate_grad_batches: Optional[int] = 1,
 ):
     """
-    Wrapper function for training gpLearner model
+    Wrapper function for training Tripso model
 
     Parameters
     ----------

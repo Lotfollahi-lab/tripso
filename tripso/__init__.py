@@ -1,5 +1,5 @@
 """
-Modules for gplearner method
+Modules for tripso method
 """
 
 from . import (

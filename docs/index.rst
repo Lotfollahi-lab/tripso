@@ -31,4 +31,4 @@ tripso
    :maxdepth: 4
    :caption: Python API
 
-   apidoc/gplearner/gplearner
+   apidoc/tripso/tripso

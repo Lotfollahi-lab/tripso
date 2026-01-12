@@ -1587,8 +1587,8 @@ class gpAblation(gpGlobal):
 
 
 if __name__ == '__main__':
-    from gplearner.Datamodules.datamodule import txDataModule
-    from gplearner.Models.gp_model import gpTransformerBase
+    from tripso.Datamodules.datamodule import txDataModule
+    from tripso.Models.gp_model import gpTransformerBase
 
     os.chdir(
         '/lustre/scratch126/cellgen/team292/mm58/geneformer_endometrium'

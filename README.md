@@ -12,7 +12,7 @@ We introduce **GPformer**, a self-supervised approach for learning gene program 
 
 Currently available:
 
-- [Modules](gplearner/Models/) :
+- [Modules](tripso/Models/) :
   - Base model for learning individual GP representations
   - Global model for learning cell representations based on gene expression reconstruction or supervised tasks
 
@@ -65,10 +65,10 @@ pip install -e .
 
 Example usage:
 ```
-import gplearner
+import tripso
 import os
 import pandas as pd
-from gplearner.Evaluate.downstream import calculate_gp_attribution_scores
+from tripso.Evaluate.downstream import calculate_gp_attribution_scores
 
 
 # Directory paths for loading/saving
@@ -92,7 +92,7 @@ gp_latent_size = 256
 lr_scheduler = 'CosineLRwithWarmUp'
 
 # load data and preprocess
-gplearner.pp_and_tokenize(root_dir=root_dir,
+tripso.pp_and_tokenize(root_dir=root_dir,
                           adata_path = os.path.join(root_dir, 'data/lung.h5ad'),
                           vars_to_keep = ['celltype', 'lineage', 'disease'],
                           cov_to_encode = ['celltype', 'lineage', 'disease'],
@@ -104,7 +104,7 @@ gplearner.pp_and_tokenize(root_dir=root_dir,
 
 
 # train model
-gplearner.train(
+tripso.train(
     dataset_path=data_dir,
     gpdb_path=gpdb_path,
     output_dir=output_dir,
@@ -142,7 +142,7 @@ output_dir = os.path.join(root_dir, "output_global")
 
 
 # train model
-gplearner.train(
+tripso.train(
     dataset_path=data_dir,
     gpdb_path=gpdb_path,
     output_dir=output_dir,
@@ -172,7 +172,7 @@ gplearner.train(
 ########################################################
 
 # downstream evaluation
-gp_downstream = gplearner.gpEval(
+gp_downstream = tripso.gpEval(
     dataset_path=data_dir,
     gpdb_path=gpdb_path,
     output_dir=output_dir,

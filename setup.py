@@ -6,7 +6,7 @@ with open('README.md') as f:
     long_description = f.read()
 
 setup(
-    name='gplearner',
+    name='tripso',
     packages=find_packages(),
     version='0.1.0',
     description='',
@@ -22,7 +22,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "tripso = gplearner.__main__:main",
+            "tripso = tripso.__main__:main",
         ],
     },
 )

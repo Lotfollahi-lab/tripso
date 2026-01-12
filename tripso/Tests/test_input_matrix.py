@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from gplearner.Utils.utils import build_gp_input_matrix
+from tripso.Utils.utils import build_gp_input_matrix
 
 
 class TestBuildGPInputMatrix(unittest.TestCase):

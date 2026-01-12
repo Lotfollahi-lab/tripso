@@ -100,7 +100,7 @@ def run_training_from_select_gps(
     resume_training: bool = False,
 ):
     """
-    Wrapper function for training gpLearner model with flexible GP selection.
+    Wrapper function for training Tripso model with flexible GP selection.
     This function allows training with separate old and new GP sets,
     this is useful for adding an individual GP or for GP discovery.
 
