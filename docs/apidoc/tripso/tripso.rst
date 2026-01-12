@@ -1,10 +1,10 @@
-gplearner package
-=================
+tripso package
+==============
 
 Module contents
 ---------------
 
-.. automodule:: gplearner
+.. automodule:: tripso
    :members:
    :undoc-members:
    :show-inheritance:
