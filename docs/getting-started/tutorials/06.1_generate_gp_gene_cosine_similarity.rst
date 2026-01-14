@@ -1,0 +1,6 @@
+Generating GP Gene Cosine Similarity
+====================================
+
+:download:`06.1_generate_gp_gene_cosine_similarity.py`
+
+.. literalinclude:: 06.1_generate_gp_gene_cosine_similarity.py

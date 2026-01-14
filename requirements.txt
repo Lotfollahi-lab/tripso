@@ -25,10 +25,11 @@ scprep==1.2.3
 seaborn==0.13.2
 setuptools==75.8.2
 statsmodels==0.14.4
-# torch==2.7.0
+torch==2.4.1
 torchmetrics==1.7.1
+torchvision==0.19.1
 tqdm==4.67.1
 transformers==4.45.1
-triton==3.3.0
+triton==3.0.0
 universal-pathlib==0.2.6
 wandb==0.19.11

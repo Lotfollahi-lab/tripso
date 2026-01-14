@@ -1,0 +1,19 @@
+stages:
+  - build
+
+variables:
+  DOCKER_HOST: "tcp://docker:2376"
+  DOCKER_TLS_VERIFY: "true"
+
+deploy-docs-to-s3:
+  stage: build
+  tags: [autoscale-large]
+  image: python:3.10
+  script:
+    - apt-get update && apt-get install -y s3cmd
+    - python3.10 -m venv .venv
+    - source .venv/bin/activate
+    - pip install git+https://huggingface.co/ctheodoris/Geneformer@18a2ca668c0f0239f37e58a34fd8de4ac15b5ed2 -r requirements.txt -e .[docs]
+    - cd docs
+    - make html
+    - s3cmd -c $S3CMD_FILE sync --delete-removed --no-mime-magic _build/html/ s3://tripso-docs/
