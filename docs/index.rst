@@ -24,6 +24,9 @@ tripso
    getting-started/tutorials/05_calculate_gp_importance_scores
    getting-started/tutorials/06.1_generate_gp_gene_cosine_similarity
    getting-started/tutorials/06.2_visualize_gene_cosine_similarity
+   getting-started/tutorials/07.1_run_gpdiscovery
+   getting-started/tutorials/07.2_extract_novel_gp
+   getting-started/tutorials/07.3_visualize_novel_gp
 
 .. toctree::
    :maxdepth: 1
