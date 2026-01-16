@@ -2,6 +2,12 @@ tripso
 ======
 
 .. toctree::
+   :maxdepth: 2
+   :caption: Overview
+
+   00_installation
+
+.. toctree::
    :maxdepth: 1
    :caption: Getting Started
 

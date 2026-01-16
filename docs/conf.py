@@ -15,15 +15,14 @@ author = 'Genome Research Limited'
 
 extensions = [
     # "sphinx.ext.apidoc",  # not supported until Sphinx 8.2
-    "sphinx.ext.autodoc",
-    "sphinx.ext.napoleon",
-    "sphinx_rtd_theme",
-    "myst_nb",
+    'sphinx.ext.autodoc',
+    'sphinx.ext.napoleon',
+    'sphinx_rtd_theme',
+    'myst_nb',
 ]
 
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
-
 
 
 # -- Options for HTML output -------------------------------------------------
@@ -31,5 +30,6 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
 html_theme = 'sphinx_rtd_theme'
 html_static_path = ['_static']
+html_logo = '_static/tripso_logo_cropped.png'
 
-nb_execution_mode = "off"
+nb_execution_mode = 'off'
