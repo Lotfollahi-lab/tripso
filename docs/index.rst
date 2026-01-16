@@ -1,11 +1,9 @@
 tripso
 ======
 
-.. toctree::
-   :maxdepth: 2
-   :caption: Overview
-
-   00_installation
+.. image:: _static/Tripso2026.png
+   :align: center
+   :alt: Tripso model architecture
 
 .. toctree::
    :maxdepth: 1
