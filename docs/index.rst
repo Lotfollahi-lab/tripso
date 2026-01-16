@@ -1,6 +1,10 @@
 tripso
 ======
 
+.. image:: _static/Tripso2026.png
+   :align: center
+   :alt: Tripso model architecture
+
 .. toctree::
    :maxdepth: 1
    :caption: Getting Started
