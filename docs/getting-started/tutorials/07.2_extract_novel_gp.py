@@ -6,7 +6,7 @@ we can identify coherent gene programs that emerge from the data without prior a
 
 The workflow involves:
 1. Extracting attention weights from the HVG gene program module
-2. Filtering genes by attention sparsity 
+2. Filtering genes by attention sparsity
 3. Computing gene-gene similarity from attention patterns
 4. Clustering genes to discover novel gene programs
 5. Exporting discovered programs as a new gene program database
@@ -24,9 +24,11 @@ Outputs:
 """
 
 import os
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 import scanpy as sc
+
 import tripso
 from tripso.Discovery.clustering import cluster
 
@@ -42,8 +44,8 @@ data_dir = '/lustre/scratch126/cellgen/lotfollahi/mm58/gplearner_reproducibility
 # =======================================================
 
 # Load gene program databases
-GPDB_OLD = os.path.join(root_dir, 'gpdb_tf.csv')         # Original curated GPs
-GPDB_NEW = os.path.join(root_dir, 'gpdb_with_hvg.csv')   # Extended with HVG
+GPDB_OLD = os.path.join(root_dir, 'gpdb_tf.csv')  # Original curated GPs
+GPDB_NEW = os.path.join(root_dir, 'gpdb_with_hvg.csv')  # Extended with HVG
 gpdb_new = pd.read_csv(GPDB_NEW)
 
 GPFINDER_DIR = os.path.join(root_dir, 'output_gpfinder')
@@ -51,24 +53,24 @@ GPFINDER_DIR = os.path.join(root_dir, 'output_gpfinder')
 # Initialize evaluation object for GPFinder model
 gp_downstream = tripso.gpEval(
     dataset_path=data_dir,
-    gpdb_path=GPDB_NEW,                     # Use extended database with HVG
+    gpdb_path=GPDB_NEW,  # Use extended database with HVG
     output_dir=GPFINDER_DIR,
     tissue='zeng',
-    model_type='Global',                    # GPFinder uses Global architecture
-    batch_size = 128
+    model_type='Global',  # GPFinder uses Global architecture
+    batch_size=128,
 )
 
 # Extract attention weights from HVG module for all data splits
 # Attention weights reveal which genes the model considers important together
 for t in ['train', 'test', 'val']:
     gp_downstream.generate_attention_matrix(
-        gp_for_forward='HVG',                               # Use HVG module for forward pass
-        gp_for_downstream='HVG',                            # Extract HVG attention weights
-        genes_to_keep=gpdb_new['HVG'].dropna().tolist(),   # Keep all HVG genes
-        precision = '16-mixed',                             # Use mixed precision to match training
-        split = t                                           # Process each data split
+        gp_for_forward='HVG',  # Use HVG module for forward pass
+        gp_for_downstream='HVG',  # Extract HVG attention weights
+        genes_to_keep=gpdb_new['HVG'].dropna().tolist(),  # Keep all HVG genes
+        precision='16-mixed',  # Use mixed precision to match training
+        split=t,  # Process each data split
     )
-            
+
 
 # =======================================================
 # Discover novel gene programs via clustering
@@ -76,17 +78,17 @@ for t in ['train', 'test', 'val']:
 
 # Load attention weights from test set for clustering analysis
 # We use test set to ensure discovered programs are not overfit to training data
-# Additionally, for the tutorial, we focus on the test set only 
+# Additionally, for the tutorial, we focus on the test set only
 # Although in practice, one might combine all splits to increase numbers for rare populations
-attn = sc.read_h5ad(os.path.join(GPFINDER_DIR, "attention/HVG_attention_test_set.h5ad"))
+attn = sc.read_h5ad(os.path.join(GPFINDER_DIR, 'attention/HVG_attention_test_set.h5ad'))
 
 # Remove CLS (classification) token used by model architecture
-attn = attn[:, attn.var.index != "cls"]
-print("Initial attention shape:", attn.shape)
+attn = attn[:, attn.var.index != 'cls']
+print('Initial attention shape:', attn.shape)
 
 # Convert to dense matrix for correlation computation
 # Attention matrix: cells x genes (how much each cell attends to each gene)
-X_dense = attn.X.todense()  
+X_dense = attn.X.todense()
 n_cells = attn.n_obs
 
 # =======================================================
@@ -98,14 +100,14 @@ gene_nonzero_frac = np.array((X_dense > 0).sum(axis=0)).ravel() / n_cells  # Spa
 
 # Keep genes that are attended to in >10% of cells
 # This filters out genes with sparse or uninformative attention patterns
-keep_mask = (gene_nonzero_frac > 0.1) 
+keep_mask = gene_nonzero_frac > 0.1
 genes_to_keep = np.array(attn.var.index)[keep_mask]
 
 # Apply filtering
 attn = attn[:, genes_to_keep]
 X_dense = X_dense[:, keep_mask]
 genes = np.array(attn.var.index)
-print("Attention shape after filtering:", attn.shape)
+print('Attention shape after filtering:', attn.shape)
 
 # =======================================================
 # Compute gene-gene similarity from attention patterns
@@ -114,8 +116,8 @@ print("Attention shape after filtering:", attn.shape)
 # Calculate correlation between genes based on their attention patterns across cells
 # Genes with similar attention patterns likely belong to the same program
 corr_matrix = np.corrcoef(np.asarray(X_dense), rowvar=False)  # genes x genes
-corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)             # Replace NaN with 0
-np.fill_diagonal(corr_matrix, 1.0)                            # Ensure diagonal is 1
+corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)  # Replace NaN with 0
+np.fill_diagonal(corr_matrix, 1.0)  # Ensure diagonal is 1
 
 # Transform correlation [-1, 1] to similarity [0, 1] for clustering
 # This preserves the magnitude of correlation while ensuring non-negative values
@@ -132,9 +134,9 @@ num_cluster_candidates = list(range(2, max_k + 1))
 # Perform clustering to identify novel gene programs
 # The algorithm will automatically select optimal number of clusters
 labels_corr = cluster(
-    similarity_corr,                        # Gene-gene similarity matrix
+    similarity_corr,  # Gene-gene similarity matrix
     num_cluster_candidates=num_cluster_candidates,  # Range of k values to test
-    seed=0,                                 # For reproducibility
+    seed=0,  # For reproducibility
 )
 
 # =======================================================
@@ -146,14 +148,16 @@ labels_corr = cluster(
 gpdb_cluster = {}
 unique_clusters = np.unique(labels_corr)
 for c in unique_clusters:
-    gpdb_cluster[f"gp_{c}"] = pd.Series(genes[labels_corr == c])
+    gpdb_cluster[f'gp_{c}'] = pd.Series(genes[labels_corr == c])
 
 # Save discovered gene programs to disk
 cluster_df = pd.DataFrame(gpdb_cluster)
 cluster_df.to_csv(
-    os.path.join(GPFINDER_DIR, "gpdb_clusters_from_attention.csv"),
+    os.path.join(GPFINDER_DIR, 'gpdb_clusters_from_attention.csv'),
     index=False,
 )
 
-print(f"\nDiscovered {len(unique_clusters)} novel gene programs")
-print(f"Gene programs saved to: {os.path.join(GPFINDER_DIR, 'gpdb_clusters_from_attention.csv')}")
+print(f'\nDiscovered {len(unique_clusters)} novel gene programs')
+print(
+    f"Gene programs saved to: {os.path.join(GPFINDER_DIR, 'gpdb_clusters_from_attention.csv')}"
+)

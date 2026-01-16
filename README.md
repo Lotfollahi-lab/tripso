@@ -75,8 +75,6 @@ Clone the  repository:
 git clone git@github.com:Lotfollahi-lab/tripso.git
 ```
 
-**Note:** If you don't have access to the Lotfollahi Lab GitHub organization, please message me [mm58@sanger.ac.uk](mailto:mm58@sanger.ac.uk)
-
 Install  and its dependencies:
 
 ```bash

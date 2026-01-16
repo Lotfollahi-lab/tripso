@@ -7,9 +7,9 @@ Requirements:
 - Python 3.10
 
 We recommend installing tripso in a virtual environment.
-We recommend first installing PyTorch, then Geneformer 
+We recommend first installing PyTorch, then Geneformer
 (from Huggingface, see their documentation for instructions)
-and finally Tripso. 
+and finally Tripso.
 
 .. code-block:: shell-session
 
