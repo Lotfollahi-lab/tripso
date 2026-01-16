@@ -23,4 +23,4 @@ livehtml:
 	sphinx-autobuild "$(SOURCEDIR)" "$(BUILDDIR)"/livehtml $(SPHINXOPTS) $(O)
 
 apidoc:
-	sphinx-apidoc -o "$(SOURCEDIR)"/apidoc/gplearner ../gplearner ../gplearner/*/ -f --remove-old --no-toc
+	sphinx-apidoc -o "$(SOURCEDIR)"/apidoc/tripso ../tripso ../tripso/*/ -f --remove-old --no-toc

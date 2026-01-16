@@ -5,8 +5,8 @@ import pandas as pd
 import torch
 from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 
-from gplearner.Models.gp_model import gpWrapper
-from gplearner.Utils.utils import convert_gene_names_to_tokens
+from tripso.Models.gp_model import gpWrapper
+from tripso.Utils.utils import convert_gene_names_to_tokens
 
 
 class TestGpWrapper(unittest.TestCase):

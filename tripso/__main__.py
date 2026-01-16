@@ -1,6 +1,6 @@
 import argparse
 
-import gplearner
+import tripso
 
 
 def main():
