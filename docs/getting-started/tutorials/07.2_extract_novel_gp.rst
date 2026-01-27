@@ -1,5 +1,4 @@
 Extracting novel gene programs
-
 ====================================
 
 :download:`07.2_extract_novel_gp.py`
