@@ -1,7 +1,7 @@
 tripso
 ======
 
-[Welcome to the Tripso documentation! Tripso 
+Welcome to the Tripso documentation! Tripso 
 (Transformers for learning Representations of Interpretable gene Programs 
 in Single-cell transcriptOmics), is a self-supervised framework 
 that decomposes cellular states into multiple GP embeddings. 
@@ -10,7 +10,7 @@ quantifies gene-level contributions to each GP,
 as well as this influence of each GP on global cell identity.
 
 You will find links to tutorial scripts and installation instructions below.
-]
+
 
 .. image:: _static/Tripso2026.png
    :align: center
@@ -26,8 +26,8 @@ You will find links to tutorial scripts and installation instructions below.
    :maxdepth: 1
    :caption: Tutorials
 
-   getting-started/tutorials/00.1_make_gpdb
    getting-started/tutorials/00_prepare_data
+   getting-started/tutorials/00.1_make_gpdb
    getting-started/tutorials/01_tokenize
    getting-started/tutorials/02_run_tripso
    getting-started/tutorials/03_run_tripso_eval
