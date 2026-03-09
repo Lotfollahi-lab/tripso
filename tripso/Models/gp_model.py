@@ -4,16 +4,17 @@
 
 import os
 import pickle
+from pathlib import Path
 from typing import Dict, Optional
 
 # imports
 import numpy as np
 import torch
 import torch.nn as nn
-from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from peft import PeftConfig, get_peft_model
 from transformers import BertConfig, BertForMaskedLM
 
+from .. import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 from ..Modules.modules import Mlp, gpTransformerEncoder
 from ..Utils.geneformer_utils import EmbExtractor, get_gf_repo
 from ..Utils.utils import (
@@ -126,8 +127,13 @@ class GeneWrapper(nn.Module):
         'num_hidden_layers', 'num_attention_heads', etc.
     gp_latent_size : int
         Dimension of gene program latent representations.
-    use_gf_embeddings : str or None, optional
-        Path to Geneformer embeddings or model name (default: None).
+    use_gene_embeddings : str or None, optional
+        Model name (e.g., 'gf-12L-95M-i4096') or path to embeddings file
+        This should be a file containing a tensor of shape (vocab_size, embedding_dim)
+            with the same vocab size and embedding dimension as specified in config_dict.
+        If a string is provided, it will be interpreted as a model name or path to load embeddings from.
+        If False, initializes gene embeddings randomly and trains from scratch.
+        (.pt or .npy) (default: None).
     attn_dropout : float, optional
         Attention dropout rate (default: 0.0).
     init_sparsity : float, optional
@@ -155,34 +161,37 @@ class GeneWrapper(nn.Module):
         gene_token_path,
         config_dict,
         gp_latent_size,
-        use_gf_embeddings=None,
+        use_gene_embeddings=None,
         attn_dropout=0.0,
         init_sparsity=0.0,
     ):
         super().__init__()
 
         # Intiialize lookup table for vocab
-        # Set word embeddings to Geneformer embeddings
-        if use_gf_embeddings == 'gf-12L-95M-i4096':
-            geneformer = BertForMaskedLM.from_pretrained(
-                '/nfs/team361/mm58/Geneformer/gf-12L-95M-i4096'
-            )
-            gene_emb_weight = geneformer.bert.embeddings.word_embeddings.weight.data
+        if isinstance(use_gene_embeddings, str):
+            if use_gene_embeddings == 'gf-12L-95M-i4096':
+                emb_path = (
+                    Path(__file__).parent.parent
+                    / 'Utils/gf-12L-95M-i4096_word_embeddings_may2025.pt'
+                )
+                emb = torch.load(emb_path)
+            elif use_gene_embeddings.endswith('.pt'):
+                emb = torch.load(use_gene_embeddings)
+            elif use_gene_embeddings.endswith('.npy'):
+                emb = torch.from_numpy(np.load(use_gene_embeddings))
+            else:
+                raise ValueError(
+                    'Unsupported file format for gene embeddings. '
+                    'Please store as .pt or .npy'
+                )
 
             self.gene_embeddings = nn.Embedding.from_pretrained(
-                gene_emb_weight,
+                emb,
                 padding_idx=0,
-                # freeze=config_dict['freeze_word_emb'],
             )
 
             if '16' in str(config_dict['torch_dtype']):
                 self.gene_embeddings.half()
-
-        elif isinstance(use_gf_embeddings, str):
-            self.gene_embeddings = nn.Embedding.from_pretrained(
-                torch.from_numpy(np.load(use_gf_embeddings)),
-                padding_idx=0,
-            )
 
         else:
             self.gene_embeddings = nn.Embedding(
@@ -1130,8 +1139,9 @@ class gpTransformerBase(nn.Module):
     gp_latent_size : int or None, optional
         Dimension of GP latent representations. If None, inferred from
         foundation model (default: None).
-    use_gf_embeddings : str or bool, optional
-        Path to Geneformer embeddings or False (default: False).
+    use_gene_embeddings : str or bool, optional
+        Model name (e.g., 'gf-12L-95M-i4096') or path to embeddings file,
+        or False to train from scratch (default: False).
     use_l2_norm : bool, optional
         Whether to use L2 normalization (default: False).
     all_genes : list, dict, or None, optional
@@ -1184,7 +1194,7 @@ class gpTransformerBase(nn.Module):
         vocab_gene_names=None,
         bert_config=None,
         gp_latent_size=None,
-        use_gf_embeddings=False,
+        use_gene_embeddings=False,
         use_l2_norm=False,
         all_genes=None,
         warmup=0,
@@ -1285,7 +1295,7 @@ class gpTransformerBase(nn.Module):
                 gene_token_path=self.gene_token_path,
                 all_genes=all_genes,
                 do_ensembl_conversion=do_ensembl_conversion,
-                use_gf_embeddings=use_gf_embeddings,
+                use_gene_embeddings=use_gene_embeddings,
                 gp_latent_size=gp_latent_size,
                 attn_dropout=attn_dropout,
                 init_sparsity=init_sparsity,

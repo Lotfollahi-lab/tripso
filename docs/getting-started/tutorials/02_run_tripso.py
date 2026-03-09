@@ -7,6 +7,11 @@ through a gene expression reconstruction task. Training is
 performed sequentially, with the Global model initialized from the Base model,
 but the gene program module blocks being frozen while the Global model is trained.
 
+The `use_gene_embeddings` argument is set to 'gf-12L-95M-i4096' to initialize the gene embeddings
+with the pre-extracted Geneformer embeddings from the GF-12L-95M-i4096 model. 
+You can replace this with the path to your favorite gene embedding file (.pt or .npy)
+or set it to False to train the gene embeddings from scratch.
+
 Inputs:
     - data/processed/input_dataset/: Tokenized cell data
     - gpdb_tf.csv: Gene program database
@@ -103,7 +108,7 @@ tripso.train(
     seed=0,
     all_genes=all_genes,
     gp_latent_size=256,
-    use_gf_embeddings='gf-12L-95M-i4096',
+    use_gene_embeddings='gf-12L-95M-i4096',
     use_flash=True,
     use_pos_emb='sin_cos',
     warmup=10,
@@ -151,7 +156,7 @@ tripso.train(
     precision='bf16-mixed',
     fm_encoder_pkg='from_scratch',
     bert_config=config_dict,
-    use_gf_embeddings='gf-12L-95M-i4096',
+    use_gene_embeddings='gf-12L-95M-i4096',
     seed=0,
     all_genes=all_genes,
     gp_latent_size=256,

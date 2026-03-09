@@ -91,7 +91,7 @@ def run_training_from_select_gps(
     val_check_interval: float = 1.0,
     precision=32,  # 'bf16-mixed',
     bert_config: Dict = {},
-    use_gf_embeddings: Optional[bool] = False,
+    use_gene_embeddings: Optional[bool] = False,
     load_cell_token_learner: bool = False,
     gp_of_interest: Optional[str] = None,
     gp_for_downstream: Optional[str] = None,
@@ -229,8 +229,9 @@ def run_training_from_select_gps(
         Training precision: 32, 16, or 'bf16-mixed'
     bert_config : Dict, default={}
         Configuration dict for BERT model when training from scratch
-    use_gf_embeddings : Optional[bool], default=False
-        Whether to use Geneformer embeddings directly
+    use_gene_embeddings : Optional[bool], default=False
+        Model name (e.g., 'gf-12L-95M-i4096') or path to gene embeddings file,
+        or False to initialize randomly
     load_cell_token_learner : bool, default=False
         Whether to load cell token learner from previous global training
     gp_of_interest : Optional[str], default=None
@@ -488,7 +489,7 @@ def configure_model_version(args, tag):
         'bert_config': args['bert_config'],
         'all_genes': args['all_genes'],
         'gp_latent_size': args['gp_latent_size'],
-        'use_gf_embeddings': args['use_gf_embeddings'],
+        'use_gene_embeddings': args['use_gene_embeddings'],
     }
 
     global_params = {

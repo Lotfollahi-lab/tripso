@@ -22,7 +22,8 @@ import os
 import numpy as np
 import pandas as pd
 import scanpy as sc
-from geneformer import ENSEMBL_DICTIONARY_FILE
+
+from tripso import ENSEMBL_DICTIONARY_FILE
 
 ensembl_dict = pd.read_pickle(ENSEMBL_DICTIONARY_FILE)
 

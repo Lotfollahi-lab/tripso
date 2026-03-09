@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import torch
 from datasets import load_from_disk
-from geneformer import TOKEN_DICTIONARY_FILE
 from geneformer.perturber_utils import pad_tensor_list
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import (
@@ -18,6 +17,7 @@ from torch.utils.data import (
 )
 from transformers.trainer_pt_utils import LengthGroupedSampler
 
+from .. import TOKEN_DICTIONARY_FILE
 from .mapped_collection import MappedCollection
 
 random.seed(0)
