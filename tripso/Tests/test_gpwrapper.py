@@ -3,10 +3,11 @@ import unittest
 import numpy as np
 import pandas as pd
 import torch
-from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 
 from tripso.Models.gp_model import gpWrapper
 from tripso.Utils.utils import convert_gene_names_to_tokens
+
+from .. import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 
 
 class TestGpWrapper(unittest.TestCase):

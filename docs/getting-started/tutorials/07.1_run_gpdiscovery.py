@@ -144,7 +144,7 @@ run_training_from_select_gps(
     # Gene encoder configuration
     fm_encoder_pkg='from_scratch',  # Train gene encoder from scratch
     bert_config=config_dict,  # Use config matching Base model
-    use_gf_embeddings='gf-12L-95M-i4096',  # Geneformer embeddings for gene embedding initialization
+    use_gene_embeddings='gf-12L-95M-i4096',  # Initialize with pre-extracted Geneformer embeddings
     # Training parameters
     sampler='weighted',  # Weighted sampling for balanced training
     sample_by='age_group',  # Sample by age group for balance (this is the covariate we will look into at the next step)

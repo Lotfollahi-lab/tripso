@@ -16,8 +16,9 @@ import pandas as pd
 import scanpy as sc
 import scipy.sparse as sp
 from datasets import Dataset
-from geneformer.tokenizer import TranscriptomeTokenizer
 from tqdm import tqdm
+
+from .geneformer_tokenizer import TranscriptomeTokenizer
 
 logger = logging.getLogger(__name__)
 

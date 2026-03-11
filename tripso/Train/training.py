@@ -94,7 +94,7 @@ def run_training(
     vocab_gene_names: Optional[list] = None,
     precision=32,  # 'bf16-mixed',
     bert_config: Dict = {},
-    use_gf_embeddings: Optional[bool] = False,
+    use_gene_embeddings: Optional[bool] = False,
     calc_gp_loss: Optional[bool] = True,
     calc_gene_loss: Optional[bool] = True,
     lora_config_args: Optional[dict] = None,
@@ -227,8 +227,9 @@ def run_training(
         Training precision: 32, 16, or 'bf16-mixed'
     bert_config : Dict, default={}
         Configuration dict for BERT model when training from scratch
-    use_gf_embeddings : Optional[bool], default=False
-        Whether to use Geneformer embeddings directly
+    use_gene_embeddings : Optional[bool], default=False
+        Model name (e.g., 'gf-12L-95M-i4096') or path to gene embeddings file,
+        or False to initialize randomly
     calc_gp_loss : Optional[bool], default=True
         Whether to calculate GP prediction loss
     calc_gene_loss : Optional[bool], default=True
@@ -560,7 +561,7 @@ def configure_logger(args):
             'fm_encoder_name': args['fm_encoder_name'],
             'fm_encoder_pkg': args['fm_encoder_pkg'],
             'bert_config': args['bert_config'],
-            'use_gf_embeddings': args['use_gf_embeddings'],
+            'use_gene_embeddings': args['use_gene_embeddings'],
             'gp_latent_size': args['gp_latent_size'],
             'mask_gp_genes_in_gene_encoder': isinstance(args['all_genes'], list),
             'sampling': 'random' if args['sampler'] is None else args['sampler'],
@@ -639,7 +640,7 @@ def configure_model(args):
         'fm_encoder_name': args['fm_encoder_name'],
         'fm_encoder_pkg': args['fm_encoder_pkg'],
         'bert_config': args['bert_config'],
-        'use_gf_embeddings': args['use_gf_embeddings'],
+        'use_gene_embeddings': args['use_gene_embeddings'],
         'use_l2_norm': args['use_l2_norm'],
         'gp_latent_size': args['gp_latent_size'],
         'all_genes': args['all_genes'],
