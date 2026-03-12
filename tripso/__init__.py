@@ -24,9 +24,6 @@ TOKEN_DICTIONARY_FILE = (
     Path(__file__).parent / 'Utils/geneformer_token_dictionary_may2025.pkl'
 )
 
-# Geneformer model paths
-GF12L95M = '/nfs/team361/mm58/Geneformer/gf-12L-95M-i4096'
-
 __all__ = [
     'Datamodules',
     'ENSEMBL_DICTIONARY_FILE',
