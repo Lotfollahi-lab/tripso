@@ -62,7 +62,7 @@ import loompy as lp  # noqa
 
 logger = logging.getLogger(__name__)
 
-from . import ENSEMBL_MAPPING_FILE, GENE_MEDIAN_FILE, TOKEN_DICTIONARY_FILE
+from .. import ENSEMBL_MAPPING_FILE, GENE_MEDIAN_FILE, TOKEN_DICTIONARY_FILE
 
 def rank_genes(gene_vector, gene_tokens):
     """
@@ -376,7 +376,13 @@ class TranscriptomeTokenizer:
         elif self.model_version == "V1":
             self.model_input_size = 2048
             self.special_token = False
-            from . import ENSEMBL_MAPPING_FILE_30M, GENE_MEDIAN_FILE_30M, TOKEN_DICTIONARY_FILE_30M
+
+            from geneformer import (
+                ENSEMBL_MAPPING_FILE_30M,
+                GENE_MEDIAN_FILE_30M,
+                TOKEN_DICTIONARY_FILE_30M,
+            )
+
             gene_median_file = GENE_MEDIAN_FILE_30M
             token_dictionary_file = TOKEN_DICTIONARY_FILE_30M
             gene_mapping_file = ENSEMBL_MAPPING_FILE_30M

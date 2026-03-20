@@ -4,6 +4,21 @@ Modules for tripso method
 
 from pathlib import Path
 
+# Dictionary files from Geneformer
+ENSEMBL_DICTIONARY_FILE = (
+    Path(__file__).parent / 'Utils/geneformer_ensembl_dictionary_may2025.pkl'
+)
+TOKEN_DICTIONARY_FILE = (
+    Path(__file__).parent / 'Utils/geneformer_token_dictionary_may2025.pkl'
+)
+GENE_MEDIAN_FILE = (
+    Path(__file__).parent / 'Utils/geneformer_gene_median_file_may2025.pkl'
+)
+
+# Backward-compatible aliases used by the local tokenizer implementation.
+# The extracted tripso dictionaries currently include a single mapping file.
+ENSEMBL_MAPPING_FILE = ENSEMBL_DICTIONARY_FILE
+
 from . import (
     Datamodules,
     Metrics,
@@ -16,23 +31,19 @@ from .Evaluate.downstream import gpEval
 from .Preprocessing.preprocess import pp_and_tokenize
 from .Train.training import run_training as train
 
-# Dictionary files from Geneformer
-ENSEMBL_DICTIONARY_FILE = (
-    Path(__file__).parent / 'Utils/geneformer_ensembl_dictionary_may2025.pkl'
-)
-TOKEN_DICTIONARY_FILE = (
-    Path(__file__).parent / 'Utils/geneformer_token_dictionary_may2025.pkl'
-)
-
 __all__ = [
     'Datamodules',
     'ENSEMBL_DICTIONARY_FILE',
-    'GF12L95M',
+    'ENSEMBL_MAPPING_FILE',
+    'ENSEMBL_MAPPING_FILE_30M',
+    'GENE_MEDIAN_FILE',
+    'GENE_MEDIAN_FILE_30M',
     'Metrics',
     'Models',
     'Modules',
     'pp_and_tokenize',
     'TOKEN_DICTIONARY_FILE',
+    'TOKEN_DICTIONARY_FILE_30M',
     'Utils',
     'Trainers',
     'train',
