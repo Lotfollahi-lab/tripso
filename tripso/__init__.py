@@ -15,9 +15,9 @@ GENE_MEDIAN_FILE = (
     Path(__file__).parent / 'Utils/geneformer_gene_median_file_may2025.pkl'
 )
 
-# Backward-compatible aliases used by the local tokenizer implementation.
-# The extracted tripso dictionaries currently include a single mapping file.
-ENSEMBL_MAPPING_FILE = ENSEMBL_DICTIONARY_FILE
+ENSEMBL_MAPPING_FILE = (
+    Path(__file__).parent / 'Utils/geneformer_ensembl_mapping_file_may2025.pkl'
+)
 
 from . import (
     Datamodules,

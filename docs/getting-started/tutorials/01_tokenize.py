@@ -19,9 +19,10 @@ Outputs:
 
 import os
 
-import gplearner
 import pandas as pd
 import scanpy as sc
+
+import tripso
 
 root_dir = '/lustre/scratch126/cellgen/lotfollahi/mm58/gplearner_reproducibility/07_tutorial_zeng'
 os.chdir(root_dir)
@@ -47,7 +48,7 @@ all_genes = list(all_genes)
 
 print('Number of genes', len(all_genes))
 
-gplearner.pp_and_tokenize(
+tripso.pp_and_tokenize(
     root_dir=root_dir,
     adata_path=os.path.join(root_dir, 'data/processed/zeng.h5ad'),
     vars_to_keep=zeng_cols,

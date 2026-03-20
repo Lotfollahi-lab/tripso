@@ -36,7 +36,8 @@ import pickle
 import re
 
 import torch
-from geneformer.perturber_utils import pad_tensor_list
+
+from .utils import pad_tensor_list
 
 logger = logging.getLogger(__name__)
 

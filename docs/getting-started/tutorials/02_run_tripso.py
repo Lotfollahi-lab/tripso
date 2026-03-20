@@ -8,7 +8,7 @@ performed sequentially, with the Global model initialized from the Base model,
 but the gene program module blocks being frozen while the Global model is trained.
 
 The `use_gene_embeddings` argument is set to 'gf-12L-95M-i4096' to initialize the gene embeddings
-with the pre-extracted Geneformer embeddings from the GF-12L-95M-i4096 model. 
+with the pre-extracted Geneformer embeddings from the GF-12L-95M-i4096 model.
 You can replace this with the path to your favorite gene embedding file (.pt or .npy)
 or set it to False to train the gene embeddings from scratch.
 

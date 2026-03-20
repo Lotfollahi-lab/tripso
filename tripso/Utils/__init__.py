@@ -36,6 +36,7 @@ from .utils import (  # noqa: F401
     mlm_mask_generator,
     one_hot_encoder,
     pad_array,
+    pad_tensor_list,
     pivot_single_column,
     print_sys,
     summarize_attributions,
@@ -83,4 +84,5 @@ __all___ = [
     '_t_equal_var_sparse',
     'assign_bar_colors',
     '_resolve_sig_colors',
+    'pad_tensor_list',
 ]

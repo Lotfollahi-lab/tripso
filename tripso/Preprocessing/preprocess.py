@@ -13,11 +13,11 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 from datasets import concatenate_datasets, load_from_disk
-from geneformer import TranscriptomeTokenizer
 
 from .. import ENSEMBL_DICTIONARY_FILE
 from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import do_balanced_downsampling_anndata, encode_labels
+from .geneformer_tokenizer import TranscriptomeTokenizer
 from .tokenizer import GPTokenizer
 
 seed = 0

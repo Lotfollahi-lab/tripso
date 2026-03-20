@@ -163,11 +163,21 @@ class GPTokenizer(TranscriptomeTokenizer):
         super().__init__(**kwargs)
         self.gp_genes = gp_genes
 
-        # convert gene names to token ids
-        if do_ensembl_conversion:
-            ensembl_id = [self.gene_mapping_dict.get(gene, None) for gene in gp_genes]
-        else:
-            ensembl_id = gp_genes
+        # Convert user-provided GP genes to token IDs.
+        # Handles mixed inputs robustly: gene symbols, already-converted Ensembl IDs,
+        # and case differences in symbols.
+        ensembl_id = []
+        for gene in gp_genes:
+            gene_str = str(gene)
+            if do_ensembl_conversion:
+                mapped_gene = self.gene_mapping_dict.get(gene_str)
+                if mapped_gene is None:
+                    mapped_gene = self.gene_mapping_dict.get(gene_str.upper())
+                if mapped_gene is None and gene_str in self.gene_token_dict:
+                    mapped_gene = gene_str
+                ensembl_id.append(mapped_gene)
+            else:
+                ensembl_id.append(gene_str)
 
         gp_token_ids = [self.gene_token_dict.get(gene, None) for gene in ensembl_id]
         gp_token_ids = [token for token in gp_token_ids if token is not None]
@@ -177,6 +187,7 @@ class GPTokenizer(TranscriptomeTokenizer):
         self,
         tokenized_cells,
         cell_metadata,
+        tokenized_counts=None,
         use_generator=False,
         keep_uncropped_input_ids=False,
     ):
@@ -186,7 +197,6 @@ class GPTokenizer(TranscriptomeTokenizer):
         tokenized_by_gp = []
 
         for i, genes in enumerate(tokenized_cells):
-            # x = list(set(genes) & self.gp_tokens)
             x = [g for g in genes if g in self.gp_tokens]
             tokenized_by_gp += [x]
 
@@ -208,6 +218,13 @@ class GPTokenizer(TranscriptomeTokenizer):
 
         # filter out cells with no genes
         output_dataset = output_dataset.filter(lambda x: len(x['input_ids']) > 0)
+
+        if len(output_dataset) == 0:
+            raise ValueError(
+                'No cells retained after GP filtering. '
+                'Check that gp_genes_union overlaps tokenizer vocabulary and '
+                'that do_ensembl_conversion is set correctly for your gene IDs.'
+            )
 
         def format_cell_features(example):
             # Store original uncropped input_ids in separate feature
@@ -245,7 +262,10 @@ class GPTokenizer(TranscriptomeTokenizer):
         return output_dataset_truncated
 
     def tokenize_files(
-        self, data_directory, file_format: Literal['loom', 'h5ad'] = 'h5ad'
+        self,
+        data_directory,
+        file_format: Literal['h5ad'] = 'h5ad',
+        input_identifier: str = '',
     ):
         tokenized_cells = []
         cell_metadata: Optional[Dict[str, List]] = None
@@ -255,16 +275,23 @@ class GPTokenizer(TranscriptomeTokenizer):
                 attr_key: [] for attr_key in self.custom_attr_name_dict.values()
             }
 
-        # loops through directories to tokenize .loom files
+        if file_format != 'h5ad':
+            raise ValueError(
+                f"Unsupported file format '{file_format}' for GPTokenizer. Use 'h5ad'."
+            )
+
         file_found = 0
-        # loops through directories to tokenize .loom or .h5ad files
-        tokenize_file_fn = (
-            self.tokenize_loom if file_format == 'loom' else self.tokenize_anndata
-        )
-        for file_path in data_directory.glob(f'*.{file_format}'):
+        if input_identifier == '':
+            file_match = f'*.{file_format}'
+        else:
+            file_match = f'*{input_identifier}*.{file_format}'
+
+        for file_path in data_directory.glob(file_match):
             file_found = 1
             print(f'Tokenizing {file_path}')
-            file_tokenized_cells, file_cell_metadata = tokenize_file_fn(file_path)
+            file_tokenized_cells, file_cell_metadata, _ = self.tokenize_anndata(
+                file_path, file_format=file_format
+            )
             tokenized_cells += file_tokenized_cells
             if self.custom_attr_name_dict is not None and cell_metadata is not None:
                 for k in cell_attr:
@@ -279,16 +306,19 @@ class GPTokenizer(TranscriptomeTokenizer):
                 f'No .{file_format} files found in directory {data_directory}.'
             )
             raise
-        return tokenized_cells, cell_metadata
+        # Return an unused counts placeholder to match the parent tokenize_data contract.
+        return tokenized_cells, cell_metadata, []
 
-    def tokenize_anndata(self, adata_file_path, target_sum=10_000):
+    def tokenize_anndata(
+        self, adata_file_path, target_sum=10_000, file_format: Literal['h5ad'] = 'h5ad'
+    ):
         adata = sum_ensembl_ids(
             adata_file_path,
             self.collapse_gene_ids,
             self.gene_mapping_dict,
             self.gene_token_dict,
             self.custom_attr_name_dict,
-            file_format='h5ad',
+            file_format=file_format,
             chunk_size=self.chunk_size,
         )
 
@@ -331,6 +361,7 @@ class GPTokenizer(TranscriptomeTokenizer):
             filter_pass_loc = np.array([i for i in range(adata.shape[0])])
 
         tokenized_cells = []
+        tokenized_counts = []
 
         for i in range(0, len(filter_pass_loc), self.chunk_size):
             idx = filter_pass_loc[i : i + self.chunk_size]
@@ -353,4 +384,4 @@ class GPTokenizer(TranscriptomeTokenizer):
             else:
                 file_cell_metadata = None
 
-        return tokenized_cells, file_cell_metadata
+        return tokenized_cells, file_cell_metadata, tokenized_counts

@@ -7,19 +7,17 @@ Requirements:
 - Python 3.10
 
 We recommend installing tripso in a virtual environment.
-We recommend first installing PyTorch, then Geneformer
-(from Huggingface, see their documentation for instructions)
-and finally Tripso.
+We recommend first installing PyTorch, then Tripso.
 
 .. code-block:: shell-session
 
    $ python3.10 -m venv .venv
    $ source .venv/bin/activate
    $ pip install torch==2.4.1 torchmetrics==1.7.1
-   $ pip install \
-      git+https://huggingface.co/ctheodoris/Geneformer@18a2ca668c0f0239f37e58a34fd8de4ac15b5ed2 \
-      -r requirements.txt \
-      -e .
+   $ git clone https://github.com/Lotfollahi-lab/tripso.git
+   $ cd tripso
+   $ pip install -r requirements.txt
+   $ pip install .
 
 .. note::
 

@@ -431,20 +431,37 @@ def make_contingency_table(
         idx_col = 'idx1'
     elif by == 'target':
         idx_col = 'idx2'
+    else:
+        raise ValueError("by must be either 'source' or 'target'")
 
-    # Step 1: Keep the row with the largest 'coupling' for each 'idx1'
-    df_largest_coupling = df.loc[df.groupby(idx_col)['coupling'].idxmax()]
+    required_cols = {'idx1', 'idx2', 'source', 'target', 'coupling'}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f'DataFrame is missing required columns: {sorted(missing)}')
 
-    # Step 2: Create a crosstabulation of 'source' and 'target'
-    crosstab = pd.crosstab(df_largest_coupling['source'], df_largest_coupling['target'])
+    work = df.copy()
+    work.columns = work.columns.str.strip()
+    for c in ['idx1', 'idx2', 'source', 'target']:
+        work[c] = work[c].astype(str).str.strip()
+    work['coupling'] = pd.to_numeric(work['coupling'], errors='coerce')
+    work = work.dropna(subset=['coupling'])
 
-    # Step 3: Ensure all values from order_source and order_target
-    # are included in the crosstab
+    # Keep strongest row for exact idx1-idx2 duplicates.
+    work = work.sort_values('coupling', ascending=False).drop_duplicates(
+        subset=['idx1', 'idx2'], keep='first'
+    )
+
+    # Keep strongest partner per selected index.
+    retained = work.sort_values('coupling', ascending=False).drop_duplicates(
+        subset=[idx_col], keep='first'
+    )
+
+    crosstab = pd.crosstab(retained['source'], retained['target'])
+
     if labels_source:
         missing_sources = set(labels_source) - set(crosstab.index)
         for source in missing_sources:
             crosstab.loc[source] = 0
-
         crosstab.index = pd.CategoricalIndex(
             crosstab.index, categories=labels_source, ordered=True
         )
@@ -454,27 +471,19 @@ def make_contingency_table(
         missing_targets = set(labels_target) - set(crosstab.columns)
         for target in missing_targets:
             crosstab[target] = 0
-
         if use_label_order:
             crosstab.columns = pd.CategoricalIndex(
                 crosstab.columns, categories=labels_target, ordered=True
             )
             crosstab = crosstab.sort_index(axis=1)
 
-    # Step 4: Reorganize the crosstab to maximize the diagonal
-    # using the Hungarian algorithm
-    if not use_label_order:
-        cost_matrix = (
-            -crosstab.values
-        )  # We negate the matrix since we want to maximize the diagonal
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
-
-        # Reorder columns based on the result of the Hungarian algorithm
+    # if no explicit order, reorder columns to maximize diagonal.
+    if not use_label_order and linear_sum_assignment is not None and not crosstab.empty:
+        cost_matrix = -crosstab.values
+        _, col_ind = linear_sum_assignment(cost_matrix)
         ordered_targets = crosstab.columns[col_ind]
-
         crosstab = crosstab.loc[:, ordered_targets]
 
-    # Step 5: Plot the crosstabulation table as a heatmap
     plt.figure(figsize=fig_size)
     sns.heatmap(crosstab, annot=True, fmt='d', cmap='Blues')
     plt.xlabel('Target')
@@ -486,11 +495,7 @@ def make_contingency_table(
 
     plt.show()
 
-    # Step 6: Perform chi-square test
-    if labels_target:
-        crosstab = crosstab.loc[:, crosstab.columns.isin(labels_target)]
-    if labels_source:
-        crosstab = crosstab.loc[crosstab.index.isin(labels_source), :]
+    return crosstab
 
 
 def plot_mapping_heatmap(
