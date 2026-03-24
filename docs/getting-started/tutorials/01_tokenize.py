@@ -24,7 +24,8 @@ import scanpy as sc
 
 import tripso
 
-root_dir = '/lustre/scratch126/cellgen/lotfollahi/mm58/gplearner_reproducibility/07_tutorial_zeng'
+# Set working directory to the tutorial folder
+root_dir = '/path/to/your/folder/07_tutorial_zeng'
 os.chdir(root_dir)
 
 

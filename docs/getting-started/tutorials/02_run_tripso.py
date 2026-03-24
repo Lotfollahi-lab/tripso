@@ -30,8 +30,8 @@ import scanpy as sc
 import tripso
 
 # Directory paths for loading/saving
-root_dir = '/lustre/scratch126/cellgen/lotfollahi/mm58/gplearner_reproducibility/07_tutorial_zeng'
-data_dir = '/lustre/scratch126/cellgen/lotfollahi/mm58/gplearner_reproducibility/07_tutorial_zeng/data/processed/input_dataset'
+root_dir = 'path/to/your/folder/07_tutorial_zeng'
+data_dir = 'path/to/your/folder/07_tutorial_zeng/data/processed/input_dataset'
 
 output_dir = os.path.join(root_dir, 'output_base')
 gpdb_path = os.path.join(root_dir, 'gpdb_tf.csv')
