@@ -328,7 +328,10 @@ class gpBase(pl.LightningModule):
 
             for i, gp in enumerate(self.model.gp_inputs):
                 emb_dict[gp] = output['z'][:, i, :].detach().cpu()
-                emb_dict[f'{gp}_num_genes'] = (
+                
+                # this is the proportion of GP genes
+                # which are present in a given cell
+                emb_dict[f'{gp}_prop_genes'] = (
                     output['num_genes_per_cell_list'][i].cpu().numpy().T
                 )
 

@@ -477,12 +477,12 @@ def make_contingency_table(
             )
             crosstab = crosstab.sort_index(axis=1)
 
-    # if no explicit order, reorder columns to maximize diagonal.
-    if not use_label_order and linear_sum_assignment is not None and not crosstab.empty:
-        cost_matrix = -crosstab.values
-        _, col_ind = linear_sum_assignment(cost_matrix)
-        ordered_targets = crosstab.columns[col_ind]
-        crosstab = crosstab.loc[:, ordered_targets]
+    # # if no explicit order, reorder columns to maximize diagonal.
+    # if not use_label_order and linear_sum_assignment is not None and not crosstab.empty:
+    #     cost_matrix = -crosstab.values
+    #     _, col_ind = linear_sum_assignment(cost_matrix)
+    #     ordered_targets = crosstab.columns[col_ind]
+    #     crosstab = crosstab.loc[:, ordered_targets]
 
     plt.figure(figsize=fig_size)
     sns.heatmap(crosstab, annot=True, fmt='d', cmap='Blues')
