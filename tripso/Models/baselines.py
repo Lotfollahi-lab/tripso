@@ -1,3 +1,4 @@
+import pickle
 import warnings
 
 import torch
@@ -10,6 +11,276 @@ from .gp_model import (
     gpTransformerGlobal,
     gpWrapper,
 )
+
+####################################
+# Vocab remap helper
+####################################
+
+
+def _build_gf_to_local_remap(gf_token_dict_path, local_vocab, pad_id):
+    """Build a LongTensor remapping Geneformer token ids to a local vocab.
+
+    Parameters
+    ----------
+    gf_token_dict_path : str or Path
+        Path to geneformer_token_dictionary_may2025.pkl (gene_name -> gf_token_id).
+    local_vocab : dict
+        Maps gene_name -> local_token_id.
+    pad_id : int
+        Local vocab id to use for genes not found in local_vocab.
+
+    Returns
+    -------
+    torch.LongTensor of shape (gf_vocab_size,)
+        remap[gf_token_id] = local_token_id, or pad_id if not found.
+    """
+    with open(gf_token_dict_path, 'rb') as f:
+        gf_dict = pickle.load(f)
+    vocab_size = max(gf_dict.values()) + 4  # +4 for Geneformer special tokens
+    remap = torch.full((vocab_size,), pad_id, dtype=torch.long)
+    for gene_name, gf_tok_id in gf_dict.items():
+        if gene_name in local_vocab:
+            remap[gf_tok_id] = local_vocab[gene_name]
+    return remap
+
+
+####################################
+# Alternative FM wrappers
+####################################
+
+
+class scGPTWrapper(nn.Module):
+    """Wraps scGPT to produce per-gene hidden states compatible with tripso.
+
+    Lazily imports scGPT so the class definition is safe in any environment;
+    ImportError only fires when you actually instantiate this class.
+
+    Parameters
+    ----------
+    model_dir : str
+        Path to scGPT checkpoint directory (vocab.json, args.json, best_model.pt).
+    gf_token_dict_path : str
+        Path to tripso's geneformer_token_dictionary_may2025.pkl.
+    fm_layer_to_quant : int
+        Unused; kept for API parity with gfWrapper.
+    """
+
+    def __init__(self, model_dir, gf_token_dict_path, fm_layer_to_quant=-1):
+        super().__init__()
+        try:
+            import json
+            from pathlib import Path as _Path
+
+            from scgpt.model import TransformerModel
+            from scgpt.tokenizer import GeneVocab
+            from scgpt.utils import load_pretrained
+        except ImportError:
+            raise ImportError(
+                'scGPT is not installed in this environment. '
+                'Install it with: pip install git+https://github.com/bowang-lab/scGPT\n'
+                'Only instantiate scGPTWrapper inside the scGPT environment.'
+            )
+        model_dir = _Path(model_dir)
+        pad_token = '<pad>'
+        special_tokens = [pad_token, '<cls>', '<eoc>']
+        vocab = GeneVocab.from_file(model_dir / 'vocab.json')
+        for s in special_tokens:
+            if s not in vocab:
+                vocab.append_token(s)
+        vocab.set_default_index(vocab[pad_token])
+        with open(model_dir / 'args.json') as f:
+            cfg = json.load(f)
+        self.pad_token_id = vocab[pad_token]
+        self.pad_value = cfg['pad_value']
+        self.hidden_size = cfg['embsize']
+        model = TransformerModel(
+            ntoken=len(vocab),
+            d_model=cfg['embsize'],
+            nhead=cfg['nheads'],
+            d_hid=cfg['d_hid'],
+            nlayers=cfg['nlayers'],
+            nlayers_cls=cfg.get('n_layers_cls', 3),
+            n_cls=1,
+            vocab=vocab,
+            dropout=0.0,
+            pad_token=pad_token,
+            pad_value=self.pad_value,
+            do_mvc=True,
+            do_dab=False,
+            use_batch_labels=False,
+            domain_spec_batchnorm=False,
+            explicit_zero_prob=False,
+            use_fast_transformer=False,
+            pre_norm=False,
+        )
+        load_pretrained(
+            model,
+            torch.load(model_dir / 'best_model.pt', map_location='cpu'),
+            verbose=False,
+        )
+        self.model = model
+        for param in self.model.parameters():
+            param.requires_grad = False
+        remap = _build_gf_to_local_remap(
+            gf_token_dict_path,
+            local_vocab=vocab,
+            pad_id=self.pad_token_id,
+        )
+        self.register_buffer('_gf_to_scgpt', remap)
+
+    def forward(self, input_dataset, masking=False, **kwargs):
+        device = next(self.model.parameters()).device
+        gf_ids = input_dataset['input_ids'].to(device)
+        B, L = gf_ids.shape
+        clamped = gf_ids.clamp(min=0, max=self._gf_to_scgpt.shape[0] - 1)
+        scgpt_ids = self._gf_to_scgpt[clamped]
+        if 'counts' in input_dataset and input_dataset['counts'] is not None:
+            values = input_dataset['counts'].to(device).float()
+            if values.shape[1] > L:
+                values = values[:, :L]
+            elif values.shape[1] < L:
+                values = F.pad(values, (0, L - values.shape[1]), value=self.pad_value)
+        else:
+            values = torch.full(
+                (B, L), self.pad_value, dtype=torch.float32, device=device
+            )
+        src_key_padding_mask = scgpt_ids.eq(self.pad_token_id)
+        with torch.no_grad():
+            gene_emb = self.model._encode(
+                scgpt_ids, values, src_key_padding_mask=src_key_padding_mask
+            )
+        return {'gene_emb': gene_emb}
+
+
+class TahoeWrapper(nn.Module):
+    """Wraps Tahoe-x1 to produce per-gene hidden states compatible with tripso.
+
+    Loads directly from a safetensors checkpoint — no llm-foundry or tahoe_x1
+    package required.  Only safetensors (pip install safetensors) is needed.
+
+    Parameters
+    ----------
+    safetensors_path : str
+        Path to model.safetensors.
+    vocab_path : str
+        Path to vocab.json from the same model directory.
+    gf_token_dict_path : str
+        Path to tripso's geneformer_token_dictionary_may2025.pkl.
+    n_heads : int
+        Number of attention heads. 8 for 70m (d_model=512, head_dim=64).
+    fm_layer_to_quant : int
+        Unused; kept for API parity with gfWrapper.
+    """
+
+    def __init__(
+        self,
+        safetensors_path,
+        vocab_path,
+        gf_token_dict_path,
+        n_heads=8,
+        fm_layer_to_quant=-1,
+    ):
+        super().__init__()
+        from ..Utils.tahoe_utils import load_tahoe_from_safetensors
+
+        model, gene2id = load_tahoe_from_safetensors(
+            safetensors_path=safetensors_path,
+            vocab_path=vocab_path,
+            n_heads=n_heads,
+        )
+        self._model = model
+        self.hidden_size = model.d_model
+        self._pad_id_tahoe = gene2id.get('<pad>', 0)
+        remap = _build_gf_to_local_remap(
+            gf_token_dict_path,
+            local_vocab=gene2id,
+            pad_id=self._pad_id_tahoe,
+        )
+        self.register_buffer('_gf_to_tahoe', remap)
+
+    def forward(self, input_dataset, masking=False, **kwargs):
+        device = next(self._model.parameters()).device
+        gf_ids = input_dataset['input_ids'].to(device)
+        clamped = gf_ids.clamp(min=0, max=self._gf_to_tahoe.shape[0] - 1)
+        tahoe_ids = self._gf_to_tahoe[clamped]
+        with torch.no_grad():
+            hidden = self._model(tahoe_ids)
+        return {'gene_emb': hidden}
+
+
+class StateWrapper(nn.Module):
+    """Wraps STATE SE to produce per-gene hidden states compatible with tripso.
+
+    Lazily imports arc-state so the class definition is safe in any environment;
+    ImportError only fires when you actually instantiate this class.
+
+    Parameters
+    ----------
+    checkpoint_path : str
+        Path to STATE SE .ckpt file (e.g. SE-600M/se600m_epoch15.ckpt).
+    gf_token_dict_path : str
+        Path to tripso's geneformer_token_dictionary_may2025.pkl.
+    protein_embeddings_path : str or None
+        Path to protein_embeddings.pt. If None, STATE loads from the checkpoint.
+    fm_layer_to_quant : int
+        Unused; kept for API parity with gfWrapper.
+    """
+
+    def __init__(
+        self,
+        checkpoint_path,
+        gf_token_dict_path,
+        protein_embeddings_path=None,
+        fm_layer_to_quant=-1,
+    ):
+        super().__init__()
+        try:
+            from state.emb.inference import Inference
+        except ImportError:
+            raise ImportError(
+                'arc-state is not installed in this environment. '
+                'Install it with: pip install arc-state\n'
+                'Only instantiate StateWrapper inside the STATE environment.'
+            )
+        protein_embeds = None
+        if protein_embeddings_path is not None:
+            protein_embeds = torch.load(
+                protein_embeddings_path, map_location='cpu', weights_only=False
+            )
+        inferer = Inference(cfg=None, protein_embeds=protein_embeds)
+        inferer.load_model(checkpoint_path)
+        self._model = inferer.model
+        self._protein_embeds = inferer.protein_embeds
+        self._model.eval()
+        for param in self._model.parameters():
+            param.requires_grad = False
+        self.hidden_size = self._model.d_model
+        self._esm_dim = 5120
+        with open(gf_token_dict_path, 'rb') as f:
+            gf_dict = pickle.load(f)
+        vocab_size = max(gf_dict.values()) + 4
+        cache = torch.zeros(vocab_size, self._esm_dim)
+        for gene_name, gf_tok_id in gf_dict.items():
+            if gf_tok_id < vocab_size and gene_name in self._protein_embeds:
+                emb = self._protein_embeds[gene_name]
+                cache[gf_tok_id] = (
+                    emb if isinstance(emb, torch.Tensor) else torch.tensor(emb)
+                )
+        self.register_buffer('_protein_cache', cache)
+
+    def forward(self, input_dataset, masking=False, **kwargs):
+        device = self._model.device
+        gf_ids = input_dataset['input_ids'].to(device)
+        B, L = gf_ids.shape
+        clamped = gf_ids.clamp(min=0, max=self._protein_cache.shape[0] - 1)
+        protein_emb = self._protein_cache[clamped].to(device)
+        with torch.no_grad():
+            projected = self._model.encoder(protein_emb)
+            cls = self._model.cls_token.unsqueeze(0).expand(B, -1, -1)
+            with_cls = torch.cat([cls, projected], dim=1)
+            hidden = self._model.transformer_encoder(with_cls)
+        return {'gene_emb': hidden}
+
 
 ####################################
 # Baseline : averaging GP embeddings
@@ -177,6 +448,60 @@ class gfBaseline(gpTransformerBase):
             emb_out, input_dataset, gp_idx=gp_idx
         )
 
+        return output
+
+
+class fmBaseline(gpTransformerBase):
+    """Foundation-model baseline using gpAverager (AverageNonZero) GP encoding.
+
+    Supports fm_encoder_pkg in {'geneformer', 'geneformer_2021', 'from_scratch',
+    'scgpt', 'tahoe', 'state'}.
+
+    For 'state': also pass state_hidden_size=<int> and optionally
+    protein_embeddings_path=<str>.
+    For 'tahoe': fm_encoder_name='repo_id:model_size', e.g. 'tahoebio/Tahoe-x1:70m'.
+    For 'scgpt': fm_encoder_name=path to checkpoint dir.
+    """
+
+    def __init__(
+        self, fm_encoder_pkg='geneformer', fm_encoder_name='gf-6L-30M-i2048', **kwargs
+    ):
+        super().__init__(
+            fm_encoder_pkg=fm_encoder_pkg,
+            fm_encoder_name=fm_encoder_name,
+            **kwargs,
+        )
+
+        self.multi_gp_encoder = gpAverager(
+            database=self.gpdb,
+            do_ensembl_conversion=self.do_ensembl_conversion,
+            gene_token_path=self.gene_token_path,
+            gene_name_path=self.gene_name_path,
+            gp_latent_size=self.gp_latent_size,
+            n_blocks=self.n_blocks,
+            num_heads=self.num_heads,
+            mgm_mask_ratio=self.mgm_mask_ratio,
+            gp_inputs=self.gp_inputs,
+            use_flash=False,
+            model_type='Mean',
+            learn_new_gp=False,
+            use_pos_emb=False,
+            use_l2_norm=False,
+            attn_dropout=0.0,
+            init_sparsity=0.0,
+            fm_model_input_size=self.fm_model_input_size,
+        )
+
+    def get_last_self_attn(self, input_dataset, gp):
+        warnings.warn(
+            f'fmBaseline (fm_encoder_pkg={self.fm_encoder_pkg}): '
+            'attention matrices unavailable; returning cosine similarity instead.'
+        )
+        gp_idx = self.gp_inputs.index(gp)
+        emb_out = self.gf_wrapper(input_dataset)
+        output = self.multi_gp_encoder.get_last_self_attn(
+            emb_out, input_dataset, gp_idx=gp_idx
+        )
         return output
 
 

@@ -1,8 +1,12 @@
 from .baselines import (
     AverageNonZero,
+    StateWrapper,
+    TahoeWrapper,
+    fmBaseline,
     gfBaseline,
     gfGlobal,
     gpAverager,
+    scGPTWrapper,
 )
 from .gp_model import (
     gfWrapper,
@@ -18,4 +22,8 @@ __all__ = [
     'gpWrapper',
     'gfWrapper',
     'gfGlobal',
+    'fmBaseline',
+    'scGPTWrapper',
+    'TahoeWrapper',
+    'StateWrapper',
 ]

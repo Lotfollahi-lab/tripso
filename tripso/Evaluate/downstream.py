@@ -53,7 +53,7 @@ except (ImportError, AttributeError):
 
 from ..Datamodules.datamodule import txDataModule
 from ..Metrics.metrics import evaluate_emd_ref_vs_query
-from ..Models.baselines import gfGlobal
+from ..Models.baselines import fmBaseline, gfGlobal
 from ..Trainers.trainer import (
     gpAblation,
     gpBase,
@@ -833,6 +833,108 @@ class gpAblationEval(gpEval):
         )
 
         trainer.test(gp_transformer, txdata)
+
+
+class gpEvalFMBaseline(gpEval):
+    """Evaluation class for fmBaseline — no checkpoint required.
+
+    Creates fmBaseline + gpBase fresh (zero-shot), then delegates
+    generate_embeddings() to the parent which uses txDataModule (correct
+    padding, correct split) and pl.Trainer.test() (standard save path).
+
+    Parameters
+    ----------
+    fm_encoder_pkg : str
+        One of 'geneformer', 'geneformer_2021', 'from_scratch',
+        'scgpt', 'tahoe', 'state'.
+    fm_encoder_name : str
+        Model checkpoint path or name (see fmBaseline docstring).
+    tokenizer_fm_encoder_name : str or None
+        Geneformer model name passed to txDataModule for its fm_encoder_name
+        field (stored but not used for loading — set to match the model that
+        was used to tokenize the dataset). Defaults to fm_encoder_name when
+        fm_encoder_pkg is 'geneformer', otherwise must be supplied explicitly.
+    fmbaseline_kwargs : dict or None
+        Extra kwargs forwarded to fmBaseline (e.g. state_hidden_size=512,
+        protein_embeddings_path=..., gp_latent_size=256, etc.).
+    **kwargs
+        Forwarded to gpEval: gpdb_path, dataset_path, output_dir, batch_size,
+        seed, gp_inputs, gene_format, etc.
+    """
+
+    def __init__(
+        self,
+        fm_encoder_pkg='geneformer',
+        fm_encoder_name='gf-6L-30M-i2048',
+        tokenizer_fm_encoder_name=None,
+        fmbaseline_kwargs=None,
+        **kwargs,
+    ):
+        self._fm_encoder_pkg = fm_encoder_pkg
+        self._fm_encoder_name = fm_encoder_name
+        self._tokenizer_name = (
+            tokenizer_fm_encoder_name
+            if tokenizer_fm_encoder_name is not None
+            else fm_encoder_name
+        )
+        self._fmbaseline_kwargs = fmbaseline_kwargs or {}
+
+        super().__init__(
+            model_type='Mean',  # skips checkpoint loading in parent
+            gpmean_fm_encoder_pkg=fm_encoder_pkg,
+            gpmean_fm_encoder_name=fm_encoder_name,
+            **kwargs,
+        )
+
+    def _init_trainer(
+        self,
+        save_emb=False,
+        split_label='train',
+        hparam_save='ignore_model',
+        return_mean_non_padding=False,
+        **kwargs,
+    ):
+        # These are always set explicitly below; strip them from fmbaseline_kwargs
+        # so a caller that puts any of them there doesn't cause a duplicate-kwarg error.
+        _explicit = {
+            'database',
+            'fm_encoder_pkg',
+            'fm_encoder_name',
+            'gp_inputs',
+            'do_ensembl_conversion',
+        }
+        extra_kwargs = {
+            k: v for k, v in self._fmbaseline_kwargs.items() if k not in _explicit
+        }
+        do_ensembl_conversion = self._fmbaseline_kwargs.get(
+            'do_ensembl_conversion', self.do_ensembl_conversion
+        )
+
+        model = fmBaseline(
+            database=self.gpdb,
+            do_ensembl_conversion=do_ensembl_conversion,
+            fm_encoder_pkg=self._fm_encoder_pkg,
+            fm_encoder_name=self._fm_encoder_name,
+            gp_inputs=self.gp_inputs,
+            **extra_kwargs,
+        )
+
+        gp_transformer = gpBase(
+            model=model,
+            output_dir=self.output_dir,
+            save_emb=save_emb,
+            split_label=split_label,
+            hparam_save=hparam_save,
+            return_mean_non_padding=return_mean_non_padding,
+        )
+
+        self.model = model
+        self.gp_inputs = model.gp_inputs
+        self.fm_encoder_pkg = model.fm_encoder_pkg
+        self.fm_encoder_name = self._tokenizer_name  # for txDataModule
+        self.max_len = model.fm_model_input_size
+
+        return gp_transformer
 
 
 ################################

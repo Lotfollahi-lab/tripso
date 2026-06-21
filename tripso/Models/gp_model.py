@@ -88,7 +88,7 @@ class gfWrapper(nn.Module):
             token_dictionary_file=token_dictionary_file,
         )
 
-    def forward(self, input_dataset, masking):
+    def forward(self, input_dataset, masking, **kwargs):
         # input is tokenized dataset
 
         emb_out = self.gf_emb_extractor.extract_embs(
@@ -102,6 +102,11 @@ class gfWrapper(nn.Module):
         gene_output['gene_emb'] = emb_out
 
         return gene_output
+
+
+####################################
+# Gene-level encoder (from scratch)
+####################################
 
 
 class GeneWrapper(nn.Module):
@@ -130,8 +135,10 @@ class GeneWrapper(nn.Module):
     use_gene_embeddings : str or None, optional
         Model name (e.g., 'gf-12L-95M-i4096') or path to embeddings file
         This should be a file containing a tensor of shape (vocab_size, embedding_dim)
-            with the same vocab size and embedding dimension as specified in config_dict.
-        If a string is provided, it will be interpreted as a model name or path to load embeddings from.
+            with the same vocab size and embedding dimension
+            as specified in config_dict.
+        If a string is provided, it will be interpreted as a model name
+            or path to load embeddings from.
         If False, initializes gene embeddings randomly and trains from scratch.
         (.pt or .npy) (default: None).
     attn_dropout : float, optional
@@ -1199,6 +1206,7 @@ class gpTransformerBase(nn.Module):
         all_genes=None,
         warmup=0,
         init_sparsity=0.0,
+        **kwargs,
     ):
         super().__init__()
 
@@ -1301,8 +1309,83 @@ class gpTransformerBase(nn.Module):
                 init_sparsity=init_sparsity,
             )
 
+        elif fm_encoder_pkg == 'scgpt':
+            # fm_encoder_name = path to scGPT checkpoint directory
+            import json as _json  # noqa: PLC0415
+            from pathlib import Path as _Path  # noqa: PLC0415
+
+            from .baselines import scGPTWrapper  # noqa: PLC0415
+
+            with open(_Path(fm_encoder_name) / 'args.json') as _f:
+                _cfg = _json.load(_f)
+            gp_latent_size = _cfg['embsize']
+            fm_model_input_size = _cfg.get('max_seq_len', 1200)
+            self.gene_token_path = TOKEN_DICTIONARY_FILE
+            self.gene_name_path = ENSEMBL_DICTIONARY_FILE
+            self.gf_wrapper = scGPTWrapper(
+                model_dir=fm_encoder_name,
+                gf_token_dict_path=str(TOKEN_DICTIONARY_FILE),
+                fm_layer_to_quant=fm_layer_to_quant,
+            )
+
+        elif fm_encoder_pkg == 'tahoe':
+            # fm_encoder_name: path to checkpoint directory (containing
+            # model.safetensors and vocab.json), or 'safetensors_path:vocab_path'.
+            from pathlib import Path as _Path  # noqa: PLC0415
+
+            from .baselines import TahoeWrapper  # noqa: PLC0415
+
+            _p = _Path(fm_encoder_name)
+            if _p.is_dir():
+                _safetensors_path = str(_p / 'model.safetensors')
+                _vocab_path = str(_p / 'vocab.json')
+            elif ':' in fm_encoder_name:
+                _parts = fm_encoder_name.split(':')
+                _safetensors_path, _vocab_path = _parts[0], _parts[1]
+            else:
+                raise ValueError(
+                    "For fm_encoder_pkg='tahoe', fm_encoder_name must be a "
+                    "checkpoint directory or 'safetensors_path:vocab_path'."
+                )
+            self.gene_token_path = TOKEN_DICTIONARY_FILE
+            self.gene_name_path = ENSEMBL_DICTIONARY_FILE
+            self.gf_wrapper = TahoeWrapper(
+                safetensors_path=_safetensors_path,
+                vocab_path=_vocab_path,
+                gf_token_dict_path=str(TOKEN_DICTIONARY_FILE),
+                n_heads=kwargs.get('tahoe_n_heads', 8),
+                fm_layer_to_quant=fm_layer_to_quant,
+            )
+            gp_latent_size = self.gf_wrapper.hidden_size
+            fm_model_input_size = 4096
+
+        elif fm_encoder_pkg == 'state':
+            # fm_encoder_name = path to STATE .ckpt file
+            from .baselines import StateWrapper  # noqa: PLC0415
+
+            _state_hidden = kwargs.get('state_hidden_size')
+            if _state_hidden is None:
+                raise ValueError(
+                    "Provide state_hidden_size= when fm_encoder_pkg='state'. "
+                    'STATE SE-600M uses d_model=512.'
+                )
+            self.gene_token_path = TOKEN_DICTIONARY_FILE
+            self.gene_name_path = ENSEMBL_DICTIONARY_FILE
+            self.gf_wrapper = StateWrapper(
+                checkpoint_path=fm_encoder_name,
+                gf_token_dict_path=str(TOKEN_DICTIONARY_FILE),
+                protein_embeddings_path=kwargs.get('protein_embeddings_path', None),
+                fm_layer_to_quant=fm_layer_to_quant,
+            )
+            gp_latent_size = self.gf_wrapper.hidden_size
+            fm_model_input_size = 2048
+
         else:
-            raise ValueError('Only geneformer is supported for now')
+            raise ValueError(
+                f'fm_encoder_pkg={fm_encoder_pkg!r} is not supported. '
+                "Choose from: 'geneformer', 'geneformer_2021', 'from_scratch', "
+                "'scgpt', 'tahoe', 'state'."
+            )
 
         # Track for downstream models
         self.fm_encoder_pkg = fm_encoder_pkg
@@ -1331,6 +1414,7 @@ class gpTransformerBase(nn.Module):
         self.mgm_mask_ratio = mgm_mask_ratio
         self.do_ensembl_conversion = do_ensembl_conversion
         self.n_blocks = n_blocks
+        self.num_heads = num_heads
         self.attn_dropout = attn_dropout
         self.use_flash = use_flash
 
