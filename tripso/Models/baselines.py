@@ -1,3 +1,4 @@
+import math
 import pickle
 import warnings
 
@@ -251,6 +252,10 @@ class StateWrapper(nn.Module):
         inferer.load_model(checkpoint_path)
         self._model = inferer.model
         self._protein_embeds = inferer.protein_embeds
+        # STATE SE checkpoints load in bfloat16; keep the model in bf16 for the
+        # forward pass (lower memory / faster matmuls). forward() casts inputs
+        # to the model dtype and casts the output back to float32, since the
+        # rest of the tripso pipeline (and numpy, which has no bf16) is float32.
         self._model.eval()
         for param in self._model.parameters():
             param.requires_grad = False
@@ -273,13 +278,26 @@ class StateWrapper(nn.Module):
         gf_ids = input_dataset['input_ids'].to(device)
         B, L = gf_ids.shape
         clamped = gf_ids.clamp(min=0, max=self._protein_cache.shape[0] - 1)
-        protein_emb = self._protein_cache[clamped].to(device)
+        model_dtype = next(self._model.parameters()).dtype
+        protein_emb = self._protein_cache[clamped].to(device=device, dtype=model_dtype)
         with torch.no_grad():
-            projected = self._model.encoder(protein_emb)
-            cls = self._model.cls_token.unsqueeze(0).expand(B, -1, -1)
-            with_cls = torch.cat([cls, projected], dim=1)
-            hidden = self._model.transformer_encoder(with_cls)
-        return {'gene_emb': hidden}
+            # Match StateEmbeddingModel: L2-normalise protein embeddings, prepend
+            # the cls token (which lives in the 5120-dim token space), THEN project
+            # to d_model via the encoder with the sqrt(d_model) scaling, and only
+            # then run the transformer. See state/emb/nn/model.py:228-231 and :295.
+            protein_emb = F.normalize(protein_emb, dim=2)
+            cls = self._model.cls_token.to(protein_emb.dtype).expand(B, -1).unsqueeze(1)
+            with_cls = torch.cat([cls, protein_emb], dim=1)
+            projected = self._model.encoder(with_cls) * math.sqrt(self._model.d_model)
+            hidden = self._model.transformer_encoder(projected)
+        # Drop the prepended cls token so the per-gene embeddings line up 1:1 with
+        # input_ids (build_gp_input_matrix multiplies gene_emb by an input_ids-shaped
+        # mask). The cls still served its purpose: genes attended to it in the encoder.
+        hidden = hidden[:, 1:, :]
+        # Model runs in bf16; cast the output back to float32 so downstream
+        # averaging and the HuggingFace Dataset.from_dict write (Arrow/numpy,
+        # which have no bf16 dtype) work.
+        return {'gene_emb': hidden.float()}
 
 
 ####################################

@@ -28,6 +28,7 @@ from . import (
     Utils,
 )
 from .Evaluate.downstream import gpEval
+from .Evaluate.linear_probing import run_linear_probing
 from .Preprocessing.preprocess import pp_and_tokenize
 from .Train.training import run_training as train
 
@@ -48,4 +49,5 @@ __all__ = [
     'Trainers',
     'train',
     'gpEval',
+    'run_linear_probing',
 ]
