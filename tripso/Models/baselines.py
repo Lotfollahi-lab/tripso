@@ -1,6 +1,7 @@
 import math
 import pickle
 import warnings
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -14,21 +15,79 @@ from .gp_model import (
 )
 
 ####################################
+# Gene-annotation helpers
+####################################
+#
+# The geneformer token dictionary (geneformer_token_dictionary_may2025.pkl) is
+# keyed by ENSEMBL IDs (e.g. 'ENSG00000000003' -> token_id). Geneformer and
+# Tahoe-x1 both work in Ensembl-ID space, so their token<->id maps line up with
+# it directly. scGPT (GeneVocab from vocab.json) and STATE (protein_embeds dict)
+# are instead keyed by gene SYMBOLS (e.g. 'TNF', 'TP53'). To bridge, 
+# we translate Ensembl ID -> gene symbol before the lookup, 
+# using geneformer_ensembl_dictionary_may2025.pkl (symbol -> EnsemblID),
+# inverted.
+
+
+def _derive_ensembl_dict_path(gf_token_dict_path):
+    """Locate the symbol<->Ensembl dictionary that sits beside the token dict.
+
+    geneformer_token_dictionary_may2025.pkl and
+    geneformer_ensembl_dictionary_may2025.pkl ship in the same directory, so we
+    derive the latter from the former by swapping the descriptor in the file
+    name. Returns a Path, or None if no sibling file is found.
+    """
+    p = Path(gf_token_dict_path)
+    candidate = p.with_name(p.name.replace('token_dictionary', 'ensembl_dictionary'))
+    return candidate if candidate.is_file() else None
+
+
+def _load_ens_to_symbol(ensembl_dict_path):
+    """Load and invert the symbol->Ensembl map into an Ensembl->symbol map.
+
+    Parameters
+    ----------
+    ensembl_dict_path : str or Path or None
+        Path to geneformer_ensembl_dictionary_may2025.pkl (gene_symbol ->
+        ensembl_id). If None, returns None (no translation will be applied).
+
+    Returns
+    -------
+    dict or None
+        {ensembl_id: gene_symbol}. The first symbol encountered for a given
+        Ensembl ID wins (the mapping is many-symbols-to-one-Ensembl in places).
+    """
+    if ensembl_dict_path is None:
+        return None
+    with open(ensembl_dict_path, 'rb') as f:
+        sym2ens = pickle.load(f)  # gene_symbol -> ensembl_id
+    ens2sym = {}
+    for symbol, ens_id in sym2ens.items():
+        ens2sym.setdefault(ens_id, symbol)
+    return ens2sym
+
+
+####################################
 # Vocab remap helper
 ####################################
 
 
-def _build_gf_to_local_remap(gf_token_dict_path, local_vocab, pad_id):
+def _build_gf_to_local_remap(gf_token_dict_path, local_vocab, pad_id, ens2sym=None):
     """Build a LongTensor remapping Geneformer token ids to a local vocab.
 
     Parameters
     ----------
     gf_token_dict_path : str or Path
-        Path to geneformer_token_dictionary_may2025.pkl (gene_name -> gf_token_id).
+        Path to geneformer_token_dictionary_may2025.pkl (ensembl_id -> gf_token_id).
     local_vocab : dict
-        Maps gene_name -> local_token_id.
+        Maps gene_key -> local_token_id. ``gene_key`` is whatever identifier the
+        target model is keyed on: an Ensembl ID (Tahoe) or a gene symbol (scGPT).
     pad_id : int
         Local vocab id to use for genes not found in local_vocab.
+    ens2sym : dict or None, optional
+        Ensembl-ID -> gene-symbol map. Pass this for symbol-keyed target vocabs
+        (scGPT, STATE) so the Ensembl-ID keys of the geneformer token dictionary
+        are translated to symbols before lookup. Leave None for Ensembl-keyed
+        vocabs (Tahoe), where the geneformer key is used directly.
 
     Returns
     -------
@@ -36,12 +95,14 @@ def _build_gf_to_local_remap(gf_token_dict_path, local_vocab, pad_id):
         remap[gf_token_id] = local_token_id, or pad_id if not found.
     """
     with open(gf_token_dict_path, 'rb') as f:
-        gf_dict = pickle.load(f)
+        gf_dict = pickle.load(f)  # ensembl_id -> gf_token_id
     vocab_size = max(gf_dict.values()) + 4  # +4 for Geneformer special tokens
     remap = torch.full((vocab_size,), pad_id, dtype=torch.long)
-    for gene_name, gf_tok_id in gf_dict.items():
-        if gene_name in local_vocab:
-            remap[gf_tok_id] = local_vocab[gene_name]
+    for ens_id, gf_tok_id in gf_dict.items():
+        # Translate Ensembl ID -> symbol when the target vocab is symbol-keyed.
+        gene_key = ens2sym.get(ens_id, ens_id) if ens2sym is not None else ens_id
+        if gene_key in local_vocab:
+            remap[gf_tok_id] = local_vocab[gene_key]
     return remap
 
 
@@ -64,9 +125,20 @@ class scGPTWrapper(nn.Module):
         Path to tripso's geneformer_token_dictionary_may2025.pkl.
     fm_layer_to_quant : int
         Unused; kept for API parity with gfWrapper.
+    gf_name_dict_path : str or None, optional
+        Path to geneformer_ensembl_dictionary_may2025.pkl (gene_symbol ->
+        ensembl_id), used to translate the token dictionary's Ensembl-ID keys to
+        the gene symbols that scGPT's vocab is keyed on. If None, it is derived
+        automatically from ``gf_token_dict_path`` (same directory).
     """
 
-    def __init__(self, model_dir, gf_token_dict_path, fm_layer_to_quant=-1):
+    def __init__(
+        self,
+        model_dir,
+        gf_token_dict_path,
+        fm_layer_to_quant=-1,
+        gf_name_dict_path=None,
+    ):
         super().__init__()
         try:
             import json
@@ -122,10 +194,16 @@ class scGPTWrapper(nn.Module):
         self.model = model
         for param in self.model.parameters():
             param.requires_grad = False
+        # scGPT's GeneVocab is keyed by gene symbols, so translate the token
+        # dictionary's Ensembl-ID keys to symbols before remapping.
+        if gf_name_dict_path is None:
+            gf_name_dict_path = _derive_ensembl_dict_path(gf_token_dict_path)
+        ens2sym = _load_ens_to_symbol(gf_name_dict_path)
         remap = _build_gf_to_local_remap(
             gf_token_dict_path,
             local_vocab=vocab,
             pad_id=self.pad_token_id,
+            ens2sym=ens2sym,
         )
         self.register_buffer('_gf_to_scgpt', remap)
 
@@ -158,6 +236,10 @@ class TahoeWrapper(nn.Module):
 
     Loads directly from a safetensors checkpoint — no llm-foundry or tahoe_x1
     package required.  Only safetensors (pip install safetensors) is needed.
+
+    Tahoe-x1's vocab.json is keyed by Ensembl IDs, matching the geneformer token
+    dictionary, so no symbol translation is needed here (``ens2sym`` is left as
+    its default None in the remap).
 
     Parameters
     ----------
@@ -225,6 +307,11 @@ class StateWrapper(nn.Module):
         Path to protein_embeddings.pt. If None, STATE loads from the checkpoint.
     fm_layer_to_quant : int
         Unused; kept for API parity with gfWrapper.
+    gf_name_dict_path : str or None, optional
+        Path to geneformer_ensembl_dictionary_may2025.pkl (gene_symbol ->
+        ensembl_id), used to translate the token dictionary's Ensembl-ID keys to
+        the gene symbols that STATE's protein_embeds dict is keyed on. If None,
+        it is derived automatically from ``gf_token_dict_path`` (same directory).
     """
 
     def __init__(
@@ -233,6 +320,7 @@ class StateWrapper(nn.Module):
         gf_token_dict_path,
         protein_embeddings_path=None,
         fm_layer_to_quant=-1,
+        gf_name_dict_path=None,
     ):
         super().__init__()
         try:
@@ -261,16 +349,34 @@ class StateWrapper(nn.Module):
             param.requires_grad = False
         self.hidden_size = self._model.d_model
         self._esm_dim = 5120
+        # STATE's protein_embeds dict is keyed by gene symbols, while the
+        # geneformer token dictionary is keyed by Ensembl IDs. Translate Ensembl
+        # ID -> symbol before looking each gene up in protein_embeds; otherwise
+        # the cache stays all-zero and every cell collapses to one constant
+        # embedding.
+        if gf_name_dict_path is None:
+            gf_name_dict_path = _derive_ensembl_dict_path(gf_token_dict_path)
+        ens2sym = _load_ens_to_symbol(gf_name_dict_path)
         with open(gf_token_dict_path, 'rb') as f:
-            gf_dict = pickle.load(f)
+            gf_dict = pickle.load(f)  # ensembl_id -> gf_token_id
         vocab_size = max(gf_dict.values()) + 4
         cache = torch.zeros(vocab_size, self._esm_dim)
-        for gene_name, gf_tok_id in gf_dict.items():
-            if gf_tok_id < vocab_size and gene_name in self._protein_embeds:
-                emb = self._protein_embeds[gene_name]
+        n_mapped = 0
+        for ens_id, gf_tok_id in gf_dict.items():
+            gene_key = ens2sym.get(ens_id, ens_id) if ens2sym is not None else ens_id
+            if gf_tok_id < vocab_size and gene_key in self._protein_embeds:
+                emb = self._protein_embeds[gene_key]
                 cache[gf_tok_id] = (
                     emb if isinstance(emb, torch.Tensor) else torch.tensor(emb)
                 )
+                n_mapped += 1
+        if n_mapped == 0:
+            warnings.warn(
+                'StateWrapper: no genes were matched into STATE protein '
+                'embeddings. Every cell will receive an identical embedding. '
+                'Check that gf_name_dict_path points to the symbol<->Ensembl '
+                'dictionary and that protein_embeds is keyed by gene symbol.'
+            )
         self.register_buffer('_protein_cache', cache)
 
     def forward(self, input_dataset, masking=False, **kwargs):
