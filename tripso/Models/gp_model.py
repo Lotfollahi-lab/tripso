@@ -173,7 +173,7 @@ class GeneWrapper(nn.Module):
         init_sparsity=0.0,
     ):
         super().__init__()
-        
+
         if 'freeze_word_embeddings' in config_dict:
             freeze_word_embeddings = config_dict['freeze_word_embeddings']
         else:
@@ -198,9 +198,7 @@ class GeneWrapper(nn.Module):
                 )
 
             self.gene_embeddings = nn.Embedding.from_pretrained(
-                emb,
-                padding_idx=0,
-                freeze = freeze_word_embeddings
+                emb, padding_idx=0, freeze=freeze_word_embeddings
             )
 
             if '16' in str(config_dict['torch_dtype']):

@@ -22,8 +22,8 @@ from .gp_model import (
 # keyed by ENSEMBL IDs (e.g. 'ENSG00000000003' -> token_id). Geneformer and
 # Tahoe-x1 both work in Ensembl-ID space, so their token<->id maps line up with
 # it directly. scGPT (GeneVocab from vocab.json) and STATE (protein_embeds dict)
-# are instead keyed by gene SYMBOLS (e.g. 'TNF', 'TP53'). To bridge, 
-# we translate Ensembl ID -> gene symbol before the lookup, 
+# are instead keyed by gene SYMBOLS (e.g. 'TNF', 'TP53'). To bridge,
+# we translate Ensembl ID -> gene symbol before the lookup,
 # using geneformer_ensembl_dictionary_may2025.pkl (symbol -> EnsemblID),
 # inverted.
 

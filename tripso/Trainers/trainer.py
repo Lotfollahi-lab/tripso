@@ -1589,6 +1589,142 @@ class gpAblation(gpGlobal):
         return None
 
 
+class gpAblationRand(gpGlobal):
+    def __init__(self, n_rand=5, noise_scale=None, rand_seed=0, **kwargs):
+        """
+        Trainer for computing ablation metrics by scrambling gene programs.
+
+        Unlike gpAblation (which removes a GP by zeroing its embedding AND masking
+        it out of attention), this trainer replaces a GP's embedding with Gaussian
+        noise `n_rand` times while keeping the scrambled GP slot attended to, then
+        reports the average change in cosine similarity (1 - cos) between the
+        control and perturbed cell embeddings across the noise draws.
+
+        n_rand: number of independent noise draws per gene program.
+        noise_scale: standard deviation of the Gaussian noise. If None, the
+            empirical std of the GP embeddings being replaced is used.
+        rand_seed: seed for the noise generator. The `n_rand` draws differ from
+            each other, but the whole run reproduces exactly given the same seed.
+        """
+        super().__init__(**kwargs)
+        self.n_rand = n_rand
+        self.noise_scale = noise_scale
+        self.rand_seed = rand_seed
+        self.cosine_adata = None
+        # lazily-created, per-device generator cache (see _get_generator)
+        self._noise_generator = None
+
+    def _get_generator(self, device):
+        """
+        Lazily create and cache a torch.Generator seeded with self.rand_seed.
+
+        The generator is created once and reused across all noise draws, gene
+        programs and batches, so successive draws differ (the generator advances)
+        while the full sequence remains deterministic and reproducible.
+        Lazy creation ensures the seed set on the module *after* load_from_checkpoint
+        is respected, since no noise is drawn before test_step.
+        """
+        if self._noise_generator is None:
+            self._noise_generator = torch.Generator(device=device)
+            self._noise_generator.manual_seed(self.rand_seed)
+        return self._noise_generator
+
+    def build_noised_input_matrix(self, z, num_genes_per_cell_list, gp_pert_index):
+        z, gp_labels, attn_mask = self.model.cell_token_learner.build_input_matrix(
+            z, num_genes_per_cell_list
+        )
+
+        # select the slots holding the GP we are perturbing (per cell)
+        sel = gp_labels == gp_pert_index
+        target = z[sel]
+
+        # match the empirical std of the replaced embeddings unless overridden
+        if self.noise_scale is not None:
+            scale = self.noise_scale
+        else:
+            scale = target.std() if target.numel() > 0 else 1.0
+
+        gen = self._get_generator(z.device)
+        noise = (
+            torch.randn(
+                target.shape,
+                generator=gen,
+                device=target.device,
+                dtype=target.dtype,
+            )
+            * scale
+        )
+
+        z = z.clone()
+        z[sel] = noise
+
+        # NOTE: unlike gpAblation, attn_mask is NOT modified, so the scrambled
+        # GP slot remains attended to and the noise propagates to the cell token.
+
+        return z, gp_labels, attn_mask
+
+    def test_step(self, batch, batch_idx):
+        output = self.forward(batch, masking=False, masking_global=False)
+
+        control_array = output['cell_token'].detach().cpu().numpy()
+
+        cosine_dict = {}
+        for i, gp in enumerate(self.model.gp_inputs):
+            draws = []
+            for _ in range(self.n_rand):
+                z, gp_labels, attn_mask = self.build_noised_input_matrix(
+                    z=output['z'],
+                    num_genes_per_cell_list=output['num_genes_per_cell_list'],
+                    gp_pert_index=i,
+                )
+
+                encoder_output = self.model.cell_token_learner.encoder(
+                    z,
+                    gene_labels=gp_labels,
+                    attn_mask=attn_mask,
+                    masking=False,
+                    return_attention=False,
+                )
+
+                gp_array = encoder_output['cls'].detach().cpu().numpy()
+                cos_sim = 1 - np.diag(cosine_similarity(control_array, gp_array))
+                draws.append(cos_sim)
+
+            # per-cell mean change in cosine similarity across the noise draws
+            cosine_dict[gp] = np.mean(np.stack(draws, axis=0), axis=0)
+
+        meta_dict = {}
+        for k, v in batch.items():
+            if k != 'input_ids':
+                if isinstance(v, torch.Tensor):
+                    meta_dict[k] = v.cpu().numpy()
+                else:
+                    meta_dict[k] = v
+
+        adata = sc.AnnData(
+            X=pd.DataFrame(cosine_dict).values,
+            obs=pd.DataFrame(meta_dict),
+            var=pd.DataFrame(index=cosine_dict.keys()),
+        )
+
+        if self.cosine_adata is None:
+            self.cosine_adata = adata
+        else:
+            self.cosine_adata = ad.concat([self.cosine_adata, adata])
+
+        return None
+
+    def on_test_epoch_end(self):
+        output_path = os.path.join(self.output_dir, 'with_gp_ablation_rand')
+        os.makedirs(output_path, exist_ok=True)
+        output_name = os.path.join(output_path, f'{self.split_label}_set')
+
+        self.cosine_adata.write_h5ad(output_name + '.h5ad')
+        self.cosine_adata = None
+
+        return None
+
+
 if __name__ == '__main__':
     from tripso.Datamodules.datamodule import txDataModule
     from tripso.Models.gp_model import gpTransformerBase

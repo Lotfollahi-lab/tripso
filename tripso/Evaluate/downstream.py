@@ -56,6 +56,7 @@ from ..Metrics.metrics import evaluate_emd_ref_vs_query
 from ..Models.baselines import fmBaseline, gfGlobal
 from ..Trainers.trainer import (
     gpAblation,
+    gpAblationRand,
     gpBase,
     gpGlobal,
     gpGlobalLoRA,
@@ -826,6 +827,178 @@ class gpAblationEval(gpEval):
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
             adata_path=self.adata_path,  # for reconstruction loss calculation
+        )
+
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision=precision
+        )
+
+        trainer.test(gp_transformer, txdata)
+
+
+class gpAblationRandEval(gpEval):
+    """
+    Evaluation class for Gaussian-noise gene program scrambling ablation.
+
+    Extends gpEval to run the gpAblationRand trainer, which scrambles each gene
+    program by replacing its embedding with Gaussian noise `n_rand` times (while
+    keeping the scrambled GP attended to) and reports the average change in
+    cosine similarity between the control and perturbed cell embeddings.
+
+    Parameters
+    ----------
+    main_ckpt_dir : str
+        Path to directory containing the main model checkpoint (last.ckpt).
+    n_rand : int, default=5
+        Number of independent noise draws per gene program.
+    noise_scale : float, optional
+        Standard deviation of the Gaussian noise. If None, the empirical std
+        of the GP embeddings being replaced is used.
+    rand_seed : int, default=0
+        Seed for the noise generator. The `n_rand` draws differ from each other,
+        but the whole run reproduces exactly given the same seed. This is
+        separate from gpEval's datamodule `seed`.
+    adata_path : str, optional
+        Path to .h5ad file passed to the datamodule.
+    *args
+        Additional positional arguments passed to parent gpEval class.
+    **kwargs
+        Additional keyword arguments passed to parent gpEval class.
+
+    Notes
+    -----
+    - Only supports 'Global' model_type (raises error for 'Base')
+    - Saves per-cell cosine-distance AnnData to
+      <output_dir>/with_gp_ablation_rand/<split>_set.h5ad
+
+    Examples
+    --------
+    >>> evaluator = gpAblationRandEval(
+    ...     main_ckpt_dir='path/to/checkpoint',
+    ...     n_rand=5,
+    ...     rand_seed=0,
+    ...     gpdb_path='path/to/gpdb.csv',
+    ...     output_dir='path/to/output',
+    ...     dataset_path='path/to/data'
+    ... )
+    >>> evaluator.generate_embeddings(split='test')
+    """
+
+    def __init__(
+        self,
+        main_ckpt_dir,
+        n_rand=5,
+        noise_scale=None,
+        rand_seed=0,
+        adata_path=None,
+        *args,
+        **kwargs,
+    ):
+        self.main_ckpt_dir = os.path.join(main_ckpt_dir, 'checkpoints/last.ckpt')
+        self.n_rand = n_rand
+        self.noise_scale = noise_scale
+        self.rand_seed = rand_seed
+        self.adata_path = adata_path
+        super().__init__(*args, **kwargs)
+
+    def _init_trainer(self, split_label=None, **kwargs):
+        """
+        Initialize the noise-scrambling ablation trainer module.
+
+        Loads the gpAblationRand model from checkpoint and configures it for
+        the scrambling analysis (number of draws, noise scale, seed).
+
+        Parameters
+        ----------
+        split_label : str, optional
+            Dataset split to use ('train', 'test', or 'val').
+        **kwargs
+            Additional keyword arguments (currently unused but maintained
+            for compatibility with parent class).
+
+        Returns
+        -------
+        gp_transformer : gpAblationRand
+            Configured ablation trainer ready for evaluation.
+
+        Raises
+        ------
+        ValueError
+            If model_type is 'Base' (ablation only supports 'Global' models).
+        """
+        if self.model_type == 'Base':
+            raise ValueError('Ablation not implemented for Base model')
+
+        elif self.model_type == 'Global':
+            gp_transformer = gpAblationRand.load_from_checkpoint(
+                self.main_ckpt_dir, hparam_save='ignore_model', map_location='cpu'
+            )
+
+        # reset attributes overwritten by loading from checkpoint
+        gp_transformer.save_emb = True
+        gp_transformer.split_label = split_label
+        gp_transformer.output_dir = self.output_dir
+        gp_transformer.n_rand = self.n_rand
+        gp_transformer.noise_scale = self.noise_scale
+        gp_transformer.rand_seed = self.rand_seed
+        # generator is lazy, so setting rand_seed post-load is sufficient
+        gp_transformer._noise_generator = None
+
+        # Extract model
+        self.model = gp_transformer.model
+        self.gp_inputs = gp_transformer.model.gp_inputs
+
+        # Extract pretrained encoder config
+        self.fm_encoder_pkg = gp_transformer.model.fm_encoder_pkg
+
+        if self.fm_encoder_pkg == 'geneformer':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_name
+            self.max_len = (
+                gp_transformer.model.gf_wrapper.gf.config.max_position_embeddings
+            )
+        elif self.fm_encoder_pkg == 'from_scratch':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
+            # TO DO --> flexibly account for different model sizes
+            self.max_len = 4096
+
+        return gp_transformer
+
+    def generate_embeddings(
+        self, split='train', precision=32, return_mean_non_padding=False
+    ):
+        """
+        Run the noise-scrambling ablation and save the cosine-distance AnnData.
+
+        Parameters
+        ----------
+        split : str, default='train'
+            Dataset split to use ('train', 'test', or 'val').
+        precision : int, default=32
+            Numerical precision for PyTorch Lightning trainer (16, or 32).
+        return_mean_non_padding : bool, default=False
+            For compatibility with parent class.
+
+        Returns
+        -------
+        None
+            Per-cell cosine distances are saved to
+            <output_dir>/with_gp_ablation_rand/<split>_set.h5ad
+        """
+        gp_transformer = self._init_trainer(
+            save_emb=True,
+            split_label=split,
+            hparam_save=self.hparam_save,
+            return_mean_non_padding=return_mean_non_padding,
+        )
+
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_test_step=split,
+            seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            model_input_size=self.max_len,
+            adata_path=self.adata_path,
         )
 
         trainer = pl.Trainer(
