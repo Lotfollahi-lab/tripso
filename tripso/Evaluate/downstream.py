@@ -60,6 +60,7 @@ from ..Trainers.trainer import (
     gpBase,
     gpGlobal,
     gpGlobalLoRA,
+    gpLite,
 )
 from ..Utils.utils import (
     MidpointNormalize,
@@ -225,6 +226,11 @@ class gpEval:
     ):
         if self.model_type == 'Base':
             gp_transformer = gpBase.load_from_checkpoint(
+                self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
+            )
+
+        elif self.model_type == 'Lite':
+            gp_transformer = gpLite.load_from_checkpoint(
                 self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
             )
 

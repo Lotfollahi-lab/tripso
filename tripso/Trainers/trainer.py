@@ -715,6 +715,70 @@ class gpBase(pl.LightningModule):
         }
 
 
+class gpLite(gpBase):
+    """LightningModule for :class:`~tripso.Models.gp_model.gpTransformerLite`.
+
+    Identical to :class:`gpBase` except for the masked-gene-modelling loss: the
+    Lite model shares a single GP transformer body, so there is no per-GP
+    ``encoder[i]`` module list. ``compute_gp_loss`` therefore checks the shared
+    encoder's ``requires_grad`` once instead of per GP.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model_type = 'Lite'
+
+    def _shared_encoder_trainable(self):
+        return (
+            self.model.multi_gp_encoder.encoder.blocks[0].attn.qkv.weight.requires_grad
+        )
+
+    def log_gp_loss(self, loss_per_gp):
+        # Single shared body: check trainability once instead of per GP.
+        if not self._shared_encoder_trainable():
+            return
+        for gp in self.model.gp_inputs:
+            self.log(
+                f'train/{gp}_MGM_loss',
+                loss_per_gp[gp],
+                on_step=True,
+                on_epoch=True,
+                logger=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
+
+    def compute_gp_loss(self, batch, fw_pass_output):
+        output = fw_pass_output
+
+        gp_loss_dict = {}
+        loss = 0
+
+        # Single shared body: check trainability once for all GPs.
+        shared_trainable = self._shared_encoder_trainable()
+
+        for i in range(len(self.model.gp_inputs)):
+            if shared_trainable:
+                loss_i = F.cross_entropy(
+                    output['logits_lm_list'][i].reshape(
+                        -1, output['logits_lm_list'][i].shape[-1]
+                    ),
+                    output['gene_labels_list'][i].reshape(-1),
+                )
+
+                gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+                loss += loss_i
+            else:
+                gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(self.device)
+
+        holder = {
+            'loss_per_gp': gp_loss_dict,
+            'total_loss': loss,
+        }
+
+        return holder
+
+
 class gpGlobal(gpBase):
     def __init__(
         self,

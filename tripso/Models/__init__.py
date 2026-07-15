@@ -10,12 +10,16 @@ from .baselines import (
 )
 from .gp_model import (
     gfWrapper,
+    gpLiteWrapper,
     gpTransformerBase,
+    gpTransformerLite,
     gpWrapper,
 )
 
 __all__ = [
     'gpTransformerBase',
+    'gpTransformerLite',
+    'gpLiteWrapper',
     'AverageNonZero',
     'gfBaseline',
     'gpAverager',

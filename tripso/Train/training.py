@@ -25,11 +25,16 @@ from transformers import BertConfig
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.baselines import gfGlobal
-from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
+from ..Models.gp_model import (
+    gpTransformerBase,
+    gpTransformerGlobal,
+    gpTransformerLite,
+)
 from ..Trainers.trainer import (
     gpBase,
     gpGlobal,
     gpGlobalLoRA,
+    gpLite,
 )
 from ..Utils.geneformer_utils import get_gf_repo
 from ..Utils.utils import find_latest_file
@@ -132,10 +137,12 @@ def run_training(
     gene_format : Literal['symbol', 'ensembl'], default='symbol'
         Format in which gene names are stored in GPDB
     model_type : str, default='Base'
-        One of 'Base', 'Global', 'Global_LoRA', or 'Mean'.
-        'Base' trains only the GP encoder. 'Global' adds a cell-level
-        transformer. 'Global_LoRA' uses LoRA for parameter-efficient training.
-        'Mean' uses gene program mean embeddings.
+        One of 'Base', 'Lite', 'Global', 'Global_LoRA', or 'Mean'.
+        'Base' trains only the GP encoder (one transformer per GP). 'Lite' is
+        like 'Base' but shares a single transformer body across gene programs
+        with per-GP MLM heads. 'Global' adds a cell-level transformer.
+        'Global_LoRA' uses LoRA for parameter-efficient training. 'Mean' uses
+        gene program mean embeddings.
     strategy : str, default='ddp_find_unused_parameters_true'
         Strategy for multi-GPU PyTorch Lightning trainer
     attn_dropout : float, default=0.0
@@ -489,7 +496,7 @@ def configure_callbacks(save_id, args):
                 patience=3,
                 mode='min',
             )
-    elif model_type == 'Base':
+    elif (model_type == 'Base') | (model_type == 'Lite'):
         early_stopping_callback = EarlyStopping(
             monitor='train/loss_step',
             patience=50,
@@ -664,6 +671,10 @@ def configure_model(args):
         model = gpTransformerBase(**common_params)
         return model
 
+    if args['model_type'] == 'Lite':
+        model = gpTransformerLite(**common_params)
+        return model
+
     if (args['model_type'] == 'Global') | (args['model_type'] == 'Global_LoRA'):
         model = gpTransformerGlobal(**common_params, **global_params)
         return model
@@ -713,6 +724,10 @@ def configure_lightning_module(model, args):
 
     if args['model_type'] == 'Base':
         pl_model = gpBase(**common_params)
+        return pl_model
+
+    if args['model_type'] == 'Lite':
+        pl_model = gpLite(**common_params)
         return pl_model
 
     if args['model_type'] == 'Global':
@@ -767,6 +782,8 @@ def load_from_ckpt(mode, pl_model, args):
 
         if model_type == 'Global':
             pl_model = gpGlobal.load_from_checkpoint(latest_ckpt, map_location='cpu')
+        elif model_type == 'Lite':
+            pl_model = gpLite.load_from_checkpoint(latest_ckpt, map_location='cpu')
         else:
             pl_model = gpBase.load_from_checkpoint(latest_ckpt, map_location='cpu')
 

@@ -24,7 +24,7 @@ import pytorch_lightning as pl
 import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
-from datasets import load_from_disk
+from datasets import Dataset as HFDataset, load_from_disk
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
@@ -143,8 +143,9 @@ def dataset_to_xy(path, gp, label_col, filter_key, filter_value):
 
     Parameters
     ----------
-    path : str
-        Path to a dataset saved with ``datasets.save_to_disk``.
+    path : str or datasets.Dataset
+        Path to a dataset saved with ``datasets.save_to_disk``, or an
+        already-loaded in-memory ``datasets.Dataset``.
     gp : str
         Feature column holding the gene program embeddings.
     label_col : str
@@ -160,7 +161,7 @@ def dataset_to_xy(path, gp, label_col, filter_key, filter_value):
         Feature matrix, string labels, and a mapping of column name to the
         filtered metadata series.
     """
-    ds = load_from_disk(str(path))
+    ds = path if isinstance(path, HFDataset) else load_from_disk(str(path))
     df = ds.select_columns([c for c in ds.column_names if c != gp]).to_pandas()
     keep = _obs_filter(df, filter_key, filter_value)
     if gp not in ds.column_names:
@@ -190,8 +191,9 @@ def h5ad_to_xy(
 
     Parameters
     ----------
-    path : str
-        Path to a ``.h5ad`` file with embeddings in ``.X``.
+    path : str or anndata.AnnData
+        Path to a ``.h5ad`` file with embeddings in ``.X``, or an
+        already-loaded in-memory ``AnnData``.
     gp : str
         Gene program name or pattern used to select variables.
     label_col : str
@@ -209,7 +211,7 @@ def h5ad_to_xy(
         Feature matrix, string labels, and a mapping of ``obs`` column name to
         the corresponding series.
     """
-    adata = ad.read_h5ad(path)
+    adata = path if isinstance(path, ad.AnnData) else ad.read_h5ad(path)
     keep = _obs_filter(adata.obs, filter_key, filter_value)
     adata = adata[keep].copy()
     adata = _select_gp_vars(adata, gp, feature_mode)
