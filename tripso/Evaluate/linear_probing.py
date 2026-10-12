@@ -24,7 +24,8 @@ import pytorch_lightning as pl
 import scipy.sparse as sp
 import torch
 import torch.nn.functional as F
-from datasets import Dataset as HFDataset, load_from_disk
+from datasets import Dataset as HFDataset
+from datasets import load_from_disk
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
