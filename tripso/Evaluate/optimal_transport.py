@@ -1,3 +1,5 @@
+import warnings
+
 import anndata as ad
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -19,7 +21,8 @@ from scipy.spatial.distance import cdist
 from sklearn.cluster import KMeans
 
 
-def compute_sinkhorn(adata, col, ref, target, epsilon=1e-3, tau_a=0.999, tau_b=0.999):
+def compute_sinkhorn(adata, col, ref, target, epsilon=1e-3, 
+                     tau_a=0.999, tau_b=0.999, scale_cost=1.0):
     # Data selection
     ref_adata_ = adata[adata.obs[col] == ref]
     query_adata_ = adata[adata.obs[col] == target]
@@ -35,12 +38,22 @@ def compute_sinkhorn(adata, col, ref, target, epsilon=1e-3, tau_a=0.999, tau_b=0
     y = jnp.array(query_adata_.X)
 
     # Set up
-    geom = pointcloud.PointCloud(x, y, epsilon=epsilon)
+    geom = pointcloud.PointCloud(x, y, epsilon=epsilon, scale_cost=scale_cost)
     solver = sinkhorn.Sinkhorn()
 
     # define an unbalanced linear problem
     ot_prob = linear_problem.LinearProblem(geom, tau_a=tau_a, tau_b=tau_b)
     ot = solver(ot_prob)
+
+    if not bool(ot.converged):
+        warnings.warn(
+            f'Sinkhorn did not converge after {int(ot.n_iters)} iterations '
+            f'(epsilon={epsilon}, scale_cost={scale_cost!r}, '
+            f'tau_a={tau_a}, tau_b={tau_b}). '
+            'The transport plan may be unreliable; consider a larger epsilon.',
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     return ot
 
@@ -113,97 +126,71 @@ def compute_point_cloud_mapping(
     Compute the lines representing the mapping between the 2 point clouds.
     Adapted from https://github.com/ott-jax/ott/blob/main/src/ott/tools/plot.py#L140
     """
+    # Move everything to host memory once: indexing jax arrays element by
+    # element forces a device sync on every access.
+    matrix = np.asarray(matrix)
+
     # Only plot the lines with a cost above the threshold.
-    u, v = jnp.where(matrix > threshold)
-    c = matrix[jnp.where(matrix > threshold)]
-
-    if use_umap_coordinates:
-        xy = jnp.concatenate([x[u], y[v]], axis=-1)
-    else:
-        xy = None
-
-    # Check if we want to adjust transparency.
-    scale_alpha_by_coupling = True
+    u, v = np.nonzero(matrix > threshold)
+    c = matrix[u, v]
 
     # We can only adjust transparency if max(c) != min(c).
-    if scale_alpha_by_coupling:
-        min_matrix, max_matrix = jnp.min(c), jnp.max(c)
-        scale_alpha_by_coupling = max_matrix != min_matrix
+    min_c, max_c = (c.min(), c.max()) if c.size else (0.0, 0.0)
+    if max_c != min_c:
+        normalized_strength = (c - min_c) / (max_c - min_c)
+    else:
+        normalized_strength = np.ones_like(c)
+
+    # Matplotlib's transparency is sensitive to numerical errors.
+    alpha = np.clip(0.7 * normalized_strength, 0.0, 1.0)
+    strength = max(matrix.shape) * c
 
     result = []
-    mapping_output = []
-
-    for i in range(len(u)):
-        strength = jnp.max(jnp.array(matrix.shape)) * c[i]
-        if scale_alpha_by_coupling:
-            normalized_strength = (c[i] - min_matrix) / (max_matrix - min_matrix)
-            alpha = 0.7 * float(normalized_strength)
-        else:
-            alpha = 0.7
-
-        # Matplotlib's transparency is sensitive to numerical errors.
-        alpha = np.clip(alpha, 0.0, 1.0)
-
-        # Add plotting data only if use_umap_coordinates is True
-        if use_umap_coordinates and xy is not None:
+    if use_umap_coordinates:
+        xy = np.concatenate([np.asarray(x)[u], np.asarray(y)[v]], axis=-1)
+        for i in range(len(u)):
             # from the ith row, first pick the elements at columns 0 and 2
             # then pick the elements at columns 1 and 3
             # nb this is because matplotlib expects the coordinates of a line to be
             # in the form ([x0, x1], [y0, y1])
             start, end = xy[i, [0, 2]], xy[i, [1, 3]]
-            result.append((start, end, strength, alpha))
+            result.append((start, end, strength[i], alpha[i]))
 
-        # u = row coordinates of where matrix > threshold
-        # v = column coordinates of where matrix > threshold
-        matrix_ref_idx = int(u[i])
-        matrix_target_idx = int(v[i])
+    # u = row coordinates of where matrix > threshold
+    # v = column coordinates of where matrix > threshold
+    if closest_ref_idx is not None and closest_query_idx is not None:
+        # We're using centroids, so map matrix indices to actual cell indices
+        ref_idx = np.asarray(closest_ref_idx)[u]
+        target_idx = np.asarray(closest_query_idx)[v]
+    else:
+        # Direct mapping - matrix indices correspond to cell indices
+        ref_idx = u
+        target_idx = v
 
-        # Handle index mapping based on whether we're using centroids or direct mapping
-        if closest_ref_idx is not None and closest_query_idx is not None:
-            # We're using centroids, so map matrix indices to actual cell indices
-            ref_idx = closest_ref_idx[matrix_ref_idx]
-            target_idx = closest_query_idx[matrix_target_idx]
-            # print(f"Centroid mapping: ref_idx={ref_idx}, target_idx={target_idx}")
-        else:
-            # Direct mapping - matrix indices correspond to cell indices
-            ref_idx = matrix_ref_idx
-            target_idx = matrix_target_idx
-            # print(f"Direct mapping: ref_idx={ref_idx}, target_idx={target_idx}")
+    ref_obs = adata_ref.obs
+    target_obs = adata_target.obs
 
-        # Get the global indices in adata_ref and adata_target
-        adata_ref_idx = adata_ref.obs.index[ref_idx]
-        adata_target_idx = adata_target.obs.index[target_idx]
-        # print(f"adata_ref_idx: {adata_ref_idx}, adata_target_idx: {adata_target_idx}")
+    # Use the 'idx' column from obs if it exists, otherwise use the index
+    if 'idx' in ref_obs.columns:
+        idx1 = ref_obs['idx'].to_numpy()[ref_idx]
+    else:
+        idx1 = ref_obs.index.to_numpy()[ref_idx]
 
-        ct1 = adata_ref.obs.iloc[ref_idx][label_col]
-        ct2 = adata_target.obs.iloc[target_idx][label_col]
-        # print(f"ct1: {ct1}, ct2: {ct2}")
-        # print('')
+    if 'idx' in target_obs.columns:
+        idx2 = target_obs['idx'].to_numpy()[target_idx]
+    else:
+        idx2 = target_obs.index.to_numpy()[target_idx]
 
-        # Use the 'idx' column from obs if it exists, otherwise use the index
-        if 'idx' in adata_ref.obs.columns:
-            idx1 = adata_ref.obs.iloc[ref_idx]['idx']
-        else:
-            idx1 = adata_ref_idx
-
-        if 'idx' in adata_target.obs.columns:
-            idx2 = adata_target.obs.iloc[target_idx]['idx']
-        else:
-            idx2 = adata_target_idx
-
-        coupling = np.asarray(c[i])
-        ns = np.asarray(normalized_strength)
-        mapping_output.append([idx1, ct1, idx2, ct2, coupling, ns])
-
-    mapping_df = pd.DataFrame(mapping_output)
-    mapping_df.columns = [
-        'idx1',
-        'source',
-        'idx2',
-        'target',
-        'coupling',
-        'normalized_strength',
-    ]
+    mapping_df = pd.DataFrame(
+        {
+            'idx1': idx1,
+            'source': ref_obs[label_col].to_numpy()[ref_idx],
+            'idx2': idx2,
+            'target': target_obs[label_col].to_numpy()[target_idx],
+            'coupling': c,
+            'normalized_strength': normalized_strength,
+        }
+    )
 
     return result, mapping_df
 
@@ -224,6 +211,7 @@ def compute_centroid_mapping(
     cluster_algo=None,
     cluster_col=None,
     use_umap_coordinates=True,
+    scale_cost=1.0,
 ):
     # Data preparation
     X = adata[adata.obs[col] == ref].X
@@ -324,8 +312,10 @@ def compute_centroid_mapping(
             ]
             closest_query_idx.append(closest_point_idx)
 
-        closest_ref_idx = np.array(closest_ref_idx, dtype=int)
-        closest_query_idx = np.array(closest_query_idx, dtype=int)
+        # Sort so that position i matches row/column i of the OT matrix:
+        # adata_centroid (below) keeps the original adata order, not cluster order
+        closest_ref_idx = np.sort(np.array(closest_ref_idx, dtype=int))
+        closest_query_idx = np.sort(np.array(closest_query_idx, dtype=int))
 
         source_idx = adata.obs.loc[adata.obs[col] == ref].index[closest_ref_idx].values
         target_idx = (
@@ -345,7 +335,9 @@ def compute_centroid_mapping(
     # ----------------------------------------------------------------------
 
     ot_out = compute_sinkhorn(
-        adata_centroid, col, ref, target, epsilon=epsilon, tau_a=tau_a, tau_b=tau_b
+        adata_centroid, col, ref, target, 
+        epsilon=epsilon, tau_a=tau_a, tau_b=tau_b,
+        scale_cost = scale_cost,
     )
 
     print('Sinkhorn algorithm converged?', ot_out.converged)
