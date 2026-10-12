@@ -69,6 +69,7 @@ from ..Models.interpretability import iGlobalWrapper, iGpWrapper
 from ..Trainers.trainer import (
     EmbEvaluator,
     gpAblation,
+    gpAblationRand,
     gpBase,
     gpGlobal,
     gpGlobalLoRA,
@@ -901,6 +902,89 @@ class gpAblationEval(gpEval):
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
             adata_path=self.adata_path,  # Pass adata_path for count reconstruction
+        )
+
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision=precision
+        )
+
+        trainer.test(gp_transformer, txdata)
+
+
+class gpAblationRandEval(gpEval):
+    def __init__(
+        self,
+        main_ckpt_dir,
+        n_rand=5,
+        noise_scale=None,
+        rand_seed=0,
+        adata_path=None,
+        *args,
+        **kwargs,
+    ):
+        self.main_ckpt_dir = os.path.join(main_ckpt_dir, 'checkpoints/last.ckpt')
+        self.n_rand = n_rand
+        self.noise_scale = noise_scale
+        self.rand_seed = rand_seed
+        self.adata_path = adata_path
+        super().__init__(*args, **kwargs)
+
+    def _init_trainer(self, split_label=None, **kwargs):
+        if self.model_type == 'Base':
+            raise ValueError('Ablation not implemented for Base model')
+
+        elif self.model_type == 'Global':
+            gp_transformer = gpAblationRand.load_from_checkpoint(
+                self.main_ckpt_dir, hparam_save='ignore_model', map_location='cpu'
+            )
+
+        # reset attributes overwritten by loading from checkpoint
+        gp_transformer.save_emb = True
+        gp_transformer.split_label = split_label
+        gp_transformer.output_dir = self.output_dir
+        gp_transformer.n_rand = self.n_rand
+        gp_transformer.noise_scale = self.noise_scale
+        gp_transformer.rand_seed = self.rand_seed
+        # generator is lazy, so setting rand_seed post-load is sufficient
+        gp_transformer._noise_generator = None
+
+        # Extract model
+        self.model = gp_transformer.model
+        self.gp_inputs = gp_transformer.model.gp_inputs
+
+        # Extract pretrained encoder config
+        self.fm_encoder_pkg = gp_transformer.model.fm_encoder_pkg
+
+        if self.fm_encoder_pkg == 'geneformer':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_name
+            self.max_len = (
+                gp_transformer.model.gf_wrapper.gf.config.max_position_embeddings
+            )
+        elif self.fm_encoder_pkg == 'from_scratch':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
+            # TO DO --> flexibly account for different model sizes
+            self.max_len = 4096
+
+        return gp_transformer
+
+    def generate_embeddings(
+        self, split='train', precision=32, return_mean_non_padding=False
+    ):
+        gp_transformer = self._init_trainer(
+            save_emb=True,
+            split_label=split,
+            hparam_save=self.hparam_save,
+            return_mean_non_padding=return_mean_non_padding,
+        )
+
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_test_step=split,
+            seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            model_input_size=self.max_len,
+            adata_path=self.adata_path,
         )
 
         trainer = pl.Trainer(
