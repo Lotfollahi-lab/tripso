@@ -449,6 +449,68 @@ class AverageNonZero(nn.Module):
         return output
 
 
+class TripsoMeanWrapper(nn.Module):
+    """Masked mean over a GP's genes, as a drop-in for a per-GP gpTransformerEncoder.
+
+    Used for the nonlinearity ablation: swap this in for
+    ``multi_gp_encoder.encoder[i]`` on a *trained* checkpoint and the GP
+    representation becomes a summary statistic (the mean) over the gene encoder's
+    gene embeddings, with the per-GP transformer removed. The gene encoder itself
+    is untouched, so the resulting embedding differs from the usual <GP> CLS token
+    only in how the GP's genes are aggregated.
+
+    Same arithmetic as the ``return_mean_non_padding`` readout in
+    ``Modules/modules.py``, but applied *before* any GP transformer rather than
+    after it. Preferred over ``AverageNonZero`` because it divides by the number of
+    genes actually present, taken from the mask, rather than by a per-feature-dimension
+    count of non-zero values, and because it zeroes empty-GP rows explicitly instead
+    of relying on a divide-by-one fallback. On real gene-encoder output the two agree
+    exactly (checked to 0.0 on a jiang geneformer_h512 batch) because post-LayerNorm
+    embeddings contain no exact zeros, so only the padding rows are ever counted out;
+    they would diverge on a representation that can be exactly zero mid-vector.
+
+    ``attn_mask`` from ``build_gp_input_matrix`` carries a prepended CLS column
+    while ``x`` does not, hence ``attn_mask[:, 1:]``.
+    """
+
+    def __init__(self, cls_tag='cls'):
+        super().__init__()
+        self.cls_tag = cls_tag
+
+    def forward(self, x, attn_mask=None, return_gene_embeddings=False, **kwargs):
+        # for compatibility with gpTransformerEncoder
+        if isinstance(x, dict):
+            x = x['z']
+
+        if return_gene_embeddings:
+            return {
+                'cls': torch.zeros((1, 1)),
+                'gene_embeddings': x,
+                'logits_lm': [],
+                'gene_labels': [],
+            }
+
+        if attn_mask is None:
+            raise ValueError(
+                'TripsoMeanWrapper needs the attn_mask from build_gp_input_matrix '
+                'to know which positions are real GP genes.'
+            )
+
+        # accumulate in fp32: a bf16 sum over a few hundred genes loses precision
+        x = x.float()
+        mask = attn_mask[:, 1:].float().unsqueeze(-1)  # (B, L, 1), drop CLS column
+
+        n_genes = mask.sum(dim=1)  # (B, 1)
+        token = (x * mask).sum(dim=1) / n_genes.clamp(min=1.0)
+
+        # cells expressing none of the GP's genes -> all-zero row, not NaN
+        token[n_genes.squeeze(-1) == 0] = 0
+
+        output = {self.cls_tag: token, 'logits_lm': [], 'gene_labels': []}
+
+        return output
+
+
 class gpAverager(gpWrapper):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
