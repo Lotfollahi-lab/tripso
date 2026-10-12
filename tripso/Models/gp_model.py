@@ -178,7 +178,7 @@ class GeneWrapper(nn.Module):
             freeze_word_embeddings = config_dict['freeze_word_embeddings']
         else:
             freeze_word_embeddings = True
-        
+
         print('\nFreeze word embeddings:', freeze_word_embeddings, '\n')
 
         # Intiialize lookup table for vocab
@@ -430,9 +430,7 @@ class gpWrapper(nn.Module):
         self.gene_name_path = gene_name_path
         self.gene_token_path = gene_token_path
 
-        self._register_gp_buffers(
-            database, do_ensembl_conversion, fm_model_input_size
-        )
+        self._register_gp_buffers(database, do_ensembl_conversion, fm_model_input_size)
 
         self.encoder: nn.ModuleList[gpTransformerEncoder] = nn.ModuleList(
             [
@@ -878,16 +876,14 @@ class gpLiteWrapper(gpWrapper):
         self.gene_name_path = gene_name_path
         self.gene_token_path = gene_token_path
 
-        self._register_gp_buffers(
-            database, do_ensembl_conversion, fm_model_input_size
-        )
+        self._register_gp_buffers(database, do_ensembl_conversion, fm_model_input_size)
 
         # Single shared transformer body (no built-in decoder head).
         max_gp_tokens = max(
             len(getattr(self, f'gp{i}_tokens')) for i in range(len(gp_inputs))
         )
         self.encoder = gpTransformerEncoder(
-            n_gp_tokens=max_gp_tokens,  # only used for mask-generator 
+            n_gp_tokens=max_gp_tokens,  # only used for mask-generator
             embed_dim=self.gp_latent_size,
             depth=self.n_blocks,
             num_heads=self.num_heads,
@@ -1075,7 +1071,9 @@ class gpLiteWrapper(gpWrapper):
 
         gp_tokens_t = torch.as_tensor(
             gp_tokens, device=device, dtype=toks.dtype
-        ).reshape(-1)  # [G]
+        ).reshape(
+            -1
+        )  # [G]
         G = gp_tokens_t.numel()
         B = attn_to_tokens.size(0)
 
