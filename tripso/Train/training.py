@@ -83,6 +83,7 @@ def run_training(
     peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
     data_seed: Optional[int] = None,
+    split_indices: Optional[str] = None,
     supervised_rem_var: Optional[str] = None,
     num_nodes: int = 1,
     prbm_path: Optional[str] = None,
@@ -203,6 +204,12 @@ def run_training(
         Random seed for reproducibility
     data_seed : Optional[int], default=None
         Random seed for data loading. If None, uses same as seed
+    split_indices : Optional[str], default=None
+        Path to an .npz holding integer arrays under the keys 'train', 'val'
+        and 'test', giving a precomputed split (e.g. a held-out batch or
+        donor) in place of the default random 80/10/10. Indices are positions
+        into the tokenized dataset. When None the random split is used and
+        data_seed selects it as before.
     supervised_rem_var : Optional[str], default=None
         Variable to remove from supervised labels (currently unused)
     num_nodes : int, default=1
@@ -308,6 +315,7 @@ def run_training(
         sampler=sampler,
         label_key=sample_by,
         seed=data_seed,
+        split_indices=split_indices,
         model_input_size=model_input_size,
         output_dir=output_dir,
     )
@@ -543,7 +551,12 @@ def configure_logger(args):
         Configured Weights & Biases logger.
     """
     # create a logger to log training progress
-    wandb_logger = WandbLogger(log_model=True)
+    # log_model=True uploads every checkpoint to wandb at the end of fit. Set
+    # TRIPSO_WANDB_LOG_MODEL=0 to keep metrics online but skip that upload: when one
+    # multi-GPU job trains two stages, rank 0 blocks in the upload while rank 1 waits
+    # in the next stage's first collective, and NCCL's 1800 s watchdog kills the job.
+    log_model = os.environ.get('TRIPSO_WANDB_LOG_MODEL', '1') != '0'
+    wandb_logger = WandbLogger(log_model=log_model)
 
     wandb_logger.experiment.config.update(
         {
