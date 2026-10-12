@@ -53,7 +53,7 @@ except (ImportError, AttributeError):
 
 from ..Datamodules.datamodule import txDataModule
 from ..Metrics.metrics import evaluate_emd_ref_vs_query
-from ..Models.baselines import fmBaseline, gfGlobal
+from ..Models.baselines import TripsoMeanWrapper, fmBaseline, gfGlobal
 from ..Trainers.trainer import (
     gpAblation,
     gpAblationRand,
@@ -123,6 +123,12 @@ class gpEval:
     global_loss :
         loss used to train global attention model
         (for compatibility with gpGlobal init)
+    split_indices : str, optional
+        Path to an .npz holding integer arrays under the keys 'train', 'val'
+        and 'test', giving the precomputed split the model was trained with.
+        Passed through to txDataModule in generate_embeddings so the embedded
+        splits match the trained ones. When None (default) the random 80/10/10
+        split selected by `seed` is used, as before.
 
     """
 
@@ -136,6 +142,7 @@ class gpEval:
         batch_size: Optional[int] = 128,
         path_to_trained_model: Optional[str] = None,
         seed: Optional[int] = 0,
+        split_indices: Optional[str] = None,
         hparam_save: Optional[str] = 'all',
         cond_to_shift: Optional[Dict] = None,
         return_classification_report: Optional[bool] = False,
@@ -154,6 +161,7 @@ class gpEval:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         self.seed = seed
+        self.split_indices = split_indices
 
         # Search for .ckpt files in the directory
         if model_type != 'Mean':
@@ -335,6 +343,7 @@ class gpEval:
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
             seed=self.seed,
+            split_indices=self.split_indices,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
         )
@@ -1112,6 +1121,54 @@ class gpEvalFMBaseline(gpEval):
         self.fm_encoder_pkg = model.fm_encoder_pkg
         self.fm_encoder_name = self._tokenizer_name  # for txDataModule
         self.max_len = model.fm_model_input_size
+
+        return gp_transformer
+
+
+class gpMeanEval(gpEval):
+    """gpEval with each per-GP transformer replaced by a masked mean (ablation).
+
+    Identical to ``gpEval`` in every other respect -- same checkpoint, same trained
+    gene encoder, same data module, same output format -- but the GP representation
+    becomes the mean of the gene encoder's gene embeddings over the GP's genes
+    (``TripsoMeanWrapper``) instead of the <GP> token of a trained transformer.
+
+    This isolates the contribution of the per-GP transformer's nonlinearity. The
+    GP-level loss is detached from the gene encoder (``GeneWrapper.forward`` in
+    ``Models/gp_model.py`` returns ``gene_emb`` as ``.clone().detach()``), so the
+    gene embeddings pooled here are bit-identical to the ones the transformer sees --
+    the aggregator is the only thing that differs.
+
+    Point ``path_to_trained_model`` at the trained run and ``output_dir`` somewhere
+    else, so the pooled embeddings sit alongside the originals rather than
+    overwriting them::
+
+        gpMeanEval(
+            path_to_trained_model='runs/<run>/seed_0/output_base',
+            output_dir='runs/<run>/seed_0/output_base_gpmean',
+            dataset_path=..., gpdb_path=..., model_type='Base', seed=DATA_SEED,
+        ).generate_embeddings(split='test', precision='bf16-mixed')
+    """
+
+    def _init_trainer(self, **kwargs):
+        if kwargs.get('return_attention'):
+            raise NotImplementedError(
+                'gpMeanEval has no attention to return: the per-GP transformers are '
+                'replaced by a mean. Use gpEval on the same checkpoint for that.'
+            )
+
+        gp_transformer = super()._init_trainer(**kwargs)
+
+        # Swap the .encoder ModuleList IN PLACE rather than rebuilding a gpWrapper,
+        # so every gp{i}_tokens / gp{i}_tokens_lookup buffer loaded from the
+        # checkpoint is preserved. self.model is the same object, so it sees this too.
+        n_gp = len(gp_transformer.model.multi_gp_encoder.gp_inputs)
+        gp_transformer.model.multi_gp_encoder.encoder = torch.nn.ModuleList(
+            [TripsoMeanWrapper() for _ in range(n_gp)]
+        )
+        print(
+            f'gpMeanEval: replaced {n_gp} per-GP transformer(s) with TripsoMeanWrapper'
+        )
 
         return gp_transformer
 
