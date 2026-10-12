@@ -53,7 +53,11 @@ except (ImportError, AttributeError):
 
 from ..Datamodules.datamodule import txDataModule
 from ..Metrics.metrics import evaluate_emd_ref_vs_query
-from ..Models.baselines import TripsoMeanWrapper, fmBaseline, gfGlobal
+from ..Models.baselines import (
+    TripsoMeanWrapper,
+    fmBaseline,
+    gfGlobal,
+)
 from ..Trainers.trainer import (
     gpAblation,
     gpAblationRand,

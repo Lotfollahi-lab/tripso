@@ -947,9 +947,14 @@ def build_gp_input_matrix(
     attn_mask[masked_labels_output != 0] = 1
 
     # never mask cls
-    attn_mask = torch.cat(
-        [torch.ones_like(attn_mask)[:, 0].unsqueeze(-1), attn_mask], dim=-1
+    # build the CLS column directly (not attn_mask[:, 0]) so this is robust to a
+    # zero-width sequence dim, which happens when crop_to_gp_len=True and no cell in
+    # the batch expresses any GP gene (max_num_genes == 0). Callers already handle the
+    # resulting empty result_matrix, so we must return rather than crash here.
+    cls_col = torch.ones(
+        (attn_mask.shape[0], 1), dtype=attn_mask.dtype, device=attn_mask.device
     )
+    attn_mask = torch.cat([cls_col, attn_mask], dim=-1)
 
     return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
 

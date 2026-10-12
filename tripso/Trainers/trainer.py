@@ -729,9 +729,9 @@ class gpLite(gpBase):
         self.model_type = 'Lite'
 
     def _shared_encoder_trainable(self):
-        return (
-            self.model.multi_gp_encoder.encoder.blocks[0].attn.qkv.weight.requires_grad
-        )
+        return self.model.multi_gp_encoder.encoder.blocks[
+            0
+        ].attn.qkv.weight.requires_grad
 
     def log_gp_loss(self, loss_per_gp):
         # Single shared body: check trainability once instead of per GP.
