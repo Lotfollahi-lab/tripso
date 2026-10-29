@@ -53,12 +53,18 @@ except (ImportError, AttributeError):
 
 from ..Datamodules.datamodule import txDataModule
 from ..Metrics.metrics import evaluate_emd_ref_vs_query
-from ..Models.baselines import gfGlobal
+from ..Models.baselines import (
+    TripsoMeanWrapper,
+    fmBaseline,
+    gfGlobal,
+)
 from ..Trainers.trainer import (
     gpAblation,
+    gpAblationRand,
     gpBase,
     gpGlobal,
     gpGlobalLoRA,
+    gpLite,
 )
 from ..Utils.utils import (
     MidpointNormalize,
@@ -69,6 +75,7 @@ from ..Utils.utils import (
     assign_bar_colors,
     build_token_to_gene_name_dict,
     remove_single_data_points,
+    resolve_checkpoint,
     wrangle_classification_report,
 )
 
@@ -121,6 +128,17 @@ class gpEval:
     global_loss :
         loss used to train global attention model
         (for compatibility with gpGlobal init)
+    split_indices : str, optional
+        Path to an .npz holding integer arrays under the keys 'train', 'val'
+        and 'test', giving the precomputed split the model was trained with.
+        Passed through to txDataModule in generate_embeddings so the embedded
+        splits match the trained ones. When None (default) the random 80/10/10
+        split selected by `seed` is used, as before.
+    path_to_trained_model : str, optional
+        Directory of the trained model. If None, uses output_dir.
+    checkpoint_file : str, optional
+        Checkpoint to load: a full path, or a filename inside
+        ``<path_to_trained_model>/checkpoints``. If None, uses ``last.ckpt``.
 
     """
 
@@ -133,7 +151,9 @@ class gpEval:
         model_type: Optional[str] = 'Base',
         batch_size: Optional[int] = 128,
         path_to_trained_model: Optional[str] = None,
+        checkpoint_file: Optional[str] = None,
         seed: Optional[int] = 0,
+        split_indices: Optional[str] = None,
         hparam_save: Optional[str] = 'all',
         cond_to_shift: Optional[Dict] = None,
         return_classification_report: Optional[bool] = False,
@@ -152,19 +172,16 @@ class gpEval:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         self.seed = seed
+        self.split_indices = split_indices
 
-        # Search for .ckpt files in the directory
-        if model_type != 'Mean':
-            if path_to_trained_model is None:
-                model_path = output_dir
-            else:
-                model_path = path_to_trained_model
-
-            # latest_ckpt = find_latest_file(model_path, tissue, tag)
-            latest_ckpt = os.path.join(model_path, 'checkpoints/last.ckpt')
-
-            print('Latest .ckpt file:', latest_ckpt)
-            self.checkpoint_path = os.path.join(model_path, latest_ckpt)
+        # checkpoint is resolved on first load in _init_trainer, since
+        # subclasses that override _init_trainer load from elsewhere
+        if path_to_trained_model is None:
+            self.model_path = output_dir
+        else:
+            self.model_path = path_to_trained_model
+        self.checkpoint_file = checkpoint_file
+        self.checkpoint_path = None
 
         gpdb = pd.read_csv(gpdb_path)
 
@@ -222,8 +239,19 @@ class gpEval:
         token_to_gene_to_keep_dict=None,
         return_mean_non_padding=False,
     ):
+        if self.model_type != 'Mean' and self.checkpoint_path is None:
+            self.checkpoint_path = resolve_checkpoint(
+                self.model_path, self.checkpoint_file
+            )
+            print('Loading checkpoint', self.checkpoint_path)
+
         if self.model_type == 'Base':
             gp_transformer = gpBase.load_from_checkpoint(
+                self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
+            )
+
+        elif self.model_type == 'Lite':
+            gp_transformer = gpLite.load_from_checkpoint(
                 self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
             )
 
@@ -328,6 +356,7 @@ class gpEval:
             batch_size=self.batch_size,
             data_split_to_pass_to_test_step=split,
             seed=self.seed,
+            split_indices=self.split_indices,
             fm_encoder_name=self.fm_encoder_name,
             model_input_size=self.max_len,
         )
@@ -647,6 +676,9 @@ class gpAblationEval(gpEval):
     ----------
     main_ckpt_dir : str
         Path to directory containing the main model checkpoint (last.ckpt).
+    checkpoint_file : str, optional
+        Override for the checkpoint in main_ckpt_dir: a full path, or a
+        filename inside ``<main_ckpt_dir>/checkpoints``.
     compute_cosine : bool, default=False
         Whether to compute cosine similarity between ablated and full embeddings.
     compute_delta_nb_loss : bool, default=False
@@ -696,10 +728,12 @@ class gpAblationEval(gpEval):
         compute_cosine=False,
         compute_delta_nb_loss=False,
         adata_path=None,
+        checkpoint_file=None,
         *args,
         **kwargs,
     ):
-        self.main_ckpt_dir = os.path.join(main_ckpt_dir, 'checkpoints/last.ckpt')
+        self.main_ckpt_dir = resolve_checkpoint(main_ckpt_dir, checkpoint_file)
+        print('Loading checkpoint', self.main_ckpt_dir)
         self.compute_cosine = compute_cosine
         self.compute_delta_nb_loss = compute_delta_nb_loss
         self.adata_path = adata_path
@@ -833,6 +867,333 @@ class gpAblationEval(gpEval):
         )
 
         trainer.test(gp_transformer, txdata)
+
+
+class gpAblationRandEval(gpEval):
+    """
+    Evaluation class for Gaussian-noise gene program scrambling ablation.
+
+    Extends gpEval to run the gpAblationRand trainer, which scrambles each gene
+    program by replacing its embedding with Gaussian noise `n_rand` times (while
+    keeping the scrambled GP attended to) and reports the average change in
+    cosine similarity between the control and perturbed cell embeddings.
+
+    Parameters
+    ----------
+    main_ckpt_dir : str
+        Path to directory containing the main model checkpoint (last.ckpt).
+    checkpoint_file : str, optional
+        Override for the checkpoint in main_ckpt_dir: a full path, or a
+        filename inside ``<main_ckpt_dir>/checkpoints``.
+    n_rand : int, default=5
+        Number of independent noise draws per gene program.
+    noise_scale : float, optional
+        Standard deviation of the Gaussian noise. If None, the empirical std
+        of the GP embeddings being replaced is used.
+    rand_seed : int, default=0
+        Seed for the noise generator. The `n_rand` draws differ from each other,
+        but the whole run reproduces exactly given the same seed. This is
+        separate from gpEval's datamodule `seed`.
+    adata_path : str, optional
+        Path to .h5ad file passed to the datamodule.
+    *args
+        Additional positional arguments passed to parent gpEval class.
+    **kwargs
+        Additional keyword arguments passed to parent gpEval class.
+
+    Notes
+    -----
+    - Only supports 'Global' model_type (raises error for 'Base')
+    - Saves per-cell cosine-distance AnnData to
+      <output_dir>/with_gp_ablation_rand/<split>_set.h5ad
+
+    Examples
+    --------
+    >>> evaluator = gpAblationRandEval(
+    ...     main_ckpt_dir='path/to/checkpoint',
+    ...     n_rand=5,
+    ...     rand_seed=0,
+    ...     gpdb_path='path/to/gpdb.csv',
+    ...     output_dir='path/to/output',
+    ...     dataset_path='path/to/data'
+    ... )
+    >>> evaluator.generate_embeddings(split='test')
+    """
+
+    def __init__(
+        self,
+        main_ckpt_dir,
+        n_rand=5,
+        noise_scale=None,
+        rand_seed=0,
+        adata_path=None,
+        checkpoint_file=None,
+        *args,
+        **kwargs,
+    ):
+        self.main_ckpt_dir = resolve_checkpoint(main_ckpt_dir, checkpoint_file)
+        print('Loading checkpoint', self.main_ckpt_dir)
+        self.n_rand = n_rand
+        self.noise_scale = noise_scale
+        self.rand_seed = rand_seed
+        self.adata_path = adata_path
+        super().__init__(*args, **kwargs)
+
+    def _init_trainer(self, split_label=None, **kwargs):
+        """
+        Initialize the noise-scrambling ablation trainer module.
+
+        Loads the gpAblationRand model from checkpoint and configures it for
+        the scrambling analysis (number of draws, noise scale, seed).
+
+        Parameters
+        ----------
+        split_label : str, optional
+            Dataset split to use ('train', 'test', or 'val').
+        **kwargs
+            Additional keyword arguments (currently unused but maintained
+            for compatibility with parent class).
+
+        Returns
+        -------
+        gp_transformer : gpAblationRand
+            Configured ablation trainer ready for evaluation.
+
+        Raises
+        ------
+        ValueError
+            If model_type is 'Base' (ablation only supports 'Global' models).
+        """
+        if self.model_type == 'Base':
+            raise ValueError('Ablation not implemented for Base model')
+
+        elif self.model_type == 'Global':
+            gp_transformer = gpAblationRand.load_from_checkpoint(
+                self.main_ckpt_dir, hparam_save='ignore_model', map_location='cpu'
+            )
+
+        # reset attributes overwritten by loading from checkpoint
+        gp_transformer.save_emb = True
+        gp_transformer.split_label = split_label
+        gp_transformer.output_dir = self.output_dir
+        gp_transformer.n_rand = self.n_rand
+        gp_transformer.noise_scale = self.noise_scale
+        gp_transformer.rand_seed = self.rand_seed
+        # generator is lazy, so setting rand_seed post-load is sufficient
+        gp_transformer._noise_generator = None
+
+        # Extract model
+        self.model = gp_transformer.model
+        self.gp_inputs = gp_transformer.model.gp_inputs
+
+        # Extract pretrained encoder config
+        self.fm_encoder_pkg = gp_transformer.model.fm_encoder_pkg
+
+        if self.fm_encoder_pkg == 'geneformer':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_name
+            self.max_len = (
+                gp_transformer.model.gf_wrapper.gf.config.max_position_embeddings
+            )
+        elif self.fm_encoder_pkg == 'from_scratch':
+            self.fm_encoder_name = gp_transformer.model.fm_encoder_pkg
+            # TO DO --> flexibly account for different model sizes
+            self.max_len = 4096
+
+        return gp_transformer
+
+    def generate_embeddings(
+        self, split='train', precision=32, return_mean_non_padding=False
+    ):
+        """
+        Run the noise-scrambling ablation and save the cosine-distance AnnData.
+
+        Parameters
+        ----------
+        split : str, default='train'
+            Dataset split to use ('train', 'test', or 'val').
+        precision : int, default=32
+            Numerical precision for PyTorch Lightning trainer (16, or 32).
+        return_mean_non_padding : bool, default=False
+            For compatibility with parent class.
+
+        Returns
+        -------
+        None
+            Per-cell cosine distances are saved to
+            <output_dir>/with_gp_ablation_rand/<split>_set.h5ad
+        """
+        gp_transformer = self._init_trainer(
+            save_emb=True,
+            split_label=split,
+            hparam_save=self.hparam_save,
+            return_mean_non_padding=return_mean_non_padding,
+        )
+
+        txdata = txDataModule(
+            folder=self.dataset_path,
+            batch_size=self.batch_size,
+            data_split_to_pass_to_test_step=split,
+            seed=self.seed,
+            fm_encoder_name=self.fm_encoder_name,
+            model_input_size=self.max_len,
+            adata_path=self.adata_path,
+        )
+
+        trainer = pl.Trainer(
+            max_epochs=1, devices=1, accelerator='auto', precision=precision
+        )
+
+        trainer.test(gp_transformer, txdata)
+
+
+class gpEvalFMBaseline(gpEval):
+    """Evaluation class for fmBaseline — no checkpoint required.
+
+    Creates fmBaseline + gpBase fresh (zero-shot), then delegates
+    generate_embeddings() to the parent which uses txDataModule (correct
+    padding, correct split) and pl.Trainer.test() (standard save path).
+
+    Parameters
+    ----------
+    fm_encoder_pkg : str
+        One of 'geneformer', 'geneformer_2021', 'from_scratch',
+        'scgpt', 'tahoe', 'state'.
+    fm_encoder_name : str
+        Model checkpoint path or name (see fmBaseline docstring).
+    tokenizer_fm_encoder_name : str or None
+        Geneformer model name passed to txDataModule for its fm_encoder_name
+        field (stored but not used for loading — set to match the model that
+        was used to tokenize the dataset). Defaults to fm_encoder_name when
+        fm_encoder_pkg is 'geneformer', otherwise must be supplied explicitly.
+    fmbaseline_kwargs : dict or None
+        Extra kwargs forwarded to fmBaseline (e.g. state_hidden_size=512,
+        protein_embeddings_path=..., gp_latent_size=256, etc.).
+    **kwargs
+        Forwarded to gpEval: gpdb_path, dataset_path, output_dir, batch_size,
+        seed, gp_inputs, gene_format, etc.
+    """
+
+    def __init__(
+        self,
+        fm_encoder_pkg='geneformer',
+        fm_encoder_name='gf-6L-30M-i2048',
+        tokenizer_fm_encoder_name=None,
+        fmbaseline_kwargs=None,
+        **kwargs,
+    ):
+        self._fm_encoder_pkg = fm_encoder_pkg
+        self._fm_encoder_name = fm_encoder_name
+        self._tokenizer_name = (
+            tokenizer_fm_encoder_name
+            if tokenizer_fm_encoder_name is not None
+            else fm_encoder_name
+        )
+        self._fmbaseline_kwargs = fmbaseline_kwargs or {}
+
+        super().__init__(
+            model_type='Mean',  # skips checkpoint loading in parent
+            gpmean_fm_encoder_pkg=fm_encoder_pkg,
+            gpmean_fm_encoder_name=fm_encoder_name,
+            **kwargs,
+        )
+
+    def _init_trainer(
+        self,
+        save_emb=False,
+        split_label='train',
+        hparam_save='ignore_model',
+        return_mean_non_padding=False,
+        **kwargs,
+    ):
+        # These are always set explicitly below; strip them from fmbaseline_kwargs
+        # so a caller that puts any of them there doesn't cause a duplicate-kwarg error.
+        _explicit = {
+            'database',
+            'fm_encoder_pkg',
+            'fm_encoder_name',
+            'gp_inputs',
+            'do_ensembl_conversion',
+        }
+        extra_kwargs = {
+            k: v for k, v in self._fmbaseline_kwargs.items() if k not in _explicit
+        }
+        do_ensembl_conversion = self._fmbaseline_kwargs.get(
+            'do_ensembl_conversion', self.do_ensembl_conversion
+        )
+
+        model = fmBaseline(
+            database=self.gpdb,
+            do_ensembl_conversion=do_ensembl_conversion,
+            fm_encoder_pkg=self._fm_encoder_pkg,
+            fm_encoder_name=self._fm_encoder_name,
+            gp_inputs=self.gp_inputs,
+            **extra_kwargs,
+        )
+
+        gp_transformer = gpBase(
+            model=model,
+            output_dir=self.output_dir,
+            save_emb=save_emb,
+            split_label=split_label,
+            hparam_save=hparam_save,
+            return_mean_non_padding=return_mean_non_padding,
+        )
+
+        self.model = model
+        self.gp_inputs = model.gp_inputs
+        self.fm_encoder_pkg = model.fm_encoder_pkg
+        self.fm_encoder_name = self._tokenizer_name  # for txDataModule
+        self.max_len = model.fm_model_input_size
+
+        return gp_transformer
+
+
+class gpMeanEval(gpEval):
+    """gpEval with each per-GP transformer replaced by a masked mean (ablation).
+
+    Identical to ``gpEval`` in every other respect -- same checkpoint, same trained
+    gene encoder, same data module, same output format -- but the GP representation
+    becomes the mean of the gene encoder's gene embeddings over the GP's genes
+    (``TripsoMeanWrapper``) instead of the <GP> token of a trained transformer.
+
+    This isolates the contribution of the per-GP transformer's nonlinearity. The
+    GP-level loss is detached from the gene encoder (``GeneWrapper.forward`` in
+    ``Models/gp_model.py`` returns ``gene_emb`` as ``.clone().detach()``), so the
+    gene embeddings pooled here are bit-identical to the ones the transformer sees --
+    the aggregator is the only thing that differs.
+
+    Point ``path_to_trained_model`` at the trained run and ``output_dir`` somewhere
+    else, so the pooled embeddings sit alongside the originals rather than
+    overwriting them::
+
+        gpMeanEval(
+            path_to_trained_model='runs/<run>/seed_0/output_base',
+            output_dir='runs/<run>/seed_0/output_base_gpmean',
+            dataset_path=..., gpdb_path=..., model_type='Base', seed=DATA_SEED,
+        ).generate_embeddings(split='test', precision='bf16-mixed')
+    """
+
+    def _init_trainer(self, **kwargs):
+        if kwargs.get('return_attention'):
+            raise NotImplementedError(
+                'gpMeanEval has no attention to return: the per-GP transformers are '
+                'replaced by a mean. Use gpEval on the same checkpoint for that.'
+            )
+
+        gp_transformer = super()._init_trainer(**kwargs)
+
+        # Swap the .encoder ModuleList IN PLACE rather than rebuilding a gpWrapper,
+        # so every gp{i}_tokens / gp{i}_tokens_lookup buffer loaded from the
+        # checkpoint is preserved. self.model is the same object, so it sees this too.
+        n_gp = len(gp_transformer.model.multi_gp_encoder.gp_inputs)
+        gp_transformer.model.multi_gp_encoder.encoder = torch.nn.ModuleList(
+            [TripsoMeanWrapper() for _ in range(n_gp)]
+        )
+        print(
+            f'gpMeanEval: replaced {n_gp} per-GP transformer(s) with TripsoMeanWrapper'
+        )
+
+        return gp_transformer
 
 
 ################################

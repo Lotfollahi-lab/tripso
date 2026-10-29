@@ -25,7 +25,7 @@ from ..Models.baselines import gfGlobal
 from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
 from ..Trainers.trainer import gpBase, gpGlobal
 from ..Utils.geneformer_utils import get_gf_repo
-from ..Utils.utils import find_latest_file
+from ..Utils.utils import log_checkpoint, resolve_checkpoint
 from .training import (
     configure_callbacks,
     configure_logger,
@@ -98,6 +98,7 @@ def run_training_from_select_gps(
     gp_latent_size: Optional[int] = None,
     accumulate_grad_batches: Optional[int] = 1,
     resume_training: bool = False,
+    checkpoint_file: Optional[str] = None,
 ):
     """
     Wrapper function for training Tripso model with flexible GP selection.
@@ -246,6 +247,10 @@ def run_training_from_select_gps(
         Number of batches to accumulate gradients over before updating weights
     resume_training : bool, default=False
         Set to True to resume training from checkpoint
+    checkpoint_file : Optional[str], default=None
+        Checkpoint to load: from ``output_dir`` if resume_training, otherwise
+        from ``path_to_base_model``. Full path, or filename inside
+        ``<dir>/checkpoints``. If None, uses ``last.ckpt``.
     """
     ##########################################
     # Setup
@@ -358,19 +363,19 @@ def run_training_from_select_gps(
     # ----- Load pretrained model -------
 
     if resume_training:
-        checkpoint_path = find_latest_file(output_dir, tissue, model_type)
-        print(f'Loading checkpoint from {checkpoint_path}')
+        checkpoint_path = resolve_checkpoint(output_dir, checkpoint_file)
         checkpoint = torch.load(
             checkpoint_path, map_location=torch.device('cpu'), weights_only=False
         )
+        log_checkpoint(checkpoint_path, checkpoint)
         gp_transformer.load_state_dict(checkpoint['state_dict'])
 
     else:
-        latest_ckpt = find_latest_file(path_to_base_model, tissue, model_type_old)
-        checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
+        checkpoint_path = resolve_checkpoint(path_to_base_model, checkpoint_file)
         checkpoint = torch.load(
             checkpoint_path, map_location=torch.device('cpu'), weights_only=False
         )
+        log_checkpoint(checkpoint_path, checkpoint)
         state_dict = checkpoint['state_dict']
 
         model_state_dict = gp_transformer_v0.state_dict()
@@ -404,7 +409,7 @@ def run_training_from_select_gps(
 
                 # freeze weights for this block
                 for name, param in gp_transformer.model.named_parameters():
-                    if f'multi_gp_encoder.encoder.{i}' in name:
+                    if f'multi_gp_encoder.encoder.{i}.' in name:
                         param.requires_grad = False
             else:
                 continue

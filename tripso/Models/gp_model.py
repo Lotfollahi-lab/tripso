@@ -88,7 +88,7 @@ class gfWrapper(nn.Module):
             token_dictionary_file=token_dictionary_file,
         )
 
-    def forward(self, input_dataset, masking):
+    def forward(self, input_dataset, masking, **kwargs):
         # input is tokenized dataset
 
         emb_out = self.gf_emb_extractor.extract_embs(
@@ -102,6 +102,11 @@ class gfWrapper(nn.Module):
         gene_output['gene_emb'] = emb_out
 
         return gene_output
+
+
+####################################
+# Gene-level encoder (from scratch)
+####################################
 
 
 class GeneWrapper(nn.Module):
@@ -130,8 +135,10 @@ class GeneWrapper(nn.Module):
     use_gene_embeddings : str or None, optional
         Model name (e.g., 'gf-12L-95M-i4096') or path to embeddings file
         This should be a file containing a tensor of shape (vocab_size, embedding_dim)
-            with the same vocab size and embedding dimension as specified in config_dict.
-        If a string is provided, it will be interpreted as a model name or path to load embeddings from.
+            with the same vocab size and embedding dimension
+            as specified in config_dict.
+        If a string is provided, it will be interpreted as a model name
+            or path to load embeddings from.
         If False, initializes gene embeddings randomly and trains from scratch.
         (.pt or .npy) (default: None).
     attn_dropout : float, optional
@@ -167,6 +174,13 @@ class GeneWrapper(nn.Module):
     ):
         super().__init__()
 
+        if 'freeze_word_embeddings' in config_dict:
+            freeze_word_embeddings = config_dict['freeze_word_embeddings']
+        else:
+            freeze_word_embeddings = True
+
+        print('\nFreeze word embeddings:', freeze_word_embeddings, '\n')
+
         # Intiialize lookup table for vocab
         if isinstance(use_gene_embeddings, str):
             if use_gene_embeddings == 'gf-12L-95M-i4096':
@@ -186,11 +200,10 @@ class GeneWrapper(nn.Module):
                 )
 
             self.gene_embeddings = nn.Embedding.from_pretrained(
-                emb,
-                padding_idx=0,
+                emb, padding_idx=0, freeze=freeze_word_embeddings
             )
 
-            if '16' in str(config_dict['torch_dtype']):
+            if '16' in str(config_dict['torch_dtype']) and freeze_word_embeddings:
                 self.gene_embeddings.half()
 
         else:
@@ -417,8 +430,40 @@ class gpWrapper(nn.Module):
         self.gene_name_path = gene_name_path
         self.gene_token_path = gene_token_path
 
+        self._register_gp_buffers(database, do_ensembl_conversion, fm_model_input_size)
+
+        self.encoder: nn.ModuleList[gpTransformerEncoder] = nn.ModuleList(
+            [
+                gpTransformerEncoder(
+                    n_gp_tokens=len(getattr(self, f'gp{i}_tokens')),
+                    embed_dim=self.gp_latent_size,
+                    depth=self.n_blocks,
+                    num_heads=self.num_heads,
+                    mlm_masking_prob=self.mgm_mask_ratio,
+                    use_flash=use_flash,
+                    seq_len=fm_model_input_size,
+                    use_pos_emb=use_pos_emb,
+                    use_l2_norm=use_l2_norm,
+                    no_mask_tokens=[0, 1, 2, 3],
+                    attn_drop_rate=attn_dropout,
+                    sparsity=init_sparsity,
+                )
+                for i in range(len(gp_inputs))
+            ]
+        )
+
+    def _register_gp_buffers(
+        self, database, do_ensembl_conversion, fm_model_input_size
+    ):
+        """Register per-GP token / lookup buffers and set the shared vocab size.
+
+        Builds, for each gene program, the ``gp{i}_tokens`` buffer (sorted token
+        ids in that GP) and the ``gp{i}_tokens_lookup`` buffer (global-token ->
+        local-index LUT). Shared by ``gpWrapper`` and ``gpLiteWrapper`` so token
+        handling is identical across both.
+        """
         # Get vocab size
-        with open(gene_token_path, 'rb') as f:
+        with open(self.gene_token_path, 'rb') as f:
             token_dict = pickle.load(f)
         self.vocab_size = max(token_dict.values())
 
@@ -431,8 +476,8 @@ class gpWrapper(nn.Module):
                 do_ensembl_conversion,
                 gpi,
                 # gene_counts_df, # could edit to rm rare tokens?
-                gene_token_path,
-                gene_name_path,
+                self.gene_token_path,
+                self.gene_name_path,
             )
 
             gp_tokens_tensor = torch.tensor(sorted(list(gp_tokens)), dtype=torch.int32)
@@ -462,26 +507,6 @@ class gpWrapper(nn.Module):
             # Use tensor indexing to assign values
             lookup_tensor[gp_tokens_tensor.long()] = indices
             self.register_buffer(f'gp{i}_tokens_lookup', lookup_tensor)
-
-        self.encoder: nn.ModuleList[gpTransformerEncoder] = nn.ModuleList(
-            [
-                gpTransformerEncoder(
-                    n_gp_tokens=len(getattr(self, f'gp{i}_tokens')),
-                    embed_dim=self.gp_latent_size,
-                    depth=self.n_blocks,
-                    num_heads=self.num_heads,
-                    mlm_masking_prob=self.mgm_mask_ratio,
-                    use_flash=use_flash,
-                    seq_len=fm_model_input_size,
-                    use_pos_emb=use_pos_emb,
-                    use_l2_norm=use_l2_norm,
-                    no_mask_tokens=[0, 1, 2, 3],
-                    attn_drop_rate=attn_dropout,
-                    sparsity=init_sparsity,
-                )
-                for i in range(len(gp_inputs))
-            ]
-        )
 
     def forward(
         self,
@@ -794,6 +819,288 @@ class gpWrapper(nn.Module):
             result.scatter_add_(dim=1, index=idx, src=src)  # (B, G)
 
         # --- Build output dict; move to CPU once ---
+        out = {'cls': cls_scores.detach().cpu().numpy()}
+        res_np = result.detach().cpu().numpy()  # (B, G)
+        for j, tok in enumerate(gp_tokens_t.tolist()):
+            out[tok] = res_np[:, j]
+
+        return out
+
+
+class gpLiteWrapper(gpWrapper):
+    """Lightweight GP encoder that shares a single transformer body across GPs.
+
+    Identical to :class:`gpWrapper` in data flow (gene embeddings -> per-GP
+    sequences via ``build_gp_input_matrix`` -> transformer -> per-GP MLM), but
+    instead of one ``gpTransformerEncoder`` *per* gene program it uses a single
+    shared body (``self.encoder``) plus one MLM decoder head per GP
+    (``self.decoders``). This drastically reduces parameters and lets the body
+    learn cross-GP structure while keeping GP-specific readout.
+
+    The output dict is identical to :class:`gpWrapper` so all downstream loss /
+    evaluation code works unchanged (the only trainer-side difference is the
+    per-GP ``requires_grad`` check, handled by ``gpLite.compute_gp_loss``).
+    """
+
+    def __init__(
+        self,
+        gp_inputs,
+        database,
+        do_ensembl_conversion,
+        gene_token_path,
+        gene_name_path,
+        gp_latent_size,
+        n_blocks,
+        num_heads,
+        mgm_mask_ratio,
+        use_flash,
+        model_type,
+        learn_new_gp,
+        use_pos_emb,
+        fm_model_input_size,
+        use_l2_norm,
+        attn_dropout,
+        init_sparsity,
+    ):
+        # Skip gpWrapper.__init__ (which builds a per-GP ModuleList of encoders);
+        # replicate its attribute setup, then build a shared body + per-GP heads.
+        nn.Module.__init__(self)
+
+        self.gp_latent_size = gp_latent_size
+        self.n_blocks = n_blocks
+        self.num_heads = num_heads
+        self.mgm_mask_ratio = mgm_mask_ratio
+        self.gp_inputs = gp_inputs
+        self.model_type = model_type
+        self.learning_new_gp = learn_new_gp
+        self.gene_name_path = gene_name_path
+        self.gene_token_path = gene_token_path
+
+        self._register_gp_buffers(database, do_ensembl_conversion, fm_model_input_size)
+
+        # Single shared transformer body (no built-in decoder head).
+        max_gp_tokens = max(
+            len(getattr(self, f'gp{i}_tokens')) for i in range(len(gp_inputs))
+        )
+        self.encoder = gpTransformerEncoder(
+            n_gp_tokens=max_gp_tokens,  # only used for mask-generator
+            embed_dim=self.gp_latent_size,
+            depth=self.n_blocks,
+            num_heads=self.num_heads,
+            mlm_masking_prob=self.mgm_mask_ratio,
+            use_flash=use_flash,
+            seq_len=fm_model_input_size,
+            use_pos_emb=use_pos_emb,
+            use_l2_norm=use_l2_norm,
+            no_mask_tokens=[0, 1, 2, 3],
+            attn_drop_rate=attn_dropout,
+            sparsity=init_sparsity,
+            build_decoder=False,
+        )
+
+        # One MLM head per GP, sized to that GP's token count so that
+        # logits_lm_list[i] keeps the same shape as gpWrapper.
+        self.decoders: nn.ModuleList[nn.Linear] = nn.ModuleList(
+            [
+                nn.Linear(
+                    self.gp_latent_size,
+                    len(getattr(self, f'gp{i}_tokens')),
+                    bias=False,
+                )
+                for i in range(len(gp_inputs))
+            ]
+        )
+
+    def forward(
+        self,
+        gf_emb_dict,
+        input_dataset,
+        masking=False,
+        return_attention=False,
+        return_gene_embeddings=False,
+        tokens_to_keep=None,
+        gp_of_interest=None,
+        return_mean_non_padding=False,
+        init_sparsity=0.0,
+    ):
+        # Subset GP embeddings
+        gp_token_list = []
+        logits_lm_list = []
+        gene_labels_list = []
+        gene_original_labels_list = []
+        num_genes_per_cell_list = []
+        gene_emb_list = []
+
+        # Extract embeddings for each gene program (shared body, per-GP head)
+        for i in range(len(self.gp_inputs)):
+            if (gp_of_interest is None) or (self.gp_inputs[i] == gp_of_interest):
+                # ensure max inputs ids matches gene encoder output
+                if (
+                    gf_emb_dict['gene_emb'].shape[1]
+                    != input_dataset['input_ids'].shape[1]
+                ):
+                    input_ids = input_dataset['input_ids'][
+                        :, : gf_emb_dict['gene_emb'].shape[1]
+                    ]
+                else:
+                    input_ids = input_dataset['input_ids']
+
+                (
+                    emb_pad,
+                    tokens_pad,
+                    num_genes_per_cell,
+                    attn_mask,
+                ) = build_gp_input_matrix(
+                    gf_emb_dict['gene_emb'],  # geneformer embeddings
+                    input_ids,
+                    getattr(self, f'gp{i}_tokens'),
+                )
+
+                # track number of genes per cell (divide by GP length)
+                num_genes_per_cell = num_genes_per_cell / (
+                    getattr(self, f'gp{i}_tokens').shape[0]
+                )
+                num_genes_per_cell_list += [num_genes_per_cell]
+
+                tokens_pad_unencoded = tokens_pad
+                tokens_pad = getattr(self, f'gp{i}_tokens_lookup')[tokens_pad].long()
+
+                # Shared transformer body, then GP-specific MLM head.
+                token, seq, gene_labels_i, _ = self.encoder.encode(
+                    emb_pad,
+                    gene_labels=tokens_pad,
+                    masking=masking,
+                    attn_mask=attn_mask,
+                    return_attention=return_attention,
+                    return_mean_non_padding=return_mean_non_padding,
+                )
+                logits_lm = self.decoders[i](seq)
+
+                gp_token_list.append(token)
+                logits_lm_list.append(logits_lm)
+                gene_labels_list.append(gene_labels_i)
+
+                if return_gene_embeddings:
+                    gene_emb_list = seq[:, 1:, :]
+                    gene_original_labels_list = tokens_pad_unencoded
+            else:
+                continue
+
+        # Concatenate tensors
+        if len(gp_token_list) > 1:
+            z = torch.stack(gp_token_list, dim=1)
+        else:
+            z = gp_token_list[0].unsqueeze(dim=1)
+
+        # store for output
+        output = {
+            'z': z,
+            'logits_lm_list': logits_lm_list,
+            'gene_labels_list': gene_labels_list,
+            'gene_emb_list': gene_emb_list,
+            'gene_original_labels_list': gene_original_labels_list,
+            'num_genes_per_cell_list': num_genes_per_cell_list,
+        }
+
+        if return_gene_embeddings:
+            output = self.wrangle_gene_embeddings(output, tokens_to_keep)
+            output['z'] = z
+
+        return output
+
+    def get_gene_gene_attention(self, gf_emb, input_dataset, gp_idx):
+        """Gene-gene attention from the shared body for a single GP."""
+        gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
+
+        emb_pad, tokens_pad, _, attn_mask = build_gp_input_matrix(
+            gf_emb['gene_emb'],
+            input_dataset['input_ids'],
+            gp_tokens,
+        )
+        tokens_pad = getattr(self, f'gp{gp_idx}_tokens_lookup')[tokens_pad].long()
+
+        _, _, _, attn = self.encoder.encode(
+            emb_pad,
+            gene_labels=tokens_pad,
+            masking=False,
+            attn_mask=attn_mask,
+            return_attention=True,
+        )
+        return attn
+
+    def get_cls_attn(self, gf_emb, input_dataset, gp_idx):
+        """CLS-token attention over genes from the shared body for a single GP.
+
+        Mirrors ``gpWrapper.get_cls_attn`` but routes through the shared encoder
+        via ``encode`` instead of a per-GP encoder module.
+        """
+        gp_tokens = getattr(self, f'gp{gp_idx}_tokens')
+
+        emb_pad, tokens_pad, _, attn_mask = build_gp_input_matrix(
+            gf_emb['gene_emb'],
+            input_dataset['input_ids'],
+            gp_tokens,
+        )
+
+        tokens_pad_unencoded = tokens_pad
+        if not torch.is_tensor(tokens_pad_unencoded):
+            tokens_pad_unencoded = torch.as_tensor(tokens_pad_unencoded)
+
+        tokens_pad = getattr(self, f'gp{gp_idx}_tokens_lookup')[tokens_pad].long()
+
+        _, _, _, attn = self.encoder.encode(
+            emb_pad,
+            gene_labels=tokens_pad,
+            masking=False,
+            attn_mask=attn_mask,
+            return_attention=True,
+        )
+
+        # attention: [B, H, S, S] -> mean heads -> take CLS row -> [B, S]
+        attn = attn.mean(dim=1)  # [B, S, S]
+        attn_cls_all = attn[:, 0, :]  # [B, S]
+        cls_scores = attn_cls_all[:, 0]  # [B]
+        attn_to_tokens = attn_cls_all[:, 1:]  # [B, L], L = S-1
+
+        toks = tokens_pad_unencoded  # [B, L]
+        if toks.dtype != torch.long:
+            toks = toks.long()
+
+        device = toks.device
+        dtype_scores = attn_to_tokens.dtype
+
+        gp_tokens_t = torch.as_tensor(
+            gp_tokens, device=device, dtype=toks.dtype
+        ).reshape(
+            -1
+        )  # [G]
+        G = gp_tokens_t.numel()
+        B = attn_to_tokens.size(0)
+
+        vmin = int(toks.min().item())
+        vmax = int(toks.max().item())
+        R = vmax - vmin + 1
+        offset = -vmin
+
+        if R <= 0:
+            result = torch.zeros(B, G, device=device, dtype=dtype_scores)
+        else:
+            lut = torch.full((R,), -1, device=device, dtype=torch.long)
+
+            shifted_gp = gp_tokens_t + offset
+            in_range = (shifted_gp >= 0) & (shifted_gp < R)
+            if in_range.any():
+                gp_cols = torch.arange(G, device=device, dtype=torch.long)
+                lut[shifted_gp[in_range]] = gp_cols[in_range]
+
+            gene_idx = lut[toks + offset]  # [B, L] in {-1, 0..G-1}
+            valid = gene_idx >= 0  # [B, L] bool
+
+            result = torch.zeros(B, G, device=device, dtype=dtype_scores)
+            src = attn_to_tokens * valid.to(dtype_scores)
+            idx = gene_idx.clamp(min=0)
+            result.scatter_add_(dim=1, index=idx, src=src)
+
         out = {'cls': cls_scores.detach().cpu().numpy()}
         res_np = result.detach().cpu().numpy()  # (B, G)
         for j, tok in enumerate(gp_tokens_t.tolist()):
@@ -1199,6 +1506,7 @@ class gpTransformerBase(nn.Module):
         all_genes=None,
         warmup=0,
         init_sparsity=0.0,
+        **kwargs,
     ):
         super().__init__()
 
@@ -1301,8 +1609,83 @@ class gpTransformerBase(nn.Module):
                 init_sparsity=init_sparsity,
             )
 
+        elif fm_encoder_pkg == 'scgpt':
+            # fm_encoder_name = path to scGPT checkpoint directory
+            import json as _json  # noqa: PLC0415
+            from pathlib import Path as _Path  # noqa: PLC0415
+
+            from .baselines import scGPTWrapper  # noqa: PLC0415
+
+            with open(_Path(fm_encoder_name) / 'args.json') as _f:
+                _cfg = _json.load(_f)
+            gp_latent_size = _cfg['embsize']
+            fm_model_input_size = _cfg.get('max_seq_len', 1200)
+            self.gene_token_path = TOKEN_DICTIONARY_FILE
+            self.gene_name_path = ENSEMBL_DICTIONARY_FILE
+            self.gf_wrapper = scGPTWrapper(
+                model_dir=fm_encoder_name,
+                gf_token_dict_path=str(TOKEN_DICTIONARY_FILE),
+                fm_layer_to_quant=fm_layer_to_quant,
+            )
+
+        elif fm_encoder_pkg == 'tahoe':
+            # fm_encoder_name: path to checkpoint directory (containing
+            # model.safetensors and vocab.json), or 'safetensors_path:vocab_path'.
+            from pathlib import Path as _Path  # noqa: PLC0415
+
+            from .baselines import TahoeWrapper  # noqa: PLC0415
+
+            _p = _Path(fm_encoder_name)
+            if _p.is_dir():
+                _safetensors_path = str(_p / 'model.safetensors')
+                _vocab_path = str(_p / 'vocab.json')
+            elif ':' in fm_encoder_name:
+                _parts = fm_encoder_name.split(':')
+                _safetensors_path, _vocab_path = _parts[0], _parts[1]
+            else:
+                raise ValueError(
+                    "For fm_encoder_pkg='tahoe', fm_encoder_name must be a "
+                    "checkpoint directory or 'safetensors_path:vocab_path'."
+                )
+            self.gene_token_path = TOKEN_DICTIONARY_FILE
+            self.gene_name_path = ENSEMBL_DICTIONARY_FILE
+            self.gf_wrapper = TahoeWrapper(
+                safetensors_path=_safetensors_path,
+                vocab_path=_vocab_path,
+                gf_token_dict_path=str(TOKEN_DICTIONARY_FILE),
+                n_heads=kwargs.get('tahoe_n_heads', 8),
+                fm_layer_to_quant=fm_layer_to_quant,
+            )
+            gp_latent_size = self.gf_wrapper.hidden_size
+            fm_model_input_size = 4096
+
+        elif fm_encoder_pkg == 'state':
+            # fm_encoder_name = path to STATE .ckpt file
+            from .baselines import StateWrapper  # noqa: PLC0415
+
+            _state_hidden = kwargs.get('state_hidden_size')
+            if _state_hidden is None:
+                raise ValueError(
+                    "Provide state_hidden_size= when fm_encoder_pkg='state'. "
+                    'STATE SE-600M uses d_model=512.'
+                )
+            self.gene_token_path = TOKEN_DICTIONARY_FILE
+            self.gene_name_path = ENSEMBL_DICTIONARY_FILE
+            self.gf_wrapper = StateWrapper(
+                checkpoint_path=fm_encoder_name,
+                gf_token_dict_path=str(TOKEN_DICTIONARY_FILE),
+                protein_embeddings_path=kwargs.get('protein_embeddings_path', None),
+                fm_layer_to_quant=fm_layer_to_quant,
+            )
+            gp_latent_size = self.gf_wrapper.hidden_size
+            fm_model_input_size = 2048
+
         else:
-            raise ValueError('Only geneformer is supported for now')
+            raise ValueError(
+                f'fm_encoder_pkg={fm_encoder_pkg!r} is not supported. '
+                "Choose from: 'geneformer', 'geneformer_2021', 'from_scratch', "
+                "'scgpt', 'tahoe', 'state'."
+            )
 
         # Track for downstream models
         self.fm_encoder_pkg = fm_encoder_pkg
@@ -1331,6 +1714,7 @@ class gpTransformerBase(nn.Module):
         self.mgm_mask_ratio = mgm_mask_ratio
         self.do_ensembl_conversion = do_ensembl_conversion
         self.n_blocks = n_blocks
+        self.num_heads = num_heads
         self.attn_dropout = attn_dropout
         self.use_flash = use_flash
 
@@ -1338,14 +1722,39 @@ class gpTransformerBase(nn.Module):
             gp_of_interest = [gp_of_interest]
         self.gp_of_interest = gp_of_interest
 
-        self.multi_gp_encoder = gpWrapper(
+        self.multi_gp_encoder = self._build_multi_gp_encoder(
+            gp_inputs=gp_inputs,
+            model_type=model_type,
+            learn_new_gp=learn_new_gp,
+            use_pos_emb=use_pos_emb,
+            fm_model_input_size=fm_model_input_size,
+            use_l2_norm=use_l2_norm,
+            init_sparsity=init_sparsity,
+        )
+
+    def _build_multi_gp_encoder(
+        self,
+        gp_inputs,
+        model_type,
+        learn_new_gp,
+        use_pos_emb,
+        fm_model_input_size,
+        use_l2_norm,
+        init_sparsity,
+    ):
+        """Build the per-GP encoder wrapper.
+
+        Overridden by subclasses (e.g. ``gpTransformerLite``) to swap in a
+        different wrapper while keeping ``__init__`` otherwise identical.
+        """
+        return gpWrapper(
             database=self.gpdb,
             do_ensembl_conversion=self.do_ensembl_conversion,
             gene_token_path=self.gene_token_path,
             gene_name_path=self.gene_name_path,
             gp_latent_size=self.gp_latent_size,
             n_blocks=self.n_blocks,
-            num_heads=num_heads,
+            num_heads=self.num_heads,
             mgm_mask_ratio=self.mgm_mask_ratio,
             gp_inputs=gp_inputs,
             use_flash=self.use_flash,
@@ -1354,7 +1763,7 @@ class gpTransformerBase(nn.Module):
             use_pos_emb=use_pos_emb,
             fm_model_input_size=fm_model_input_size,
             use_l2_norm=use_l2_norm,
-            attn_dropout=attn_dropout,
+            attn_dropout=self.attn_dropout,
             init_sparsity=init_sparsity,
         )
 
@@ -1434,6 +1843,54 @@ class gpTransformerBase(nn.Module):
         )
 
         return output
+
+
+class gpTransformerLite(gpTransformerBase):
+    """GP transformer with a single shared body across gene programs.
+
+    Identical to :class:`gpTransformerBase` (gene encoder -> per-GP sequences ->
+    transformer -> per-GP masked gene modelling) except that the per-GP encoder
+    stack is replaced by :class:`gpLiteWrapper`: one shared transformer body plus
+    one MLM head per GP. ``forward`` and everything else are inherited unchanged
+    because the output dict is identical.
+
+    Pair with the :class:`~tripso.Trainers.trainer.gpLite` LightningModule, whose
+    ``compute_gp_loss`` handles the single shared encoder's ``requires_grad``.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault('model_type', 'Lite')
+        super().__init__(*args, **kwargs)
+
+    def _build_multi_gp_encoder(
+        self,
+        gp_inputs,
+        model_type,
+        learn_new_gp,
+        use_pos_emb,
+        fm_model_input_size,
+        use_l2_norm,
+        init_sparsity,
+    ):
+        return gpLiteWrapper(
+            database=self.gpdb,
+            do_ensembl_conversion=self.do_ensembl_conversion,
+            gene_token_path=self.gene_token_path,
+            gene_name_path=self.gene_name_path,
+            gp_latent_size=self.gp_latent_size,
+            n_blocks=self.n_blocks,
+            num_heads=self.num_heads,
+            mgm_mask_ratio=self.mgm_mask_ratio,
+            gp_inputs=gp_inputs,
+            use_flash=self.use_flash,
+            model_type=model_type,
+            learn_new_gp=learn_new_gp,
+            use_pos_emb=use_pos_emb,
+            fm_model_input_size=fm_model_input_size,
+            use_l2_norm=use_l2_norm,
+            attn_dropout=self.attn_dropout,
+            init_sparsity=init_sparsity,
+        )
 
 
 class gpTransformerGlobal(gpTransformerBase):

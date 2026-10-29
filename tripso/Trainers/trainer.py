@@ -198,13 +198,17 @@ class gpBase(pl.LightningModule):
         self.gp_for_downstream = gp_for_downstream
 
         # for saving embeddings
-        self.emb_dataset = None
-        self.gene_dataset = None
+        # per-batch dicts are buffered and converted to Dataset shards every
+        # emb_flush_every batches; shards are concatenated once at epoch end
+        # (more efficient when lots of iterations)
+        self.emb_buffer: List[dict] = []
+        self.emb_shards: List[Dataset] = []
+        self.emb_flush_every = 500
         self.token_dataset = None
         self.attn_adata_holder: List[ad.AnnData] = []
-        self.gene_to_gp_cosim: Dict[str, np.ndarray] = {}
-        self.gene_meta_dict = None
-        self.gene_to_gene_cosim: Dict[tuple, torch.Tensor] = {}
+        self.gene_to_gp_cosim: Dict[str, List[sparse.csr_matrix]] = {}
+        self.gene_meta_holder: List[dict] = []
+        self.gene_to_gene_cosim: Dict[tuple, List[float]] = {}
 
     def forward(self, x, masking, epoch, **kwargs):
         out = self.model(
@@ -219,6 +223,35 @@ class gpBase(pl.LightningModule):
         )
 
         return out
+
+    def append_emb_batch(self, emb_dict):
+        self.emb_buffer.append(emb_dict)
+        if len(self.emb_buffer) >= self.emb_flush_every:
+            self.flush_emb_buffer()
+
+    def flush_emb_buffer(self):
+        if not self.emb_buffer:
+            return None
+
+        merged = {}
+        for k in self.emb_buffer[0]:
+            vals = [d[k] for d in self.emb_buffer]
+            if isinstance(vals[0], torch.Tensor):
+                merged[k] = torch.cat([v.detach().cpu() for v in vals])
+            elif isinstance(vals[0], np.ndarray):
+                merged[k] = np.concatenate(vals)
+            else:
+                # flatten list of lists (e.g. string metadata)
+                merged[k] = [item for sublist in vals for item in sublist]
+
+        self.emb_shards.append(Dataset.from_dict(merged))
+        self.emb_buffer = []
+
+    def collect_emb_dataset(self):
+        self.flush_emb_buffer()
+        emb_dataset = concatenate_datasets(self.emb_shards)
+        self.emb_shards = []
+        return emb_dataset
 
     def log_gp_loss(self, loss_per_gp):
         for i, gp in enumerate(self.model.gp_inputs):
@@ -328,7 +361,7 @@ class gpBase(pl.LightningModule):
 
             for i, gp in enumerate(self.model.gp_inputs):
                 emb_dict[gp] = output['z'][:, i, :].detach().cpu()
-                
+
                 # this is the proportion of GP genes
                 # which are present in a given cell
                 emb_dict[f'{gp}_prop_genes'] = (
@@ -346,12 +379,7 @@ class gpBase(pl.LightningModule):
                 if k != 'input_ids':
                     emb_dict[k] = v
 
-            emb = Dataset.from_dict(emb_dict)
-
-            if self.emb_dataset is None:
-                self.emb_dataset = emb
-            else:
-                self.emb_dataset = concatenate_datasets([self.emb_dataset, emb])
+            self.append_emb_batch(emb_dict)
 
             return None
 
@@ -375,12 +403,7 @@ class gpBase(pl.LightningModule):
                     if k != 'input_ids':
                         emb_dict[k] = v
 
-                emb = Dataset.from_dict(emb_dict)
-
-                if self.gene_dataset is None:
-                    self.gene_dataset = emb
-                else:
-                    self.gene_dataset = concatenate_datasets([self.gene_dataset, emb])
+                self.append_emb_batch(emb_dict)
 
                 return None
 
@@ -397,13 +420,8 @@ class gpBase(pl.LightningModule):
                     # make sparse for memory efficiency
                     cos_sim = sparse.csr_matrix(cos_sim).T  # (1, batch) --> (batch, 1)
 
-                    if gene_name not in self.gene_to_gp_cosim:
-                        self.gene_to_gp_cosim[gene_name] = cos_sim
-                    else:
-                        # Use scipy.sparse.vstack to concatenate csr_matrices
-                        self.gene_to_gp_cosim[gene_name] = sparse.vstack(
-                            [self.gene_to_gp_cosim[gene_name], cos_sim]
-                        )
+                    # per-batch blocks are stacked once at epoch end
+                    self.gene_to_gp_cosim.setdefault(gene_name, []).append(cos_sim)
 
                 # Track metadata
                 meta_dict = {}
@@ -414,15 +432,7 @@ class gpBase(pl.LightningModule):
                             v = v.cpu().numpy()
                         meta_dict[k] = v
 
-                if self.gene_meta_dict is None:
-                    self.gene_meta_dict = meta_dict
-                else:
-                    self.gene_meta_dict = {
-                        k: np.concatenate([self.gene_meta_dict[k], v])
-                        if isinstance(v, np.ndarray)
-                        else self.gene_meta_dict[k] + v
-                        for k, v in meta_dict.items()
-                    }
+                self.gene_meta_holder.append(meta_dict)
 
             # Option 3: calculate (gene, gene) cosine similarity
             if self.return_gene_cosim == 'gene_to_gene':
@@ -444,12 +454,7 @@ class gpBase(pl.LightningModule):
                     for j, gene2_name in enumerate(gene_names):
                         key = (gene1_name, gene2_name)
                         value = cos_sim_matrix_np[i, j]
-                        if key not in self.gene_to_gene_cosim:
-                            self.gene_to_gene_cosim[key] = np.array([value])
-                        else:
-                            self.gene_to_gene_cosim[key] = np.concatenate(
-                                [self.gene_to_gene_cosim[key], np.array([value])]
-                            )
+                        self.gene_to_gene_cosim.setdefault(key, []).append(value)
 
             return None
 
@@ -499,8 +504,7 @@ class gpBase(pl.LightningModule):
                 output_path = os.path.join(self.output_dir, 'embeddings')
             os.makedirs(output_path, exist_ok=True)
             output_name = os.path.join(output_path, f'{self.split_label}_set')
-            self.emb_dataset.save_to_disk(output_name)
-            self.emb_dataset = None
+            self.collect_emb_dataset().save_to_disk(output_name)
             return None
 
         if self.return_gene_embeddings:
@@ -509,19 +513,29 @@ class gpBase(pl.LightningModule):
             output_name = os.path.join(output_path, f'{self.split_label}_set')
 
             if self.return_gene_cosim is None:
-                self.gene_dataset.save_to_disk(output_name)
-                self.gene_dataset = None
+                self.collect_emb_dataset().save_to_disk(output_name)
 
             if self.return_gene_cosim == 'gene_to_gp':
                 # gene_to_gp_cosim is a dict where gene names are keys,
-                # values are sparse matrices (n_cells, 1)
-                # Stack all sparse matrices horizontally to get (n_cells, n_genes)
+                # values are lists of per-batch sparse matrices (batch, 1)
+                # Stack each gene's blocks vertically to (n_cells, 1), then
+                # all genes horizontally to get (n_cells, n_genes)
                 gene_names = list(self.gene_to_gp_cosim.keys())
                 cosim_matrix = sparse.hstack(
-                    [self.gene_to_gp_cosim[gene] for gene in gene_names]
+                    [sparse.vstack(self.gene_to_gp_cosim[gene]) for gene in gene_names]
                 )
 
-                obs = pd.DataFrame(self.gene_meta_dict)
+                gene_meta_dict = {}
+                for k, v in self.gene_meta_holder[0].items():
+                    vals = [d[k] for d in self.gene_meta_holder]
+                    if isinstance(v, np.ndarray):
+                        gene_meta_dict[k] = np.concatenate(vals)
+                    else:
+                        gene_meta_dict[k] = [
+                            item for sublist in vals for item in sublist
+                        ]
+
+                obs = pd.DataFrame(gene_meta_dict)
 
                 # Pass sparse matrix directly to AnnData, set var_names
                 output_adata = sc.AnnData(
@@ -534,12 +548,12 @@ class gpBase(pl.LightningModule):
                 filepath = os.path.join(output_path, filename)
                 output_adata.write_h5ad(filepath)
 
-                self.gene_to_gp_cosim = None
-                self.gene_meta_dict = None
+                self.gene_to_gp_cosim = {}
+                self.gene_meta_holder = []
 
             if self.return_gene_cosim == 'gene_to_gene':
                 # gene_to_gene_cosim is a dictionary where keys are gene tuples
-                # values are cosine similarities
+                # values are lists of per-batch cosine similarities
                 # output a dataframe of shape (gene,gene)
                 # with genes appropriately labelled
                 # where x[i,j] is the mean cosine similarity
@@ -553,9 +567,7 @@ class gpBase(pl.LightningModule):
                     index=gene_names, columns=gene_names, dtype=float
                 )
                 for (gene1, gene2), sims in self.gene_to_gene_cosim.items():
-                    mean_sim = (
-                        sims.mean().item() if hasattr(sims, 'mean') else np.mean(sims)
-                    )
+                    mean_sim = np.asarray(sims).mean().item()
                     cosim_matrix.loc[gene1, gene2] = mean_sim
                 output_path = os.path.join(self.output_dir, self.gene_dir_tag)
                 os.makedirs(output_path, exist_ok=True)
@@ -713,6 +725,70 @@ class gpBase(pl.LightningModule):
                 'name': None,
             },
         }
+
+
+class gpLite(gpBase):
+    """LightningModule for :class:`~tripso.Models.gp_model.gpTransformerLite`.
+
+    Identical to :class:`gpBase` except for the masked-gene-modelling loss: the
+    Lite model shares a single GP transformer body, so there is no per-GP
+    ``encoder[i]`` module list. ``compute_gp_loss`` therefore checks the shared
+    encoder's ``requires_grad`` once instead of per GP.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model_type = 'Lite'
+
+    def _shared_encoder_trainable(self):
+        return self.model.multi_gp_encoder.encoder.blocks[
+            0
+        ].attn.qkv.weight.requires_grad
+
+    def log_gp_loss(self, loss_per_gp):
+        # Single shared body: check trainability once instead of per GP.
+        if not self._shared_encoder_trainable():
+            return
+        for gp in self.model.gp_inputs:
+            self.log(
+                f'train/{gp}_MGM_loss',
+                loss_per_gp[gp],
+                on_step=True,
+                on_epoch=True,
+                logger=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
+
+    def compute_gp_loss(self, batch, fw_pass_output):
+        output = fw_pass_output
+
+        gp_loss_dict = {}
+        loss = 0
+
+        # Single shared body: check trainability once for all GPs.
+        shared_trainable = self._shared_encoder_trainable()
+
+        for i in range(len(self.model.gp_inputs)):
+            if shared_trainable:
+                loss_i = F.cross_entropy(
+                    output['logits_lm_list'][i].reshape(
+                        -1, output['logits_lm_list'][i].shape[-1]
+                    ),
+                    output['gene_labels_list'][i].reshape(-1),
+                )
+
+                gp_loss_dict[self.model.gp_inputs[i]] = loss_i
+                loss += loss_i
+            else:
+                gp_loss_dict[self.model.gp_inputs[i]] = torch.tensor(0).to(self.device)
+
+        holder = {
+            'loss_per_gp': gp_loss_dict,
+            'total_loss': loss,
+        }
+
+        return holder
 
 
 class gpGlobal(gpBase):
@@ -1351,8 +1427,8 @@ class gpAblation(gpGlobal):
         self.compute_cosine = compute_cosine
         self.compute_delta_nb_loss = compute_delta_nb_loss
         self.save_raw_embeddings = not (compute_cosine or compute_delta_nb_loss)
-        self.cosine_adata = None
-        self.delta_nb_loss_adata = None
+        self.cosine_adata_holder: List[ad.AnnData] = []
+        self.delta_nb_loss_adata_holder: List[ad.AnnData] = []
 
     def build_perturbed_input_matrix(
         self, z, num_genes_per_cell_list, gp_pert_index=None
@@ -1513,12 +1589,7 @@ class gpAblation(gpGlobal):
                 if k != 'input_ids':
                     emb_dict[k] = v
 
-            emb = Dataset.from_dict(emb_dict)
-
-            if self.emb_dataset is None:
-                self.emb_dataset = emb
-            else:
-                self.emb_dataset = concatenate_datasets([self.emb_dataset, emb])
+            self.append_emb_batch(emb_dict)
 
         elif self.compute_cosine:
             meta_dict = {}
@@ -1536,10 +1607,7 @@ class gpAblation(gpGlobal):
                 var=pd.DataFrame(index=cosine_dict.keys()),
             )
 
-            if self.cosine_adata is None:
-                self.cosine_adata = adata
-            else:
-                self.cosine_adata = ad.concat([self.cosine_adata, adata])
+            self.cosine_adata_holder.append(adata)
 
         elif self.compute_delta_nb_loss:
             meta_dict = {}
@@ -1562,10 +1630,7 @@ class gpAblation(gpGlobal):
                 var=pd.DataFrame(index=delta_nb_loss_dict.keys()),
             )
 
-            if self.delta_nb_loss_adata is None:
-                self.delta_nb_loss_adata = adata
-            else:
-                self.delta_nb_loss_adata = ad.concat([self.delta_nb_loss_adata, adata])
+            self.delta_nb_loss_adata_holder.append(adata)
 
         return None
 
@@ -1575,16 +1640,151 @@ class gpAblation(gpGlobal):
         output_name = os.path.join(output_path, f'{self.split_label}_set')
 
         if self.save_raw_embeddings:
-            self.emb_dataset.save_to_disk(output_name)
-            self.emb_dataset = None
+            self.collect_emb_dataset().save_to_disk(output_name)
 
         elif self.compute_cosine:
-            self.cosine_adata.write_h5ad(output_name + '.h5ad')
-            self.cosine_adata = None
+            adata = ad.concat(self.cosine_adata_holder)
+            adata.write_h5ad(output_name + '.h5ad')
+            self.cosine_adata_holder = []
 
         elif self.compute_delta_nb_loss:
-            self.delta_nb_loss_adata.write_h5ad(output_name + '_delta_nb_loss.h5ad')
-            self.delta_nb_loss_adata = None
+            adata = ad.concat(self.delta_nb_loss_adata_holder)
+            adata.write_h5ad(output_name + '_delta_nb_loss.h5ad')
+            self.delta_nb_loss_adata_holder = []
+
+        return None
+
+
+class gpAblationRand(gpGlobal):
+    def __init__(self, n_rand=5, noise_scale=None, rand_seed=0, **kwargs):
+        """
+        Trainer for computing ablation metrics by scrambling gene programs.
+
+        Unlike gpAblation (which removes a GP by zeroing its embedding AND masking
+        it out of attention), this trainer replaces a GP's embedding with Gaussian
+        noise `n_rand` times while keeping the scrambled GP slot attended to, then
+        reports the average change in cosine similarity (1 - cos) between the
+        control and perturbed cell embeddings across the noise draws.
+
+        n_rand: number of independent noise draws per gene program.
+        noise_scale: standard deviation of the Gaussian noise. If None, the
+            empirical std of the GP embeddings being replaced is used.
+        rand_seed: seed for the noise generator. The `n_rand` draws differ from
+            each other, but the whole run reproduces exactly given the same seed.
+        """
+        super().__init__(**kwargs)
+        self.n_rand = n_rand
+        self.noise_scale = noise_scale
+        self.rand_seed = rand_seed
+        self.cosine_adata_holder: List[ad.AnnData] = []
+        # lazily-created, per-device generator cache (see _get_generator)
+        self._noise_generator = None
+
+    def _get_generator(self, device):
+        """
+        Lazily create and cache a torch.Generator seeded with self.rand_seed.
+
+        The generator is created once and reused across all noise draws, gene
+        programs and batches, so successive draws differ (the generator advances)
+        while the full sequence remains deterministic and reproducible.
+        Lazy creation ensures the seed set on the module *after* load_from_checkpoint
+        is respected, since no noise is drawn before test_step.
+        """
+        if self._noise_generator is None:
+            self._noise_generator = torch.Generator(device=device)
+            self._noise_generator.manual_seed(self.rand_seed)
+        return self._noise_generator
+
+    def build_noised_input_matrix(self, z, num_genes_per_cell_list, gp_pert_index):
+        z, gp_labels, attn_mask = self.model.cell_token_learner.build_input_matrix(
+            z, num_genes_per_cell_list
+        )
+
+        # select the slots holding the GP we are perturbing (per cell)
+        sel = gp_labels == gp_pert_index
+        target = z[sel]
+
+        # match the empirical std of the replaced embeddings unless overridden
+        if self.noise_scale is not None:
+            scale = self.noise_scale
+        else:
+            scale = target.std() if target.numel() > 0 else 1.0
+
+        gen = self._get_generator(z.device)
+        noise = (
+            torch.randn(
+                target.shape,
+                generator=gen,
+                device=target.device,
+                dtype=target.dtype,
+            )
+            * scale
+        )
+
+        z = z.clone()
+        z[sel] = noise
+
+        # NOTE: unlike gpAblation, attn_mask is NOT modified, so the scrambled
+        # GP slot remains attended to and the noise propagates to the cell token.
+
+        return z, gp_labels, attn_mask
+
+    def test_step(self, batch, batch_idx):
+        output = self.forward(batch, masking=False, masking_global=False)
+
+        control_array = output['cell_token'].detach().cpu().numpy()
+
+        cosine_dict = {}
+        for i, gp in enumerate(self.model.gp_inputs):
+            draws = []
+            for _ in range(self.n_rand):
+                z, gp_labels, attn_mask = self.build_noised_input_matrix(
+                    z=output['z'],
+                    num_genes_per_cell_list=output['num_genes_per_cell_list'],
+                    gp_pert_index=i,
+                )
+
+                encoder_output = self.model.cell_token_learner.encoder(
+                    z,
+                    gene_labels=gp_labels,
+                    attn_mask=attn_mask,
+                    masking=False,
+                    return_attention=False,
+                )
+
+                gp_array = encoder_output['cls'].detach().cpu().numpy()
+                cos_sim = 1 - np.diag(cosine_similarity(control_array, gp_array))
+                draws.append(cos_sim)
+
+            # per-cell mean change in cosine similarity across the noise draws
+            cosine_dict[gp] = np.mean(np.stack(draws, axis=0), axis=0)
+
+        meta_dict = {}
+        for k, v in batch.items():
+            if k != 'input_ids':
+                if isinstance(v, torch.Tensor):
+                    meta_dict[k] = v.cpu().numpy()
+                else:
+                    meta_dict[k] = v
+
+        adata = sc.AnnData(
+            X=pd.DataFrame(cosine_dict).values,
+            obs=pd.DataFrame(meta_dict),
+            var=pd.DataFrame(index=cosine_dict.keys()),
+        )
+
+        self.cosine_adata_holder.append(adata)
+
+        return None
+
+    def on_test_epoch_end(self):
+        output_path = os.path.join(self.output_dir, 'with_gp_ablation_rand')
+        os.makedirs(output_path, exist_ok=True)
+        output_name = os.path.join(output_path, f'{self.split_label}_set')
+
+        adata = ad.concat(self.cosine_adata_holder)
+        adata.write_h5ad(output_name + '.h5ad')
+        self.cosine_adata_holder = []
 
         return None
 

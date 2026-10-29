@@ -78,27 +78,65 @@ def one_hot_encoder(idx, n_cls):
     return onehot
 
 
-def find_latest_file(output_dir, tissue, supervised_tag):
-    # Define the pattern to match the desired file format
-    pattern = f'*_gp_transformer_{tissue}_{supervised_tag}*.ckpt'
+def resolve_checkpoint(model_dir, checkpoint_file=None):
+    """Return the checkpoint to load from ``model_dir/checkpoints``.
 
-    # Search for files in the directory matching the pattern
-    checkpoint_dir = os.path.join(output_dir, 'checkpoints')
-    matching_files = glob.glob(os.path.join(checkpoint_dir, pattern))
+    Defaults to ``last.ckpt`` (the final model). Raises if ``last-vN.ckpt``
+    files are also present, since Lightning writes those when a run reuses a
+    directory that already has ``last.ckpt``, so ``last.ckpt`` may be stale.
 
-    # Filter for only .ckpt files and sort by modification time
-    latest_file = max(matching_files, key=os.path.getmtime) if matching_files else None
+    Parameters
+    ----------
+    model_dir : str
+        Model output directory containing a ``checkpoints`` subdirectory.
+    checkpoint_file : Optional[str], default=None
+        Override: a full path to a ``.ckpt`` file, or a filename inside
+        ``model_dir/checkpoints`` (e.g. the dated lowest-loss checkpoint).
 
-    if latest_file is None:
-        raise FileNotFoundError(
-            f'No .ckpt files matching {tissue} with model type'
-            f' {supervised_tag} found in {checkpoint_dir}. '
-            'Did you train the model?'
+    Returns
+    -------
+    str
+        Path to the checkpoint file.
+    """
+    ckpt_dir = os.path.join(model_dir, 'checkpoints')
+
+    if checkpoint_file is not None:
+        if os.path.isfile(checkpoint_file):
+            path = checkpoint_file
+        else:
+            path = os.path.join(ckpt_dir, checkpoint_file)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f'Checkpoint {checkpoint_file} not found (also looked in {ckpt_dir}).'
+            )
+        return path
+
+    versioned = sorted(glob.glob(os.path.join(ckpt_dir, 'last-v*.ckpt')))
+    if versioned:
+        raise RuntimeError(
+            f'{ckpt_dir} contains last.ckpt and '
+            f'{[os.path.basename(v) for v in versioned]}. '
+            'Lightning writes last-vN.ckpt when a run reuses a directory that '
+            'already has last.ckpt, so last.ckpt may be from an older run. '
+            'Check which is correct and pass checkpoint_file=... explicitly, '
+            'or remove the stale file(s).'
         )
 
-    print('Loading model from', latest_file)
+    path = os.path.join(ckpt_dir, 'last.ckpt')
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f'No last.ckpt found in {ckpt_dir}. Did you train the model?'
+        )
 
-    return latest_file
+    return path
+
+
+def log_checkpoint(path, checkpoint):
+    """Print the checkpoint path together with its stored epoch and step."""
+    print(
+        f'Loading checkpoint {path} '
+        f'(epoch {checkpoint.get("epoch")}, global_step {checkpoint.get("global_step")})'
+    )
 
 
 def average_nz(x):
@@ -947,9 +985,14 @@ def build_gp_input_matrix(
     attn_mask[masked_labels_output != 0] = 1
 
     # never mask cls
-    attn_mask = torch.cat(
-        [torch.ones_like(attn_mask)[:, 0].unsqueeze(-1), attn_mask], dim=-1
+    # build the CLS column directly (not attn_mask[:, 0]) so this is robust to a
+    # zero-width sequence dim, which happens when crop_to_gp_len=True and no cell in
+    # the batch expresses any GP gene (max_num_genes == 0). Callers already handle the
+    # resulting empty result_matrix, so we must return rather than crash here.
+    cls_col = torch.ones(
+        (attn_mask.shape[0], 1), dtype=attn_mask.dtype, device=attn_mask.device
     )
+    attn_mask = torch.cat([cls_col, attn_mask], dim=-1)
 
     return result_matrix, masked_labels_output, num_genes_per_cell, attn_mask
 

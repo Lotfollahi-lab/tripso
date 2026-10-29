@@ -1,6 +1,5 @@
 Training the gene program discovery module
-
-====================================
+==========================================
 
 :download:`07.1_run_gpdiscovery.py`
 
