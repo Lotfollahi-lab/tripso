@@ -75,6 +75,7 @@ from ..Utils.utils import (
     assign_bar_colors,
     build_token_to_gene_name_dict,
     remove_single_data_points,
+    resolve_checkpoint,
     wrangle_classification_report,
 )
 
@@ -133,6 +134,11 @@ class gpEval:
         Passed through to txDataModule in generate_embeddings so the embedded
         splits match the trained ones. When None (default) the random 80/10/10
         split selected by `seed` is used, as before.
+    path_to_trained_model : str, optional
+        Directory of the trained model. If None, uses output_dir.
+    checkpoint_file : str, optional
+        Checkpoint to load: a full path, or a filename inside
+        ``<path_to_trained_model>/checkpoints``. If None, uses ``last.ckpt``.
 
     """
 
@@ -145,6 +151,7 @@ class gpEval:
         model_type: Optional[str] = 'Base',
         batch_size: Optional[int] = 128,
         path_to_trained_model: Optional[str] = None,
+        checkpoint_file: Optional[str] = None,
         seed: Optional[int] = 0,
         split_indices: Optional[str] = None,
         hparam_save: Optional[str] = 'all',
@@ -167,18 +174,14 @@ class gpEval:
         self.seed = seed
         self.split_indices = split_indices
 
-        # Search for .ckpt files in the directory
-        if model_type != 'Mean':
-            if path_to_trained_model is None:
-                model_path = output_dir
-            else:
-                model_path = path_to_trained_model
-
-            # latest_ckpt = find_latest_file(model_path, tissue, tag)
-            latest_ckpt = os.path.join(model_path, 'checkpoints/last.ckpt')
-
-            print('Latest .ckpt file:', latest_ckpt)
-            self.checkpoint_path = os.path.join(model_path, latest_ckpt)
+        # checkpoint is resolved on first load in _init_trainer, since
+        # subclasses that override _init_trainer load from elsewhere
+        if path_to_trained_model is None:
+            self.model_path = output_dir
+        else:
+            self.model_path = path_to_trained_model
+        self.checkpoint_file = checkpoint_file
+        self.checkpoint_path = None
 
         gpdb = pd.read_csv(gpdb_path)
 
@@ -236,6 +239,12 @@ class gpEval:
         token_to_gene_to_keep_dict=None,
         return_mean_non_padding=False,
     ):
+        if self.model_type != 'Mean' and self.checkpoint_path is None:
+            self.checkpoint_path = resolve_checkpoint(
+                self.model_path, self.checkpoint_file
+            )
+            print('Loading checkpoint', self.checkpoint_path)
+
         if self.model_type == 'Base':
             gp_transformer = gpBase.load_from_checkpoint(
                 self.checkpoint_path, hparam_save=hparam_save, map_location='cpu'
@@ -667,6 +676,9 @@ class gpAblationEval(gpEval):
     ----------
     main_ckpt_dir : str
         Path to directory containing the main model checkpoint (last.ckpt).
+    checkpoint_file : str, optional
+        Override for the checkpoint in main_ckpt_dir: a full path, or a
+        filename inside ``<main_ckpt_dir>/checkpoints``.
     compute_cosine : bool, default=False
         Whether to compute cosine similarity between ablated and full embeddings.
     compute_delta_nb_loss : bool, default=False
@@ -716,10 +728,12 @@ class gpAblationEval(gpEval):
         compute_cosine=False,
         compute_delta_nb_loss=False,
         adata_path=None,
+        checkpoint_file=None,
         *args,
         **kwargs,
     ):
-        self.main_ckpt_dir = os.path.join(main_ckpt_dir, 'checkpoints/last.ckpt')
+        self.main_ckpt_dir = resolve_checkpoint(main_ckpt_dir, checkpoint_file)
+        print('Loading checkpoint', self.main_ckpt_dir)
         self.compute_cosine = compute_cosine
         self.compute_delta_nb_loss = compute_delta_nb_loss
         self.adata_path = adata_path
@@ -868,6 +882,9 @@ class gpAblationRandEval(gpEval):
     ----------
     main_ckpt_dir : str
         Path to directory containing the main model checkpoint (last.ckpt).
+    checkpoint_file : str, optional
+        Override for the checkpoint in main_ckpt_dir: a full path, or a
+        filename inside ``<main_ckpt_dir>/checkpoints``.
     n_rand : int, default=5
         Number of independent noise draws per gene program.
     noise_scale : float, optional
@@ -910,10 +927,12 @@ class gpAblationRandEval(gpEval):
         noise_scale=None,
         rand_seed=0,
         adata_path=None,
+        checkpoint_file=None,
         *args,
         **kwargs,
     ):
-        self.main_ckpt_dir = os.path.join(main_ckpt_dir, 'checkpoints/last.ckpt')
+        self.main_ckpt_dir = resolve_checkpoint(main_ckpt_dir, checkpoint_file)
+        print('Loading checkpoint', self.main_ckpt_dir)
         self.n_rand = n_rand
         self.noise_scale = noise_scale
         self.rand_seed = rand_seed

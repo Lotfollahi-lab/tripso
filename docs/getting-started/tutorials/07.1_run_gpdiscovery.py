@@ -155,6 +155,7 @@ run_training_from_select_gps(
     batch_size=128,  # Batch size
     precision='bf16-mixed',  # Mixed precision training
     # Gene program module parameters
+    n_blocks=2,  # Number of transformer blocks in GP module
     gp_latent_size=256,  # Dimension of GP latent space
     n_heads=8,  # Number of attention heads
     calc_gp_loss=False,  # Don't calculate GP masking loss

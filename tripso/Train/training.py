@@ -37,7 +37,7 @@ from ..Trainers.trainer import (
     gpLite,
 )
 from ..Utils.geneformer_utils import get_gf_repo
-from ..Utils.utils import find_latest_file
+from ..Utils.utils import log_checkpoint, resolve_checkpoint
 
 
 def run_training(
@@ -106,6 +106,7 @@ def run_training(
     lora_config_args: Optional[dict] = None,
     warmup: Optional[int] = 0,
     accumulate_grad_batches: Optional[int] = 1,
+    checkpoint_file: Optional[str] = None,
 ):
     """
     Wrapper function for training Tripso model
@@ -254,6 +255,10 @@ def run_training(
         Number of warmup steps for learning rate scheduler
     accumulate_grad_batches : Optional[int], default=1
         Number of batches to accumulate gradients over before updating weights
+    checkpoint_file : Optional[str], default=None
+        Checkpoint to load when resuming or starting from path_to_base_model.
+        Full path, or filename inside ``<path_to_base_model>/checkpoints``.
+        If None, uses ``last.ckpt``.
 
     """
 
@@ -773,7 +778,7 @@ def load_from_ckpt(mode, pl_model, args):
         Lightning module to load weights into.
     args : dict
         Arguments dictionary with checkpoint path information including
-        'output_dir', 'tissue', 'model_type', and 'path_to_base_model'.
+        'output_dir', 'model_type', 'path_to_base_model' and 'checkpoint_file'.
 
     Returns
     -------
@@ -782,16 +787,16 @@ def load_from_ckpt(mode, pl_model, args):
     """
 
     output_dir = args['output_dir']
-    tissue = args['tissue']
     model_type = args['model_type']
     if args['path_to_base_model'] is None:
         path_to_base_model = output_dir
     else:
         path_to_base_model = args['path_to_base_model']
 
+    latest_ckpt = resolve_checkpoint(path_to_base_model, args['checkpoint_file'])
+
     if mode == 'resume_training':
-        # latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
+        print('Loading checkpoint', latest_ckpt)
 
         if model_type == 'Global':
             pl_model = gpGlobal.load_from_checkpoint(latest_ckpt, map_location='cpu')
@@ -803,12 +808,10 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif mode == 'sequential':
-        # latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-        # checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
         checkpoint = torch.load(
             latest_ckpt, map_location=torch.device('cpu'), weights_only=False
         )
+        log_checkpoint(latest_ckpt, checkpoint)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
         # freeze base model
@@ -826,13 +829,10 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif mode == 'finetune_gene_encoder':
-        # latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-        # checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
-
         checkpoint = torch.load(
             latest_ckpt, map_location=torch.device('cpu'), weights_only=False
         )
+        log_checkpoint(latest_ckpt, checkpoint)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
         # freeze base model
@@ -851,11 +851,6 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif (mode == 'finetune') | (mode == 'finetune_global'):
-        # try:
-        #     latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Global')
-        # except FileNotFoundError:
-        #     latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-
         warnings.warn(
             'Finetuning global model from base model'
             'finetune_lr parameter is deprecated.'
@@ -863,20 +858,19 @@ def load_from_ckpt(mode, pl_model, args):
             '{"gene_encoder": lr, "multi_gp_encoder": lr, "default": lr}'
         )
 
-        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
-
         checkpoint = torch.load(
             latest_ckpt, map_location=torch.device('cpu'), weights_only=False
         )
+        log_checkpoint(latest_ckpt, checkpoint)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
         return pl_model
 
     elif mode == 'learn_new_gp':
-        checkpoint_path = find_latest_file(path_to_base_model, tissue, model_type)
         checkpoint = torch.load(
-            checkpoint_path, map_location=torch.device('cpu'), weights_only=False
+            latest_ckpt, map_location=torch.device('cpu'), weights_only=False
         )
+        log_checkpoint(latest_ckpt, checkpoint)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
         pl_model.output_dir = output_dir
 
@@ -899,7 +893,7 @@ def load_from_ckpt(mode, pl_model, args):
         # unfreeze new GP
         for i in gp_idx:
             for name, param in pl_model.model.named_parameters():
-                if f'multi_gp_encoder.encoder.{i}' in name:
+                if f'multi_gp_encoder.encoder.{i}.' in name:
                     param.requires_grad = True
 
         return pl_model
