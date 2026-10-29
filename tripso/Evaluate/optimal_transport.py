@@ -21,8 +21,9 @@ from scipy.spatial.distance import cdist
 from sklearn.cluster import KMeans
 
 
-def compute_sinkhorn(adata, col, ref, target, epsilon=1e-3, 
-                     tau_a=0.999, tau_b=0.999, scale_cost=1.0):
+def compute_sinkhorn(
+    adata, col, ref, target, epsilon=1e-3, tau_a=0.999, tau_b=0.999, scale_cost=1.0
+):
     # Data selection
     ref_adata_ = adata[adata.obs[col] == ref]
     query_adata_ = adata[adata.obs[col] == target]
@@ -335,9 +336,14 @@ def compute_centroid_mapping(
     # ----------------------------------------------------------------------
 
     ot_out = compute_sinkhorn(
-        adata_centroid, col, ref, target, 
-        epsilon=epsilon, tau_a=tau_a, tau_b=tau_b,
-        scale_cost = scale_cost,
+        adata_centroid,
+        col,
+        ref,
+        target,
+        epsilon=epsilon,
+        tau_a=tau_a,
+        tau_b=tau_b,
+        scale_cost=scale_cost,
     )
 
     print('Sinkhorn algorithm converged?', ot_out.converged)
