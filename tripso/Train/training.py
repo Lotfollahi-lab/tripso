@@ -25,14 +25,19 @@ from transformers import BertConfig
 
 from ..Datamodules.datamodule import AnnDataset, txDataModule
 from ..Models.baselines import gfGlobal
-from ..Models.gp_model import gpTransformerBase, gpTransformerGlobal
+from ..Models.gp_model import (
+    gpTransformerBase,
+    gpTransformerGlobal,
+    gpTransformerLite,
+)
 from ..Trainers.trainer import (
     gpBase,
     gpGlobal,
     gpGlobalLoRA,
+    gpLite,
 )
 from ..Utils.geneformer_utils import get_gf_repo
-from ..Utils.utils import find_latest_file
+from ..Utils.utils import log_checkpoint, resolve_checkpoint
 
 
 def run_training(
@@ -78,6 +83,7 @@ def run_training(
     peft_config_path: Optional[str] = None,
     seed: Optional[int] = 0,
     data_seed: Optional[int] = None,
+    split_indices: Optional[str] = None,
     supervised_rem_var: Optional[str] = None,
     num_nodes: int = 1,
     prbm_path: Optional[str] = None,
@@ -100,6 +106,7 @@ def run_training(
     lora_config_args: Optional[dict] = None,
     warmup: Optional[int] = 0,
     accumulate_grad_batches: Optional[int] = 1,
+    checkpoint_file: Optional[str] = None,
 ):
     """
     Wrapper function for training Tripso model
@@ -132,10 +139,12 @@ def run_training(
     gene_format : Literal['symbol', 'ensembl'], default='symbol'
         Format in which gene names are stored in GPDB
     model_type : str, default='Base'
-        One of 'Base', 'Global', 'Global_LoRA', or 'Mean'.
-        'Base' trains only the GP encoder. 'Global' adds a cell-level
-        transformer. 'Global_LoRA' uses LoRA for parameter-efficient training.
-        'Mean' uses gene program mean embeddings.
+        One of 'Base', 'Lite', 'Global', 'Global_LoRA', or 'Mean'.
+        'Base' trains only the GP encoder (one transformer per GP). 'Lite' is
+        like 'Base' but shares a single transformer body across gene programs
+        with per-GP MLM heads. 'Global' adds a cell-level transformer.
+        'Global_LoRA' uses LoRA for parameter-efficient training. 'Mean' uses
+        gene program mean embeddings.
     strategy : str, default='ddp_find_unused_parameters_true'
         Strategy for multi-GPU PyTorch Lightning trainer
     attn_dropout : float, default=0.0
@@ -196,6 +205,12 @@ def run_training(
         Random seed for reproducibility
     data_seed : Optional[int], default=None
         Random seed for data loading. If None, uses same as seed
+    split_indices : Optional[str], default=None
+        Path to an .npz holding integer arrays under the keys 'train', 'val'
+        and 'test', giving a precomputed split (e.g. a held-out batch or
+        donor) in place of the default random 80/10/10. Indices are positions
+        into the tokenized dataset. When None the random split is used and
+        data_seed selects it as before.
     supervised_rem_var : Optional[str], default=None
         Variable to remove from supervised labels (currently unused)
     num_nodes : int, default=1
@@ -240,6 +255,10 @@ def run_training(
         Number of warmup steps for learning rate scheduler
     accumulate_grad_batches : Optional[int], default=1
         Number of batches to accumulate gradients over before updating weights
+    checkpoint_file : Optional[str], default=None
+        Checkpoint to load when resuming or starting from path_to_base_model.
+        Full path, or filename inside ``<path_to_base_model>/checkpoints``.
+        If None, uses ``last.ckpt``.
 
     """
 
@@ -301,6 +320,7 @@ def run_training(
         sampler=sampler,
         label_key=sample_by,
         seed=data_seed,
+        split_indices=split_indices,
         model_input_size=model_input_size,
         output_dir=output_dir,
     )
@@ -489,7 +509,7 @@ def configure_callbacks(save_id, args):
                 patience=3,
                 mode='min',
             )
-    elif model_type == 'Base':
+    elif (model_type == 'Base') | (model_type == 'Lite'):
         early_stopping_callback = EarlyStopping(
             monitor='train/loss_step',
             patience=50,
@@ -536,7 +556,12 @@ def configure_logger(args):
         Configured Weights & Biases logger.
     """
     # create a logger to log training progress
-    wandb_logger = WandbLogger(log_model=True)
+    # log_model=True uploads every checkpoint to wandb at the end of fit. Set
+    # TRIPSO_WANDB_LOG_MODEL=0 to keep metrics online but skip that upload: when one
+    # multi-GPU job trains two stages, rank 0 blocks in the upload while rank 1 waits
+    # in the next stage's first collective, and NCCL's 1800 s watchdog kills the job.
+    log_model = os.environ.get('TRIPSO_WANDB_LOG_MODEL', '1') != '0'
+    wandb_logger = WandbLogger(log_model=log_model)
 
     wandb_logger.experiment.config.update(
         {
@@ -664,6 +689,10 @@ def configure_model(args):
         model = gpTransformerBase(**common_params)
         return model
 
+    if args['model_type'] == 'Lite':
+        model = gpTransformerLite(**common_params)
+        return model
+
     if (args['model_type'] == 'Global') | (args['model_type'] == 'Global_LoRA'):
         model = gpTransformerGlobal(**common_params, **global_params)
         return model
@@ -715,6 +744,10 @@ def configure_lightning_module(model, args):
         pl_model = gpBase(**common_params)
         return pl_model
 
+    if args['model_type'] == 'Lite':
+        pl_model = gpLite(**common_params)
+        return pl_model
+
     if args['model_type'] == 'Global':
         pl_model = gpGlobal(**common_params, **global_params)
         return pl_model
@@ -745,7 +778,7 @@ def load_from_ckpt(mode, pl_model, args):
         Lightning module to load weights into.
     args : dict
         Arguments dictionary with checkpoint path information including
-        'output_dir', 'tissue', 'model_type', and 'path_to_base_model'.
+        'output_dir', 'model_type', 'path_to_base_model' and 'checkpoint_file'.
 
     Returns
     -------
@@ -754,31 +787,31 @@ def load_from_ckpt(mode, pl_model, args):
     """
 
     output_dir = args['output_dir']
-    tissue = args['tissue']
     model_type = args['model_type']
     if args['path_to_base_model'] is None:
         path_to_base_model = output_dir
     else:
         path_to_base_model = args['path_to_base_model']
 
+    latest_ckpt = resolve_checkpoint(path_to_base_model, args['checkpoint_file'])
+
     if mode == 'resume_training':
-        # latest_ckpt = find_latest_file(output_dir, tissue, model_type)
-        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
+        print('Loading checkpoint', latest_ckpt)
 
         if model_type == 'Global':
             pl_model = gpGlobal.load_from_checkpoint(latest_ckpt, map_location='cpu')
+        elif model_type == 'Lite':
+            pl_model = gpLite.load_from_checkpoint(latest_ckpt, map_location='cpu')
         else:
             pl_model = gpBase.load_from_checkpoint(latest_ckpt, map_location='cpu')
 
         return pl_model
 
     elif mode == 'sequential':
-        # latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-        # checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
         checkpoint = torch.load(
             latest_ckpt, map_location=torch.device('cpu'), weights_only=False
         )
+        log_checkpoint(latest_ckpt, checkpoint)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
         # freeze base model
@@ -796,13 +829,10 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif mode == 'finetune_gene_encoder':
-        # latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-        # checkpoint_path = os.path.join(path_to_base_model, latest_ckpt)
-        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
-
         checkpoint = torch.load(
             latest_ckpt, map_location=torch.device('cpu'), weights_only=False
         )
+        log_checkpoint(latest_ckpt, checkpoint)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
         # freeze base model
@@ -821,11 +851,6 @@ def load_from_ckpt(mode, pl_model, args):
         return pl_model
 
     elif (mode == 'finetune') | (mode == 'finetune_global'):
-        # try:
-        #     latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Global')
-        # except FileNotFoundError:
-        #     latest_ckpt = find_latest_file(path_to_base_model, tissue, 'Base')
-
         warnings.warn(
             'Finetuning global model from base model'
             'finetune_lr parameter is deprecated.'
@@ -833,20 +858,19 @@ def load_from_ckpt(mode, pl_model, args):
             '{"gene_encoder": lr, "multi_gp_encoder": lr, "default": lr}'
         )
 
-        latest_ckpt = os.path.join(path_to_base_model, 'checkpoints/last.ckpt')
-
         checkpoint = torch.load(
             latest_ckpt, map_location=torch.device('cpu'), weights_only=False
         )
+        log_checkpoint(latest_ckpt, checkpoint)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
 
         return pl_model
 
     elif mode == 'learn_new_gp':
-        checkpoint_path = find_latest_file(path_to_base_model, tissue, model_type)
         checkpoint = torch.load(
-            checkpoint_path, map_location=torch.device('cpu'), weights_only=False
+            latest_ckpt, map_location=torch.device('cpu'), weights_only=False
         )
+        log_checkpoint(latest_ckpt, checkpoint)
         pl_model.load_state_dict(checkpoint['state_dict'], strict=False)
         pl_model.output_dir = output_dir
 
@@ -869,7 +893,7 @@ def load_from_ckpt(mode, pl_model, args):
         # unfreeze new GP
         for i in gp_idx:
             for name, param in pl_model.model.named_parameters():
-                if f'multi_gp_encoder.encoder.{i}' in name:
+                if f'multi_gp_encoder.encoder.{i}.' in name:
                     param.requires_grad = True
 
         return pl_model

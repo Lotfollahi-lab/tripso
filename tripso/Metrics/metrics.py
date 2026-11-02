@@ -2,6 +2,7 @@ import math
 from functools import partial
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import ot
@@ -494,7 +495,27 @@ def compute_mmd(X, Y, gammas):
     return pd.DataFrame({'gamma': gammas, 'mmd': mmd})
 
 
-def compute_sinkhorn(adata1, adata2, epsilons):
+@partial(jax.jit, static_argnames=('batch_size',))
+def _sinkhorn_divergence_jit(x, y, epsilon, batch_size=None):
+    """Jitted Sinkhorn divergence, returning only arrays.
+
+    Defined once at module level so repeated calls with the same input shapes
+    reuse one compiled executable. Calling ``sinkhorn_divergence`` eagerly
+    instead recompiles its solver loops on every call, and XLA's CPU JIT never
+    releases that code, so long loops (e.g. bootstraps) eventually fail with
+    'JIT session error: Cannot allocate memory'.
+    """
+    div, out = sinkhorn_divergence(
+        pointcloud.PointCloud, x=x, y=y, epsilon=epsilon, batch_size=batch_size
+    )
+    converged = jnp.stack([jnp.asarray(c) for c in out.converged])
+    n_iters = jnp.stack([jnp.asarray(n) for n in out.n_iters])
+    return div, converged, n_iters
+
+
+def compute_sinkhorn(
+    adata1, adata2, epsilons, scale_cost=1.0, batch_size=None, verbose=True
+):
     """Compute Sinkhorn divergence between two datasets.
 
     Parameters
@@ -505,15 +526,78 @@ def compute_sinkhorn(adata1, adata2, epsilons):
         Second dataset.
     epsilons : list of float
         Regularization parameters to test.
+    scale_cost : float or str, optional
+        Rescale the cost matrices so that ``cost /= scale_cost`` (default: 1.0,
+        no rescaling). A string ('mean', 'median', 'max_cost', 'max_norm',
+        'max_bound') is evaluated once on the adata1-adata2 cost, and that
+        factor is shared by all three terms of the divergence so they stay on
+        the same scale.
+    batch_size : int, optional
+        If set, cost matrices are computed on the fly, ``batch_size`` rows at a
+        time, instead of being held in memory. Slower, but avoids running out
+        of memory on large datasets. 'median' scaling is not supported in this
+        mode.
+    verbose : bool, optional
+        Print the convergence status for each epsilon (default: True).
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with 'epsilon' and 'sinkhorn_divergence' columns.
+        DataFrame with 'epsilon', 'sinkhorn_divergence', 'converged' and
+        'n_iters' columns. 'converged' is True only if all three Sinkhorn
+        problems converged; 'n_iters' is the largest iteration count of the
+        three.
+
+    Notes
+    -----
+    One XLA compilation is made per distinct pair of input shapes (and
+    ``batch_size``), then reused. A process that loops over many differently
+    sized comparisons still accumulates compiled code; call
+    ``jax.clear_caches()`` between comparisons, or run each in its own process.
     """
-    x, y = jnp.array(adata1.X), jnp.array(adata2.X)
-    results = [
-        sinkhorn_divergence(pointcloud.PointCloud, x=x, y=y, epsilon=eps)[0]
-        for eps in epsilons
-    ]
-    return pd.DataFrame({'epsilon': epsilons, 'sinkhorn_divergence': results})
+
+    def to_dense_float32(X):
+        X = X.toarray() if issparse(X) else X
+        return jnp.asarray(np.asarray(X, dtype=np.float32))
+
+    x, y = to_dense_float32(adata1.X), to_dense_float32(adata2.X)
+
+    if isinstance(scale_cost, str):
+        geom_xy = pointcloud.PointCloud(
+            x, y, scale_cost=scale_cost, batch_size=batch_size
+        )
+        scale_cost = float(1.0 / geom_xy.inv_scale_cost)
+        del geom_xy
+        if verbose:
+            print(f'Cost matrices scaled by 1/{scale_cost:.4g}')
+
+    if scale_cost != 1.0:
+        # For the squared Euclidean cost, ||x - y||^2 / s equals
+        # ||x / sqrt(s) - y / sqrt(s)||^2. Scaling the data rather than passing
+        # `scale_cost` to PointCloud keeps the factor out of the jit cache key,
+        # where every new value would trigger a recompilation.
+        x = x / np.sqrt(scale_cost)
+        y = y / np.sqrt(scale_cost)
+
+    rows = []
+    for eps in epsilons:
+        div, converged, n_iters = _sinkhorn_divergence_jit(
+            x, y, eps, batch_size=batch_size
+        )
+        converged = [bool(c) for c in np.asarray(converged)]
+        n_iters = [int(n) for n in np.asarray(n_iters)]
+        rows.append(
+            {
+                'epsilon': eps,
+                'sinkhorn_divergence': float(div),
+                'converged': all(converged),
+                'n_iters': max(n_iters),
+            }
+        )
+        if verbose:
+            print(
+                f'epsilon={eps}: converged (xy, xx, yy) = {tuple(converged)}, '
+                f'n_iters = {tuple(n_iters)}'
+            )
+
+    return pd.DataFrame(rows)

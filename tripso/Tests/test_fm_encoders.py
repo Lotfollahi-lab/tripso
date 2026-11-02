@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import unittest
 
@@ -161,6 +162,80 @@ class TestFmEncoderBase(unittest.TestCase):
                 self.assertIsInstance(optimizers[0], torch.optim.Optimizer)
             else:
                 self.assertIsInstance(optimizers, torch.optim.Optimizer)
+
+
+class TestFmBaselineScGPT(unittest.TestCase):
+    @unittest.skipUnless(
+        importlib.util.find_spec('scgpt') is not None, 'scGPT not installed'
+    )
+    def test_forward_scgpt(self):
+        from tripso.Models.baselines import fmBaseline
+
+        gpdb = pd.read_csv(
+            '/lustre/scratch126/cellgen/lotfollahi/mm58/gplearner_reproducibility'
+            '/02.1_benchmarking_repeat/gpdb_progeny_200.csv'
+        )
+        gp_inputs = [gpdb.columns[0]]
+        model = fmBaseline(
+            fm_encoder_pkg='scgpt',
+            fm_encoder_name='/lustre/scratch126/cellgen/lotfollahi/hk11/scGPT_models/scGPT_human',
+            database=gpdb,
+            gp_inputs=gp_inputs,
+            do_ensembl_conversion=True,
+        )
+        batch = {'input_ids': torch.randint(0, 20000, (2, 512))}
+        output = model(batch)
+        self.assertIn('z', output)
+        self.assertEqual(output['z'].shape[:2], torch.Size([2, len(gp_inputs)]))
+
+
+class TestFmBaselineTahoe(unittest.TestCase):
+    @unittest.skipUnless(
+        importlib.util.find_spec('tahoe_x1') is not None, 'tahoe-x1 not installed'
+    )
+    def test_forward_tahoe(self):
+        from tripso.Models.baselines import fmBaseline
+
+        gpdb = pd.read_csv(
+            '/lustre/scratch126/cellgen/lotfollahi/mm58/gplearner_reproducibility'
+            '/02.1_benchmarking_repeat/gpdb_progeny_200.csv'
+        )
+        gp_inputs = [gpdb.columns[0]]
+        model = fmBaseline(
+            fm_encoder_pkg='tahoe',
+            fm_encoder_name='/lustre/scratch126/cellgen/lotfollahi/mm58/gplearner_reproducibility/02.2_benchmark_gene_emb_ablation/job_scripts/hf_cache/models--tahoebio--Tahoe-x1/snapshots/d218a580b9c2500ae9dfc8367a398545e6f017a8/70m-model',
+            database=gpdb,
+            gp_inputs=gp_inputs,
+            do_ensembl_conversion=False,
+        )
+        batch = {'input_ids': torch.randint(0, 20000, (2, 512))}
+        output = model(batch)
+        self.assertIn('z', output)
+        self.assertEqual(output['z'].shape[:2], torch.Size([2, len(gp_inputs)]))
+
+
+class TestFmBaselineState(unittest.TestCase):
+    @unittest.skipUnless(
+        importlib.util.find_spec('state') is not None, 'arc-state not installed'
+    )
+    def test_forward_state(self):
+        from tripso.Models.baselines import fmBaseline
+
+        gpdb = pd.read_csv('/path/to/gpdb.csv')
+        gp_inputs = [gpdb.columns[0]]
+        model = fmBaseline(
+            fm_encoder_pkg='state',
+            fm_encoder_name='/path/to/SE-600M/se600m_epoch15.ckpt',
+            protein_embeddings_path='/path/to/SE-600M/protein_embeddings.pt',
+            state_hidden_size=512,
+            database=gpdb,
+            gp_inputs=gp_inputs,
+            do_ensembl_conversion=False,
+        )
+        batch = {'input_ids': torch.randint(0, 20000, (2, 512))}
+        output = model(batch)
+        self.assertIn('z', output)
+        self.assertEqual(output['z'].shape[:2], torch.Size([2, len(gp_inputs)]))
 
 
 if __name__ == '__main__':

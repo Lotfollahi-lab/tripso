@@ -424,6 +424,7 @@ class gpTransformerEncoder(nn.Module):
         output_dim=None,
         no_mask_tokens=[None],
         sparsity=0.0,
+        build_decoder=True,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -496,13 +497,16 @@ class gpTransformerEncoder(nn.Module):
         self.norm = norm_layer(self.output_dim)
         trunc_normal_(self.cls_token, std=0.02)
 
-        # Decoder for masked language modelling
+        # Decoder for masked language modelling.
+        # Skipped when build_decoder=False so a shared body (e.g. gpLiteWrapper)
+        # can supply its own per-GP heads instead of a built-in decoder.
         self.vocab_size = vocab_size
-        decoder_in = self.output_dim
-        decoder_out = n_gp_tokens if self.vocab_size is None else self.vocab_size
+        if build_decoder:
+            decoder_in = self.output_dim
+            decoder_out = n_gp_tokens if self.vocab_size is None else self.vocab_size
 
-        self.decoder = nn.Linear(decoder_in, decoder_out, bias=False)
-        self.decoder_bias = nn.Parameter(torch.zeros(n_gp_tokens))
+            self.decoder = nn.Linear(decoder_in, decoder_out, bias=False)
+            self.decoder_bias = nn.Parameter(torch.zeros(n_gp_tokens))
 
         self.sparsity = sparsity
         if self.sparsity > 0:
@@ -691,6 +695,49 @@ class gpTransformerEncoder(nn.Module):
                   embeddings if return_mean_non_padding is True.
                   (not used in main model, only for baselines)
         """
+        token, x, gene_labels, attn = self.encode(
+            x,
+            gene_labels,
+            masking,
+            attn_mask,
+            return_attention,
+            return_mean_non_padding=return_mean_non_padding,
+        )
+
+        logits_lm = self.decoder(x)
+
+        output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
+
+        if attn is not None:
+            #  returns full attention matrix not just CLS
+            output['attention'] = attn
+
+        if return_gene_embeddings:
+            output['gene_embeddings'] = x[:, 1:, :]
+
+        return output
+
+    def encode(
+        self,
+        x,
+        gene_labels,
+        masking,
+        attn_mask,
+        return_attention,
+        return_mean_non_padding=False,
+    ):
+        """Run the transformer body (everything except the MLM decoder head).
+
+        Shared by ``forward`` and by external wrappers that supply their own
+        per-GP decoder heads (e.g. ``gpLiteWrapper``).
+
+        Returns:
+            tuple: ``(token, x, gene_labels, attn)`` where ``token`` is the
+            CLS/pooled embedding, ``x`` is the normed token sequence (post
+            ``return_mean_non_padding`` slicing, matching legacy behaviour),
+            ``gene_labels`` are the (possibly masked) labels with a CLS entry
+            prepended, and ``attn`` is the last block's attention or ``None``.
+        """
         # Optionally reduce dimensions
         if hasattr(self, 'dim_red') and (self.output_dim != self.embed_dim):
             x = self.dim_red(x)
@@ -727,18 +774,7 @@ class gpTransformerEncoder(nn.Module):
             # set to all 0 if no GP genes --> avoids nan values
             token[mask_non_padding.sum(dim=1) == 0] = 0
 
-        logits_lm = self.decoder(x)
-
-        output = {'cls': token, 'logits_lm': logits_lm, 'gene_labels': gene_labels}
-
-        if attn is not None:
-            #  returns full attention matrix not just CLS
-            output['attention'] = attn
-
-        if return_gene_embeddings:
-            output['gene_embeddings'] = x[:, 1:, :]
-
-        return output
+        return token, x, gene_labels, attn
 
     def get_intermediate_layers(self, x, gene_labels, n=1):
         x, gene_labels = self.prepare_tokens(x, gene_labels)

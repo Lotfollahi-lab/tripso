@@ -11,6 +11,7 @@ from pytorch_lightning import LightningDataModule
 from torch.utils.data import (
     DataLoader,
     Dataset,
+    Subset,
     WeightedRandomSampler,
     random_split,
 )
@@ -224,6 +225,12 @@ class txDataModule(LightningDataModule):
             test_dataloader. Options: 'train', 'val', 'test'.
             Defaults to 'val'. This is used for applying the test step on
             a different split after model training.
+        split_indices (str or Mapping, optional): Precomputed train/val/test
+            split, replacing the default random 80/10/10. Either a path to an
+            .npz holding integer arrays under the keys 'train', 'val' and
+            'test', or an already-loaded mapping with those keys. Values are
+            positions into the tokenized dataset as stored on disk. When None
+            (default) the random split is used and behaviour is unchanged.
     """
 
     def __init__(
@@ -243,12 +250,14 @@ class txDataModule(LightningDataModule):
         seed=0,
         model_input_size=None,
         output_dir='./',
+        split_indices=None,
         # development only:
         frac_for_training=1,
         data_split_to_pass_to_test_step='val',
     ):
         super().__init__()
         self.folder = folder
+        self.split_indices = split_indices
         self.adata_path = adata_path
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -293,6 +302,52 @@ class txDataModule(LightningDataModule):
             adata_path = Path(self.adata_path)
             assert adata_path.exists(), 'adata path does not exist'
 
+    def _assign_fixed_split(self, dataset_size):
+        """Build train/val/test Subsets from a precomputed index file.
+
+        Parameters
+        ----------
+        dataset_size : int
+            Length of self.dataset, used to bounds-check the indices.
+        """
+        split_indices = self.split_indices
+        if isinstance(split_indices, (str, Path)):
+            split_indices = np.load(str(split_indices))
+
+        parts = {}
+        for key in ('train', 'val', 'test'):
+            if key not in split_indices:
+                raise KeyError(f"split_indices is missing the '{key}' key")
+            parts[key] = np.asarray(split_indices[key], dtype=np.int64).ravel()
+
+        stacked = np.concatenate(list(parts.values()))
+        if stacked.size == 0:
+            raise ValueError('split_indices is empty')
+        if stacked.min() < 0 or stacked.max() >= dataset_size:
+            raise ValueError(
+                'split_indices out of range for a dataset of size '
+                f'{dataset_size} (min {stacked.min()}, max {stacked.max()})'
+            )
+        if len(np.unique(stacked)) != len(stacked):
+            raise ValueError('split_indices overlap between train/val/test')
+        if self.frac_for_training != 1 or self.frac_for_generation != 1:
+            raise ValueError(
+                'frac_for_training and frac_for_generation must be 1 when '
+                'split_indices is given; subsample the index file instead'
+            )
+
+        self.train_dataset = Subset(self.dataset, parts['train'].tolist())
+        self.val_dataset = Subset(self.dataset, parts['val'].tolist())
+        self.test_dataset = Subset(self.dataset, parts['test'].tolist())
+
+        self.train_size = len(parts['train'])
+        self.val_size = len(parts['val'])
+
+        print(
+            f'Fixed split: train={self.train_size} val={self.val_size} '
+            f"test={len(parts['test'])} (of {dataset_size} cells)"
+        )
+
     def setup(self, stage=None):
         # Load the tokenized dataset
         tokenized_dataset = tkDataset(
@@ -324,35 +379,41 @@ class txDataModule(LightningDataModule):
         # Calculate lengths for train, validation, and test sets
         dataset_size = len(self.dataset)
 
-        train_size = int(
-            0.8 * dataset_size * self.frac_for_training * self.frac_for_generation
-        )  # 80% for training
-        print(f'Training on {train_size} samples')
-        self.train_size = train_size
+        if self.split_indices is not None:
+            # Precomputed split (e.g. held-out batch or donor). Positions index
+            # the tokenized dataset in its on-disk order, which tkDataset
+            # preserves when filter_key is None.
+            self._assign_fixed_split(dataset_size)
+        else:
+            train_size = int(
+                0.8 * dataset_size * self.frac_for_training * self.frac_for_generation
+            )  # 80% for training
+            print(f'Training on {train_size} samples')
+            self.train_size = train_size
 
-        val_size = int(
-            0.1 * dataset_size * self.frac_for_generation
-        )  # 10% for validation
-        self.val_size = val_size
+            val_size = int(
+                0.1 * dataset_size * self.frac_for_generation
+            )  # 10% for validation
+            self.val_size = val_size
 
-        test_size = int(
-            (dataset_size - int(0.8 * dataset_size) - val_size)
-            * self.frac_for_generation
-        )  # Remaining for test
+            test_size = int(
+                (dataset_size - int(0.8 * dataset_size) - val_size)
+                * self.frac_for_generation
+            )  # Remaining for test
 
-        # # FOR DEBUGGING
-        # train_size = 100
-        # val_size = 100
-        # test_size = 100
+            # # FOR DEBUGGING
+            # train_size = 100
+            # val_size = 100
+            # test_size = 100
 
-        discard = dataset_size - train_size - val_size - test_size
+            discard = dataset_size - train_size - val_size - test_size
 
-        # Assign Train/val split(s) for use in Dataloaders
-        self.train_dataset, self.val_dataset, self.test_dataset, _ = random_split(
-            self.dataset,
-            [train_size, val_size, test_size, discard],
-            generator=torch.Generator().manual_seed(self.seed),  # (42),
-        )
+            # Assign Train/val split(s) for use in Dataloaders
+            self.train_dataset, self.val_dataset, self.test_dataset, _ = random_split(
+                self.dataset,
+                [train_size, val_size, test_size, discard],
+                generator=torch.Generator().manual_seed(self.seed),  # (42),
+            )
 
         # Optionally store lengths for use with LengthGroupedSampler
         if self.use_length_sampler:
