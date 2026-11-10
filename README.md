@@ -16,4 +16,7 @@
 
 ## Citation
 
-If you use Tripso in your research, please cite our work (citation to be added).
+If you use Tripso in your research, please cite our [preprint](https://www.biorxiv.org/content/10.64898/2026.03.24.713961v1.full):
+
+    Moullet, M., Isobe T., Vahidi A., Leonardi C. et al. Self-supervised learning for a gene program-centric view of cell states. bioRxiv 2026.03.24.713961 (2026) doi:10.64898/2026.03.24.713961.
+  
