@@ -453,6 +453,7 @@ def run_training_from_select_gps(
         limit_train_batches=limit_train_batches,
         limit_val_batches=limit_val_batches,
         val_check_interval=val_check_interval,
+        accumulate_grad_batches=accumulate_grad_batches,
     )
 
     # Train the model

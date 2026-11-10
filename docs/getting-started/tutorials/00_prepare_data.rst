@@ -5,6 +5,7 @@ Data Preparation
 
 .. literalinclude:: 00_prepare_data.py
 
-:download: `00.0_get_regulons.R`
+:download:`00.0_get_regulons.R`
 
 .. literalinclude:: 00.0_get_regulons.R
+   :language: r
